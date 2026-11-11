@@ -9,6 +9,50 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
 
 ## Right now
 
+- **Fourth device run (23:00, run 24: the optimised core with the
+  per-thread reader fix, Turnip).** Loads and plays: the `XObject::Wait`
+  crash is gone. Then the scene at the trader (Murgo) never moved on: the
+  picture stays live (20 to 36 frames a second, 4,500 draws a frame), no
+  watchdog report, no host crash; holding LT (the prompt on screen) through
+  adb changed nothing. Run 18 passed this scene, run 13 froze a little later
+  with every game thread waiting. Not explained: the log has nothing,
+  because the report of thread states only comes when no frame is presented.
+  **Now it can be asked for:** `adb shell touch
+  /sdcard/Android/data/<package>/files/compose/dump_threads` and within a
+  second `xe.log` has every guest thread, what it runs or waits on. Do this
+  first at the next stall, twice a few seconds apart.
+- **Where the time goes (simpleperf, 12 s at that scene; kept on the
+  desktop, `device-logs/run4/prof_*.txt`). The game is CPU-bound, not
+  GPU-bound:**
+  - JIT'd guest code 52%, `libe.so` 24%, libc 15%, Turnip 4.7%, the dynamic
+    linker 2.7%.
+  - By thread: one game thread 38% (a full core), the game's audio thread
+    28% (all of it guest code: the title mixes its audio itself, hottest
+    function `sub_82C62548` at 8% of everything), the GPU command thread
+    22% (half a core), the rest small.
+  - The busy game thread is a polling loop: `NtYieldExecution` (export 257)
+    between `RtlEnterCriticalSection`/`Leave`. A fifth of its time is the
+    yield itself: `YieldCurrentThread`, three `std::mutex` round trips, the
+    fiber switch, `clock_gettime`, and until now `getpagesize` (3.8% of the
+    thread) and `clock_getres` on every pass (both cached now).
+  - `tlsdesc_resolver_dynamic` is 6.8% of that thread: every `thread_local`
+    read in `libe.so` goes through the linker's slow resolver (a dlopen'ed
+    library). Worth fixing for every title: one TLS block or a register
+    for the scheduler's per-thread state. Not done.
+  - `PpcVrsqrtefpLane` (a VMX instruction done in a C helper) shows on a
+    third guest thread.
+  - **So for 60 fps the lever is guest CPU cost (the JIT, the scheduler's
+    yield path, the audio thread), not tiled rendering.** Frame time is
+    not measured exactly yet: the frame counter gave 600 frames in 16.5 s
+    and in 28.8 s at this scene.
+- **Skipped draws, now named** (run 24's new log line): vertex shaders
+  `C30A97D946FA2BE4` and `FB68A7F2301210E1`, host vertex shader type 6,
+  six textures and three samplers against a slot layout of none; `layout
+  stale flag true, pipeline handle null, translated true`, async shader
+  compilation on. The draw arrives while the slot's pipeline is still being
+  made (handle null) and the layout was never refreshed: wait for, or
+  refresh, the layout before the bind instead of dropping the draw.
+
 - **STOP: run 22's APK cannot load Fable II past character selection.**
   Second device run (2026-11-11 22:18, run 22, commit `60a088e`, the
   bundled Turnip in use: `driverID: MesaTurnip`, Mesa 27.0.0-devel). At
@@ -376,6 +420,12 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-11 (desktop, 23:15).** Fourth device run profiled on the phone
+  (top of "Right now"). Added the thread dump on request, cached
+  `page_size()` and the clock resolution, made the last per-thread readers
+  never inline (the global lock's cached thread id, the shim string buffer,
+  `SetCurrentThread`, `ThreadState::Bind`). Not built or run yet.
 
 - **2026-11-11 (desktop, end).** Third device run read (run 18 loads into
   play, skipped draws are the emulator's). The package step skips mirrors

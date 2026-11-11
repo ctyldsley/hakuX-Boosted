@@ -81,7 +81,13 @@ void AndroidShutdown() {
 }
 #endif
 
-size_t page_size() { return getpagesize(); }
+// hakuX-Boosted: asked once. getpagesize() was 3.8% of a guest thread that
+// polls and yields (device profile, Fable II): the scheduler and the heaps
+// ask on every pass, and bionic's is a function call into sysconf.
+size_t page_size() {
+  static const size_t size = static_cast<size_t>(getpagesize());
+  return size;
+}
 size_t allocation_granularity() { return page_size(); }
 
 uint32_t ToPosixProtectFlags(PageAccess access) {
