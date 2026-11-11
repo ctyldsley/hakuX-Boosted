@@ -169,8 +169,6 @@ fun LibraryScreen(
             )
           }
         }
-        // hakuX-Boosted: the Xbox 360 side's library (boosted/X360.kt)
-        com.rfandango.haku_x.boosted.X360LibraryButton()
         // the folders listed again, as a pull does (a controller can't pull)
         IconButton(onClick = vm::refresh, modifier = Modifier.padding(start = 4.dp)) {
           Icon(Icons.Filled.Refresh, contentDescription = stringResource(R.string.library_refresh))
@@ -179,6 +177,8 @@ fun LibraryScreen(
           Icon(Icons.Filled.Settings, contentDescription = stringResource(R.string.settings_title))
         }
       }
+      // hakuX-Boosted: the Xbox 360 titles wait for "All files access" (boosted/X360.kt)
+      com.rfandango.haku_x.boosted.X360AccessBanner()
       // The pull's indicator follows the refresh (under the loading dialog):
       // it only goes once isRefreshing has been true.
       PullToRefreshBox(
@@ -343,9 +343,16 @@ private fun GameList(
             if (disc != null && disc.titleId != 0L) {
               IdLine(disc, idStyle)
             }
+            // hakuX-Boosted: an Xbox 360 title's mark and ID (boosted/X360.kt)
+            com.rfandango.haku_x.boosted.X360Badge(game.uri, idStyle)
           }
         }
-        if (menuFor == game.uri) {
+        // hakuX-Boosted: an Xbox 360 title has the 360 side's menu instead (boosted/X360.kt)
+        val x360 = com.rfandango.haku_x.boosted.X360.title(game.uri) != null
+        if (menuFor == game.uri && x360) {
+          com.rfandango.haku_x.boosted.X360GameMenu(game.uri, game.title) { menuFor = null }
+        }
+        if (menuFor == game.uri && !x360) {
           // the key its settings use: its savestates' (SaveStateStore) and its mods' (mods/)
           val key = remember(game.uri, disc) {
             GameOverrides.gameKey(disc?.titleId ?: 0L, disc?.version ?: 0L, game.relativePath)

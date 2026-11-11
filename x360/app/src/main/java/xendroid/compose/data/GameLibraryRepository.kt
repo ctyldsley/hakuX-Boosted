@@ -59,6 +59,42 @@ class GameLibraryRepository(
         return scanRealPathLocked(dir)
     }
 
+    /**
+     * hakuX-Boosted: the games under several folders, for a host library that has its own
+     * folder list (hakuX's; core/HostApp.kt). As [scan], with two differences: a root that
+     * can't be listed is skipped rather than failing the scan, and [acceptIso] decides
+     * whether a disc image is an Xbox 360 one (the host's folders hold the original Xbox's
+     * images too, and every .iso would otherwise be listed here under its file name).
+     */
+    suspend fun scanRoots(roots: List<String>, acceptIso: (File) -> Boolean): List<Game> =
+        withContext(Dispatchers.IO) {
+            scanMutex.withLock {
+                metadataCache.load()
+                val games = ArrayList<Game>()
+                val visited = HashSet<String>()
+                isoFilter = acceptIso
+                try {
+                    for (path in roots) {
+                        val root = File(path)
+                        val children = root.listFiles() ?: continue
+                        val canonical = canonicalOf(root) ?: continue
+                        // one root inside another: its games are listed already
+                        if (!visited.add(canonical)) continue
+                        collectGames(children, depth = 1, visited, games)
+                    }
+                } finally {
+                    isoFilter = null
+                }
+                val unique = games.distinctBy { it.launchUri }.sortedBy { it.name.lowercase() }
+                metadataCache.retainOnly(unique.mapTo(HashSet()) { it.launchUri })
+                metadataCache.save()
+                unique
+            }
+        }
+
+    /** hakuX-Boosted: set for the length of a [scanRoots], under [scanMutex]. */
+    private var isoFilter: ((File) -> Boolean)? = null
+
     /** Resolve a game's title id for the per-game config path (boot-free).
      *  MUST run off the main thread: these mmap the file. */
     suspend fun readTitleId(ctx: Context, game: Game): String? = withContext(Dispatchers.IO) {
@@ -194,6 +230,8 @@ class GameLibraryRepository(
         return when (GameFormat.fromFileName(name)) {
             GameFormat.ISO, GameFormat.ZAR -> {
                 val fmt = GameFormat.fromFileName(name)!!
+                // hakuX-Boosted: not an Xbox 360 disc (scanRoots)
+                if (fmt == GameFormat.ISO && isoFilter?.invoke(child) == false) return null
                 val path = child.absolutePath
                 cachedOrExtract(path, signatureOf(child), fmt) {
                     val meta = metadata.readXexMetaPath(path, fmt)

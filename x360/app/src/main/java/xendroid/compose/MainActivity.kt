@@ -60,7 +60,8 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        if (!sessionRotated.getAndSet(true)) {
+        // hakuX-Boosted: the flag is shared with the host's start of the session (core/HostApp.kt)
+        if (!xendroid.compose.core.HostApp.sessionStarted.getAndSet(true)) {
             val appContext = applicationContext
 
             thread(name = "SessionLogs") {
@@ -76,6 +77,9 @@ class MainActivity : ComponentActivity() {
         val container = AppContainer(applicationContext)
 
         enableEdgeToEdge()
+
+        // hakuX-Boosted: one of this side's screens on its own, for the host's menus
+        if (xendroid.compose.core.HostApp.show(this, container)) return
 
        setContent {
             xendroidTheme {

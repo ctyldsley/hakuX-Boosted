@@ -133,7 +133,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
   /** Back on screen: the games folders may have changed in the settings, the dashboard come or gone (Hard disk). */
   fun onResume() {
-    if (prefs.gamesFolders != scannedFolders) {
+    // hakuX-Boosted: also once "All files access" changed, which the Xbox 360 titles wait for
+    if (prefs.gamesFolders != scannedFolders || com.rfandango.haku_x.boosted.X360.accessChanged()) {
       refresh()
     }
     _state.update { it.copy(dashboard = Dashboard.installed(hddRoot)) }
@@ -207,12 +208,18 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(read = i + 1) }
       }
       val icons = withContext(Dispatchers.IO) { loadIcons(info) }
+      // hakuX-Boosted: the Xbox 360 titles in the same folders (boosted/X360.kt): the ones
+      // listed above get their names and icons, the forms this scan doesn't list are added
+      val x360 = withContext(Dispatchers.IO) {
+        com.rfandango.haku_x.boosted.X360.scanLibrary(app, ready, games) { (info[it.uri]?.titleId ?: 0L) != 0L }
+      }
+      com.rfandango.haku_x.boosted.X360.show(x360)
       _state.update { s ->
         s.copy(
           loading = false,
-          games = sorted(games.map { g -> info[g.uri]?.title?.let { g.copy(title = it) } ?: g }),
+          games = sorted((games + x360.extra).map { g -> (x360.names[g.uri] ?: info[g.uri]?.title)?.let { g.copy(title = it) } ?: g }),
           info = info.toMap(),
-          icons = icons,
+          icons = icons + x360.icons,
         )
       }
     }
