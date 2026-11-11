@@ -126,6 +126,11 @@ hakuX's core, then the APK with both cores, and checks what the APK holds.
 A warm run takes about 12 minutes. By hand on a desktop:
 `boosted/README.md`.
 
+**Installing a build:** debug APKs are signed with the fork's own debug key
+(`boosted/android/signing`) from the build after run 13, so each installs
+over the last (`adb install -r`). Run 13's APK was signed with a runner's
+throwaway key and has to be uninstalled once.
+
 **In a cloud session:**
 - The container cannot reach Google's Android SDK host, so there is no
   local NDK or Gradle build. Push and read the Actions run.

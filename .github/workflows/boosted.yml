@@ -115,6 +115,14 @@ jobs:
           python3 boosted/tools/fetch-turnip.py
           python3 boosted/tools/fetch-turnip.py --check || true
 
+      # One debug key for every build (boosted/android/signing): a runner's own
+      # is new each run, and a build signed with another key can't be installed
+      # over the last one without uninstalling it, saves and settings included.
+      - name: The fork's debug signing key
+        run: |
+          mkdir -p "$HOME/.android"
+          cp boosted/android/signing/debug.keystore "$HOME/.android/debug.keystore"
+
       - name: Build the debug APK
         working-directory: android
         run: |
