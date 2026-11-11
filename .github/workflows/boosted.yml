@@ -156,7 +156,14 @@ jobs:
                   if line.startswith('CMAKE_BUILD_TYPE'):
                       print(path, line.strip())
           if not found:
-              print('::warning::no compile command found for the 360 core')
+              print('::error::no compile command found for the 360 core')
+              raise SystemExit(1)
+          # The job fails unless the core is the optimized one: -O3 the last
+          # -O flag, ThinLTO on, and xenia's Release configuration.
+          last_o = [f for f in flags if f.startswith('-O')][-1:]
+          if last_o != ['-O3'] or '-flto=thin' not in flags:
+              print('::error::the 360 core is not built -O3 with ThinLTO:', ' '.join(flags))
+              raise SystemExit(1)
           PY
 
       - name: What the APK holds
