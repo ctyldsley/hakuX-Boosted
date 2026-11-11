@@ -19,6 +19,14 @@ for each user to find. The 360 side's counterpart of hakuX's `mods/`.
   user turns one on). Only fixes belong here enabled: a patch that changes
   how the game looks or plays ships disabled, for the user to choose.
 
+- `enable/<TITLEID>.txt`: names of patches from the bundled catalog
+  (xenia-canary's) that are on by default for the title, one per line. Each
+  of the title's catalog files is installed with those patches enabled,
+  unless the user already has that file (they have toggled something).
+  For patches that are known to help the title on a phone and that the user
+  can turn off again in the Game patches screen; say in the file what each
+  costs.
+
 `python3 boosted/tools/title-info.py <TITLEID or name>` prints what is
 already known about a title: its entry in Xenia's compatibility database,
 xenia-canary's patches for it, and what is shipped here.

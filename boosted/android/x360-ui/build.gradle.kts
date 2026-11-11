@@ -38,6 +38,10 @@ val syncTitleDefaults = tasks.register<Sync>("syncTitleDefaults") {
     include("*.patch.toml")
     into("patches")
   }
+  from(rootProject.file("../boosted/x360-titles/enable")) {
+    include("*.txt")
+    into("enable")
+  }
   into(titleDefaultsGenDir.map { it.dir("title-defaults") })
 }
 tasks.named("preBuild") { dependsOn(syncGamePatches, syncTitleDefaults) }

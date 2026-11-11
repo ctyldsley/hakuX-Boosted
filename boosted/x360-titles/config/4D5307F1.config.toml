@@ -4,9 +4,17 @@
 # per-game config yet (x360/app/.../core/TitleDefaults.kt); the per-game
 # settings screen edits the same file.
 #
-# From XenDroid's notes on the title (x360/GAME_COMPAT.md, 2026-06-13): the
-# float32 depth emulation path instead of native D24_UNORM_S8_UINT gave the
-# best overall result on Adreno 830 with Turnip. Kept per-game: forcing it
+# Both settings are XenDroid's own best-known ones for the title
+# (x360/GAME_COMPAT.md, 2026-06-13).
+
+# The float32 depth emulation path instead of native D24_UNORM_S8_UINT gave
+# the best overall result on Adreno 830 with Turnip. Kept per-game: forcing it
 # globally risks the float32-depth fault other titles have.
 [Vulkan]
 vulkan_depth_unorm24 = false
+
+# The game uses the cache drive for its streaming installer. Off by default
+# on Android; the per-game config is read before the drives are mounted
+# (EmulatorApp::OnInitialize), so it can be set here for this title alone.
+[Storage]
+mount_cache = true

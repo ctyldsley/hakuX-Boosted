@@ -35,7 +35,7 @@ VGT_DMA_SIZE.swap_mode", and this title's ground is drawn as auto-indexed
 patches, whose patch index would have been byte-swapped by a stale swap
 mode before it. The fix is in the tree this fork builds. Step 0 of the plan
 below says whether the ground is still missing; if it is drawn, skip steps
-3 to 5.
+2 to 4.
 
 Xenia Canary's tracker (game-compatibility issue 74) has the same history
 on Windows: "Ground is entirely missing" in January 2021, reported fixed in
@@ -111,20 +111,25 @@ creates multisampled render targets ("This title creates multisampled render
 targets"), so you can see that the patch took, and warns if MSAA and tiled
 mode are on together.
 
-## What this version does
+## What this version does for the title, without being asked
 
-- Ships the best-known per-game config
-  (`boosted/x360-titles/config/4D5307F1.config.toml`):
-  `vulkan_depth_unorm24 = false`, written to the title's per-game config on
-  first launch if you have not made one.
-- Installs the loading-screen crash fix, enabled.
-- Bundles xenia-canary's Fable II patches (as XenDroid does). They match by
-  the executable's hash; the Game of the Year / Platinum edition has the
-  fullest set.
-- Moves Turnip's KGSL contexts off the ringbuffer the compositor preempts
-  (`kgsl_context_priority`).
-- Puts every switch below in the per-game settings screen
-  (`vulkan_depth_unorm24` and `kgsl_context_priority` were config-file only).
+Applied the first time the game is launched, each only if you have not
+already made your own choice for it:
+
+| What | Why | Source |
+|---|---|---|
+| Loading-screen crash fix (a one-instruction title patch) | The game's streaming pool races under real multi-core timing | XenDroid's notes call it required; recovered from its history. Game of the Year executable only |
+| `vulkan_depth_unorm24 = false` | Best overall rendering result on Adreno 830 | XenDroid's notes |
+| `mount_cache = true`, for this title only | The game streams to the cache drive | XenDroid's notes |
+| "Disable MSAA" patch on | Largest single GPU saving on a tile-based GPU, and the precondition for tiled rendering on Adreno 8xx | xenia-canary's patch; expected, not yet measured here. Costs anti-aliasing |
+
+Also in this version: Turnip's KGSL contexts are moved off the ringbuffer
+the compositor preempts (`kgsl_context_priority`), and `xe.log` says once
+whether the title creates multisampled render targets.
+
+Not applied automatically, because it is not known to be safe: Turnip's
+tiled rendering (step 1 below). The frame rate patches ("High Tick Rate",
+"60 FPS") are left for you to turn on once the game holds 30.
 
 ## Test plan
 
@@ -136,25 +141,25 @@ must be selected (360 settings, Vulkan, Custom Vulkan driver).
 
 | Step | Change | Record |
 |---|---|---|
-| 0 | Global settings, Storage: **Mount cache** on. Nothing else. | fps; is the ground drawn; does `xe.log` say "multisampled render targets" |
-| 1 | Game patches: **Disable MSAA** | fps; the MSAA line should be gone from `xe.log` |
-| 2 | Per-game, Vulkan, **Turnip debug mode: None (GMEM)**, with step 1 kept | fps; any hang or device-lost in the first minutes |
-| 3 | Per-game, GPU, **Tessellation diagnostics**: 1, then 2, then 3 (a launch each), then back to 0 | For each: is the ground drawn. Send `xe.log` from the run at 3 |
-| 4 | Per-game, GPU, **Depth float24 convert in pixel shader** on | Is the ground drawn; fps cost |
-| 5 | Step 4 plus **Depth float24 round** on | Is the ground drawn |
-| 6 | Game patches: **High Tick Rate**, then **60 FPS** | Only if steps 1 to 2 hold a steady 30 |
+| 0 | Nothing: launch as installed | fps; is the ground drawn; `xe.log` should not say "multisampled render targets" (the MSAA patch took) |
+| 1 | Per-game, Vulkan, **Turnip debug mode: None (GMEM)** | fps; any hang or device-lost in the first minutes |
+| 2 | Only if the ground is missing. Per-game, GPU, **Tessellation diagnostics**: 1, then 2, then 3 (a launch each), then back to 0 | For each: is the ground drawn. Send `xe.log` from the run at 3 |
+| 3 | Only if the ground is missing. Per-game, GPU, **Depth float24 convert in pixel shader** on | Is the ground drawn; fps cost |
+| 4 | Step 3 plus **Depth float24 round** on | Is the ground drawn |
+| 5 | Game patches: **High Tick Rate**, then **60 FPS** | Only if steps 0 to 1 hold a steady 30 |
+| A/B | Game patches: **Disable MSAA** off, Turnip debug mode back to sysmem | fps against step 0: what the patch is worth |
 
 Notes on the steps:
 
-- **Step 2 is the one that may hang.** If the picture freezes or the app
+- **Step 1 is the one that may hang.** If the picture freezes or the app
   dies, set Turnip debug mode back to sysmem. If `xe.log` still shows the
   multisampled line with the patch on, some pass is still multisampled
   (send the log: it names the sample count).
-- **Step 3** is the most useful one for the ground: its three answers and
+- **Step 2** is the most useful one for the ground: its three answers and
   the logged shader decide what gets fixed next (the table above). With the
   depth test off the ground will draw over things in front of it; that is
   expected.
-- **Step 4** is the existing switch that does what upstream names as the
+- **Step 3** is the existing switch that does what upstream names as the
   remaining lead for the ground (quantising the pixel's depth to the
   console's 24-bit float in the shader). It is not on upstream's list of
   things already tried. It costs fragment shader time and early depth

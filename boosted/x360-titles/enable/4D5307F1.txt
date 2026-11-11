@@ -1,0 +1,9 @@
+# Fable II: patches of the bundled catalog (xenia-canary's) turned on by
+# default, by name, one per line. Applied to every executable of the title
+# the catalog has the patch for.
+#
+# MSAA off: the largest single GPU saving for the title on a tile-based GPU,
+# and what lets Turnip's tiled rendering be tried on Adreno 8xx, where
+# multisampled tiled passes hang (x360/docs/a830-gmem-msaa-plan.md). Costs
+# anti-aliasing. Turn it off again in the title's Game patches screen.
+Disable MSAA (Multi-Sample Anti-Aliasing)
