@@ -2,7 +2,11 @@ package xendroid.compose.core
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -35,6 +39,7 @@ import xendroid.compose.ui.profile.ProfileManagerViewModel
 import xendroid.compose.ui.profile.ProfilesScreen
 import xendroid.compose.ui.settings.PerGameSettingsScreen
 import xendroid.compose.ui.settings.SettingsScreen
+import xendroid.compose.ui.theme.HostLook
 import xendroid.compose.ui.theme.xendroidTheme
 
 /**
@@ -193,6 +198,14 @@ object HostApp {
         val needsTitle = screen == SCREEN_GAME_SETTINGS || screen == SCREEN_GAME_PATCHES ||
             screen == SCREEN_GAME_CONTENT
         if (needsTitle && titleId.isNullOrBlank()) return false
+        // The window as the host's own screens have it: the bars' icons and the colour
+        // behind Compose follow the host's light or dark, not only the phone's.
+        val dark = HostLook.isDark(activity)
+        val bars = if (dark) SystemBarStyle.dark(Color.TRANSPARENT)
+            else SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+        activity.enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
+        activity.window.setBackgroundDrawable(
+            ColorDrawable(if (dark) HostLook.DARK_WINDOW else Color.WHITE))
         activity.setContent {
             xendroidTheme {
                 Screen(container, screen, titleId.orEmpty(), name, onBack = { activity.finish() })

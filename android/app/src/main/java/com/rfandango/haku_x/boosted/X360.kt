@@ -12,6 +12,7 @@ import android.provider.OpenableColumns
 import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -30,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,7 +43,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.rfandango.haku_x.data.Game
+import com.rfandango.haku_x.ui.common.Section
 import com.rfandango.haku_x.ui.common.rememberFocusOnShow
 import java.io.File
 import java.io.FileInputStream
@@ -86,7 +91,9 @@ class X360Library(
  *   Xbox ones (scanLibrary, from LibraryViewModel.refresh), marks them
  *   (X360Badge) and gives them the 360 side's menu (X360GameMenu);
  * - a game image that is a 360 one goes to the 360 core instead of hakuX's
- *   (launchIfXbox360, from LauncherActivity.startCore).
+ *   (launchIfXbox360, from LauncherActivity.startCore);
+ * - the settings have an Xbox 360 section that opens the 360 side's own
+ *   settings screens (X360Settings, from SettingsScreen).
  *
  * The 360 side keeps its own settings, data directory and process (":emu");
  * nothing of hakuX's core is shared with it. It reads games by their real
@@ -534,4 +541,51 @@ fun X360AccessBanner() {
     )
     TextButton(onClick = { X360.requestAccess(context) }) { Text("Allow") }
   }
+}
+
+/**
+ * The settings' Xbox 360 section: the 360 core has its own settings (it is
+ * another emulator, with its own configuration file), profiles, key mapping
+ * and touch controls. Each row opens that screen of the 360 side's, in
+ * hakuX's look, back returning to the settings.
+ */
+@Composable
+fun X360Settings() {
+  if (!X360.available) return
+  val context = LocalContext.current
+  Section("Xbox 360")
+  X360SettingsRow("Graphics, emulation and audio", "The Xbox 360 core's settings, for every game", HostApp.SCREEN_SETTINGS)
+  X360SettingsRow("Touch controls", "Place and size the on-screen controls of Xbox 360 games", HostApp.SCREEN_TOUCH_CONTROLS)
+  X360SettingsRow("Controller buttons", "Which button of a controller is which on the Xbox 360's", HostApp.SCREEN_KEYMAP)
+  X360SettingsRow("Profiles", "The gamer profiles Xbox 360 games sign in with", HostApp.SCREEN_PROFILES)
+  X360SettingsRow("Install content", "Add-ons, title updates and packaged games from a file", HostApp.SCREEN_INSTALL_CONTENT)
+  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+    // read again when back from the system's page for it
+    var granted by remember { mutableStateOf(HostApp.allFilesAccessGranted) }
+    LifecycleResumeEffect(Unit) {
+      granted = HostApp.allFilesAccessGranted
+      onPauseOrDispose {}
+    }
+    ListItem(
+      headlineContent = { Text("All files access") },
+      supportingContent = {
+        Text(
+          if (granted) "Allowed. Xbox 360 games are read by their file paths."
+          else "Not allowed. Xbox 360 games need it to be listed and to start: tap to allow."
+        )
+      },
+      modifier = Modifier.clickable { X360.requestAccess(context) },
+    )
+  }
+  X360SettingsRow("About the Xbox 360 core", "XenDroid, a Xenia fork, and its licences", HostApp.SCREEN_ABOUT)
+}
+
+@Composable
+private fun X360SettingsRow(title: String, summary: String, screen: String) {
+  val context = LocalContext.current
+  ListItem(
+    headlineContent = { Text(title) },
+    supportingContent = { Text(summary) },
+    modifier = Modifier.clickable { X360.openScreen(context, screen) },
+  )
 }

@@ -99,6 +99,7 @@ shows exactly these):
 | `android/app/.../LauncherActivity.kt` | One call to `X360.launchIfXbox360` in `startCore` |
 | `android/app/.../ui/library/LibraryScreen.kt` | Three places: `X360AccessBanner()` above the list, `X360Badge` in a card, `X360GameMenu` for a 360 title's long press |
 | `android/app/.../ui/library/LibraryViewModel.kt` | `refresh` merges `X360.scanLibrary`'s titles, names and icons into its list; `onResume` also lists again when `X360.accessChanged()` |
+| `android/app/.../ui/settings/SettingsScreen.kt` | One call to `X360Settings()`: the Xbox 360 section |
 
 XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 
@@ -118,7 +119,8 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `app/.../core/EmulatorSession.kt` | Their Kotlin wrappers |
 | `app/.../ui/pause/PauseMenuPanel.kt`, `EmulatorHostActivity.kt` | The in-game menu gains "Edit controls" and "Settings": pages of the menu (`MenuPage`), each with its own `PanelNav` |
 | `app/.../gamepad/GamepadEditorScreen.kt` | An `inGame` mode: leaves the game window's orientation and system bars alone, shows the game behind |
-| `app/.../core/Embedded.kt`, `core/TitleDefaults.kt`, `core/BundledDriver.kt`, `core/HostApp.kt`, `ui/pause/InGameSettings.kt` | New files |
+| `app/.../core/Embedded.kt`, `core/TitleDefaults.kt`, `core/BundledDriver.kt`, `core/HostApp.kt`, `ui/pause/InGameSettings.kt`, `ui/theme/HostTheme.kt` | New files |
+| `app/.../ui/theme/Theme.kt` | `xendroidTheme` hands over to `HostTheme` when embedded: hakuX's palette (a copy of hakuX's `ui/theme/Theme.kt`, to be kept in step by hand) and hakuX's light or dark setting |
 
 ## Taking a newer hakuX
 
@@ -128,7 +130,7 @@ git fetch hakux master
 git merge hakux/master
 ```
 
-Conflicts can only come from the eight hakuX files above. If hakuX's native
+Conflicts can only come from the nine hakuX files above. If hakuX's native
 dependencies changed (`android/README.md`'s table), update
 `boosted/tools/fetch-native-deps.sh` to match.
 
@@ -155,5 +157,6 @@ conflict in `third_party/libadrenotools`: take upstream's.
 The library is one (above). Each core keeps its own settings store, per-game
 settings format, data directory and driver choice: the two cores share no
 code, and a setting of one means nothing to the other. hakuX's settings
-screen links to the 360 side's; the 360 side's screens are XenDroid's own
-files, shown one at a time.
+screen has an Xbox 360 section (`X360Settings`) whose rows open the 360
+side's screens; those are XenDroid's own files, shown one at a time
+(`HostApp.show`) in hakuX's colours (`ui/theme/HostTheme.kt`).

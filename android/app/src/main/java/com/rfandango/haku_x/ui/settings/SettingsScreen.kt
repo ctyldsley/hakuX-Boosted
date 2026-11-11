@@ -166,6 +166,9 @@ fun SettingsScreen(
         pickFolder.launch(folders.lastOrNull())
       }
 
+      // hakuX-Boosted: the Xbox 360 core's own settings screens (boosted/X360.kt)
+      com.rfandango.haku_x.boosted.X360Settings()
+
       Section(stringResource(R.string.settings_section_controls))
       ListItem(
         headlineContent = { Text(stringResource(R.string.settings_overlay)) },
