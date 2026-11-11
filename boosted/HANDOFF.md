@@ -122,6 +122,28 @@ The logs are the 360 side's session ZIP
 - **Xenia Canary's patch set is already bundled** (501 files, the
   `x360/patches/xenia-canary` submodule). `python3
   boosted/tools/title-info.py <title>` pools what is known about a title.
+- **An outside roadmap was checked against the code (2026-11-11): do not
+  redo it.** A Gemini-written "XenoDroid" plan and two "patches" (a
+  zero-times-infinity multiply guard for the SPIR-V translator, a byte-swap
+  elimination pass and a VMX dot product for the ARM64 backend). Both
+  patches are pseudocode against APIs this tree does not have, and what
+  they aim at is already here: the Shader Model 3 "0 * anything = 0" rule
+  (`gpu/spirv_shader_translator_alu.cc`), float controls where the driver
+  has them, CTX1 decoding (`texture_load_ctx1`), the float24 depth and PWL
+  gamma paths, byte swaps cancelled and folded into loads and stores
+  (`SimplificationPass::CheckByteSwap`,
+  `memory_sequence_combination_pass.cc`), VMX dot products inline in NEON
+  with the console's double-precision and overflow rules
+  (`a64_sequences.cc`), FFmpeg's XMA decoder built with NEON, and
+  `dynamic_rendering_local_read` for in-pass resolves. Wrong for this tree:
+  the assembler is xbyak_aarch64 (not oaknut), fragment shader interlock is
+  absent on Turnip (not slow), `VK_QCOM_tile_memory_heap` is the stock
+  driver's only, and the page problem is 16 KB host pages against the 4 KB
+  offset of the 0xE0000000 view (not 64 KB against 4 KB). Its numbers have
+  no source. Worth keeping from it: an automated benchmark run for the
+  adb loop, per-title "GPU saver" and aspect ratio patches, and its
+  structure (one frontend, two separate cores), which is what this fork
+  already is. All three are in `docs/ROADMAP.md`.
 - **XDK documentation is not used.** The copies in circulation are leaks;
   Xenia's source, Canary's data and Mesa's freedreno cover the same ground.
 - **XenDroid's Kotlin frontend has no stated licence** (`docs/STATUS.md`).
@@ -209,6 +231,11 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-11 (cloud, evening).** Evaluated the owner's Gemini roadmap
+  and two patch sketches against the tree (finding above); nothing in them
+  to apply. ROADMAP.md gained the benchmark run, per-title GPU savers and
+  two JIT measurements. No code changed.
 
 - **2026-11-11 (cloud, later).** Checked what the desktop session pushed:
   all five commits are on the main branch, none on a side branch, and run

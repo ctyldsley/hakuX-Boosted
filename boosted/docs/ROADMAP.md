@@ -121,7 +121,29 @@ Each needs a profile first; do not start one without the measurement named.
 | Fewer render passes: reuse of one host render target across EDRAM pitches | Passes per frame and inter-pass GPU time | `gpu/vulkan/vulkan_render_target_cache.cc` |
 | 32-bit HDR targets where alpha is unused | Tile count and RB busy on the instrumented Turnip | same |
 | Frame pacing against Choreographer, as hakuX's `native/app/vsync.c` | Frame time variance at a locked 30 | `ui/vulkan/vulkan_presenter.cc` |
+| Floating-point control switches: a block that mixes VMX and scalar float code rewrites FPCR on each change of mode | Switches per second on a CPU-bound title (count in `ChangeFpcrMode`) | `cpu/backend/a64/a64_emitter.cc`, `a64_seq_util.h` |
+| Byte swaps that survive: compares and bitwise tests of a loaded value against a constant could swap the constant instead | Share of emitted `rev` that feed only an AND/OR/XOR/compare with a constant | `cpu/compiler/passes/simplification_pass.cc` |
 | Thread placement and ADPF hints for the GPU command thread and guest CPU threads | Core residency (simpleperf) under load | `base/threading_posix.cc` |
+
+## Tooling: a benchmark run for the adb loop
+
+With a device on adb (the phone now, the tablet later), most of a
+measure-change-measure cycle is hand work: launch, reach the scene, read
+fps. Wanted: a launch extra for `EmulatorHostActivity` that runs a title
+for N frames from boot (or from a save), then writes one report (average
+fps, 1% low frame time, draws and passes per frame, skipped draws,
+pipeline compiles, the driver's name) to a file and exits. The counters
+exist (`log_gpu_frame_time_breakdown`, the frame stats); this collects
+them. It makes every item in phase 4 cheaper to decide.
+
+## Per-title savers
+
+Beyond MSAA: where xenia-canary has a patch that removes an expensive
+effect (motion blur, depth of field) or sets the aspect ratio, and it is
+known to help, it belongs in `boosted/x360-titles/enable` for the title;
+effects that change how a game looks stay off by default unless the owner
+asks for them. A 16:10 screen (the tablet) wants an aspect patch per title
+where one exists.
 
 ## Phase 5: one library
 
