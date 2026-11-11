@@ -32,6 +32,24 @@ The plan and what to record are in `FABLE2.md`. In order:
 4. If tiled mode holds: make it the title's shipped default, together with
    the patch (`boosted/x360-titles`), and repeat for the next titles.
 
+## Alongside every phase: use what already exists
+
+Most of what is known about each title is already written down somewhere.
+Before changing code for a title, pool it
+(`python3 boosted/tools/title-info.py <title>`):
+
+| Source | What it gives | How it gets here |
+|---|---|---|
+| xenia-canary/game-patches | Per-title patches: MSAA off, resolution, frame rate, fixes | Bundled (the `x360/patches/xenia-canary` submodule); bump the submodule to take new ones |
+| xenia-canary and xenia-project game-compatibility | Per-title state, labels such as `requires_render_target_rov_fsi`, the history of what fixed what | Vendored database in `x360`; the issue threads read by hand |
+| Xenia Edge (the base of XenDroid) | Emulator work: the ARM64 backend, Vulkan tessellation, the guest scheduler | Arrives through XenDroid's own syncs, then the subtree pull |
+| XenDroid's history and notes | Device measurements on Adreno; title fixes (the Fable II patch above came from there) | `x360/GAME_COMPAT.md`, `x360/docs`, its commit log |
+| XeniOS's tracker | Reports from the other ARM64 port (Metal) | Read by hand; shows which faults are translator-wide, not Vulkan's |
+| hakuX | Android and Adreno platform technique | `CROSSOVER.md` |
+
+Where a patch or setting is a fix that every user of a title needs, it
+goes into `boosted/x360-titles` so it is installed without being asked for.
+
 ## Phase 3: zero-copy guest memory on Adreno
 
 The largest piece of hakuX that the 360 side lacks (`CROSSOVER.md`, item 1).

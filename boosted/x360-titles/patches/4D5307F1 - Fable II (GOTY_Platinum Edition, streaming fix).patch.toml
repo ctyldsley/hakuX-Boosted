@@ -1,0 +1,31 @@
+title_name = "Fable II" # GOTY (Game Of The Year)/Platinum Edition
+title_id = "4D5307F1"
+hash = "4145F96D2DEE2AB5" # default.xex
+
+# From XenDroid (rfandango/XenDroid f8a24a3c, 2026-06-16, by ax360e), where
+# x360/GAME_COMPAT.md calls it the title's required patch; the file is no
+# longer in XenDroid's tree. Installed enabled by hakuX-Boosted
+# (boosted/x360-titles/README.md).
+#
+# Streaming-deserializer pool (object's free-list at +0x16C, count at +0x138).
+# The pool's empty-check reads the COUNT word (0x138), never the list HEAD
+# (0x16C). count and head are updated non-atomically with no lock/barrier, so
+# under the emulator's true multi-core concurrency (vs the 360's coarser
+# scheduling + stronger store ordering) a producer (disc-stream feeder) and the
+# consumer desync them (count=2 while head=NULL). The guard at 0x82C9F118 then
+# passes and 0x82C9F12C `lwz r10,0(r30)` dereferences a NULL head -> crash.
+#
+# Fix: make the empty-check load the HEAD (0x16C) instead of the COUNT (0x138),
+# so the existing `beq -> 0x82C9F614` (the game's already-handled "pool empty,
+# retry" return, status 0xD) fires when head==NULL. One instruction:
+#   0x82C9F114: lwz r11,0x138(r31)  (817F0138)  ->  lwz r11,0x16c(r31) (817F016C)
+
+[[patch]]
+    name = "Streaming pool empty-pop crash fix"
+    desc = "Empty-check on head (0x16C) instead of count (0x138) to avoid a null-head dereference while the disc streams (loading screens)."
+    author = "ax360e"
+    is_enabled = true
+
+    [[patch.be32]]
+        address = 0x82C9F114
+        value = 0x817F016C

@@ -5,44 +5,57 @@ import android.util.Log
 import java.io.File
 
 /**
- * hakuX-Boosted: per-title default configs that ship with the app
- * (assets/title-defaults/<TITLEID>.config.toml, from boosted/x360-titles/config).
+ * hakuX-Boosted: per-title defaults that ship with the app (assets/title-defaults,
+ * from boosted/x360-titles).
  *
- * A title's best-known settings (GAME_COMPAT.md) are otherwise something each
- * user has to find and type in. Each bundled file is written to
- * <storage_root>/config/<TITLEID>.config.toml, the path the core's
- * config::LoadGameConfig reads, once per revision of the file and only while
- * no per-game config exists there: a config the user made (the per-game
- * settings screen writes the same file) is never touched, and one they
- * deleted doesn't come back until the bundled file changes.
+ * A title's best-known settings and required patches (GAME_COMPAT.md) are
+ * otherwise something each user has to find and put in place. Two kinds:
+ *
+ * - config/<TITLEID>.config.toml, written to <storage_root>/config/, the path
+ *   the core's config::LoadGameConfig reads;
+ * - patches/<TITLEID> ... .patch.toml, written to <storage_root>/patches/,
+ *   the directory the core's patcher scans. The same files are in the bundled
+ *   patch catalog (assets/game-patches), so the title's patches screen shows
+ *   and toggles them.
+ *
+ * Each bundled file is written once per revision of the file and only while
+ * nothing of that name is there: a file the user made or changed (the
+ * per-game settings and patches screens write the same files) is never
+ * touched, and one they deleted doesn't come back until the bundled file
+ * changes.
  */
 object TitleDefaults {
     private const val TAG = "TitleDefaults"
     private const val ASSET_DIR = "title-defaults"
     private const val PREFS = "title_defaults"
-    private const val SUFFIX = ".config.toml"
 
     /** Blocking (asset reads, small files): call before the core boots. */
     fun seed(context: Context, storageRoot: File) {
-        val names = runCatching { context.assets.list(ASSET_DIR) }.getOrNull()
-            ?.filter { it.endsWith(SUFFIX) } ?: return
+        seedKind(context, "config", ".config.toml", File(storageRoot, "config"))
+        seedKind(context, "patches", ".patch.toml", File(storageRoot, "patches"))
+    }
+
+    private fun seedKind(context: Context, kind: String, suffix: String, targetDir: File) {
+        val assetDir = "$ASSET_DIR/$kind"
+        val names = runCatching { context.assets.list(assetDir) }.getOrNull()
+            ?.filter { it.endsWith(suffix) } ?: return
         if (names.isEmpty()) return
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val configDir = File(storageRoot, "config")
         for (name in names) {
             runCatching {
-                val text = context.assets.open("$ASSET_DIR/$name").use { it.readBytes() }
+                val text = context.assets.open("$assetDir/$name").use { it.readBytes() }
                 val revision = text.contentHashCode()
-                if (prefs.getInt(name, 0) == revision) return@runCatching
-                val target = File(configDir, name)
+                val key = "$kind/$name"
+                if (prefs.getInt(key, 0) == revision) return@runCatching
+                val target = File(targetDir, name)
                 // An empty file is the settings screen's placeholder, not a choice.
                 if (!target.exists() || target.length() == 0L) {
-                    configDir.mkdirs()
+                    targetDir.mkdirs()
                     target.writeBytes(text)
-                    Log.i(TAG, "seeded ${target.name}")
+                    Log.i(TAG, "seeded $kind/${target.name}")
                 }
-                prefs.edit().putInt(name, revision).apply()
-            }.onFailure { Log.w(TAG, "seeding $name failed", it) }
+                prefs.edit().putInt(key, revision).apply()
+            }.onFailure { Log.w(TAG, "seeding $kind/$name failed", it) }
         }
     }
 }

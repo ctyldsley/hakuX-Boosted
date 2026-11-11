@@ -12,5 +12,13 @@ for each user to find. The 360 side's counterpart of hakuX's `mods/`.
   here; say in the file where each comes from.
 - `patches/<TITLEID> - <name>.patch.toml`: title patches in xenia's patch
   format, packed next to xenia-canary's (`x360/patches/xenia-canary`) as
-  `assets/game-patches/`. The user turns them on in the title's Patches
-  screen.
+  `assets/game-patches/`, so the title's patches screen lists them. A patch
+  here with `is_enabled = true` is also installed to
+  `<storage_root>/patches/` before the title first boots (the bundled
+  xenia-canary patches all ship disabled and are installed only when the
+  user turns one on). Only fixes belong here enabled: a patch that changes
+  how the game looks or plays ships disabled, for the user to choose.
+
+`python3 boosted/tools/title-info.py <TITLEID or name>` prints what is
+already known about a title: its entry in Xenia's compatibility database,
+xenia-canary's patches for it, and what is shipped here.

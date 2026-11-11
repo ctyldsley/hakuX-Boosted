@@ -27,8 +27,17 @@ val syncGamePatches = tasks.register<Sync>("syncGamePatches") {
   into(gamePatchesGenDir.map { it.dir("game-patches") })
 }
 val titleDefaultsGenDir = layout.buildDirectory.dir("generated/titleDefaults")
+// What is installed for a title without the user asking (core/TitleDefaults.kt):
+// its default config, and the title patches that ship enabled.
 val syncTitleDefaults = tasks.register<Sync>("syncTitleDefaults") {
-  from(rootProject.file("../boosted/x360-titles/config")) { include("*.config.toml") }
+  from(rootProject.file("../boosted/x360-titles/config")) {
+    include("*.config.toml")
+    into("config")
+  }
+  from(rootProject.file("../boosted/x360-titles/patches")) {
+    include("*.patch.toml")
+    into("patches")
+  }
   into(titleDefaultsGenDir.map { it.dir("title-defaults") })
 }
 tasks.named("preBuild") { dependsOn(syncGamePatches, syncTitleDefaults) }

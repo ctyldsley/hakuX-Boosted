@@ -11,6 +11,12 @@ What is known about this version and how. Updated with each change.
 | The whole app builds into one debug APK: hakuX's core, the 360 core (libe.so), the Kotlin of both sides under hakuX's toolchain (Kotlin 2.2, AGP 8.13, R8 on), one merged manifest | GitHub Actions, job "APK (both cores)", first passed at d043094. The job's "What the APK holds" step lists the libraries and activities in the log |
 | hakuX's adrenotools patch applies unchanged to the 360 side's adrenotools | `git apply --check`; the files' blob hashes are the patch's own base |
 
+## Upstreams
+
+- hakuX: `rfandango/hakuX` master at a7cdb5a (v1.3.0 and 14 commits),
+  merged without a conflict.
+- XenDroid: `rfandango/XenDroid` main at 779680a.
+
 ## Not verified: nothing has run on a device
 
 No build of this fork has been installed or run. In particular:
@@ -58,8 +64,6 @@ No build of this fork has been installed or run. In particular:
   Vulkan where the evaluation shader reads three or four
   (`gpu/vulkan/vulkan_pipeline_cache.cc`). Found while reading the path
   Fable II's ground takes; it does not affect that title. Not fixed here.
-- The Fable II streaming-crash patch that `x360/GAME_COMPAT.md` describes is
-  not in XenDroid's repository, so it is not here either.
 - The two sides have separate libraries, settings and driver managers
   (`ROADMAP.md`, phase 5).
 - The debug APK is signed with the build machine's debug key, so one run's

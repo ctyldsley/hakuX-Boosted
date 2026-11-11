@@ -13,15 +13,30 @@ by this fork.
 - **Open: the ground is not drawn** on the Vulkan backend. The draws are
   issued and fail the per-fragment depth test. Upstream's reading is a
   reversed-Z and 24-bit float depth precision mismatch.
-- **Open: an intermittent crash on loading screens** while the disc streams.
-  Upstream describes a one-instruction title patch for a race in the game's
-  own lock-free pool and says it ships in the repository; it is not in
-  XenDroid's tree as imported (`x360/patches/` holds only the xenia-canary
-  patch submodule, which does not contain it).
+- **An intermittent crash on loading screens** while the disc streams.
+  Upstream wrote a one-instruction title patch for a race in the game's own
+  lock-free pool and calls it required. The file is no longer in XenDroid's
+  tree; it was recovered from XenDroid's history (commit f8a24a3c) and ships
+  here, enabled (`boosted/x360-titles/patches`). It applies to the Game of
+  the Year / Platinum executable (hash `4145F96D2DEE2AB5`) only.
 - Open: dialogue audio cut-offs.
 
-So before performance, Fable II has one rendering bug and one stability bug
-that decide whether it is playable at all.
+So before performance, Fable II has one rendering bug that decides whether
+it is playable at all.
+
+Those notes are from 13 to 16 June 2026 and may be out of date on the
+ground: XenDroid's history has tessellation fixes from 12 June ("Fix
+tessellation spacing and CP-indexed control point indices", "Fix adaptive
+tessellation issues") and one from 5 July, after the notes ("Fix
+tessellation vertex index endian"). Step 0 of the plan below says whether
+the ground is still missing.
+
+Xenia Canary's tracker (game-compatibility issue 74) has the same history
+on Windows: "Ground is entirely missing" in January 2021, reported fixed in
+April 2022, the month upstream Xenia made the tessellator's patch index
+follow the index offset ("Offset and clamp tessellation patch index"). So
+on the reference backend the ground was a tessellation fault, not a depth
+one.
 
 ## The ground is drawn by the tessellator
 
@@ -96,6 +111,7 @@ mode are on together.
   (`boosted/x360-titles/config/4D5307F1.config.toml`):
   `vulkan_depth_unorm24 = false`, written to the title's per-game config on
   first launch if you have not made one.
+- Installs the loading-screen crash fix, enabled.
 - Bundles xenia-canary's Fable II patches (as XenDroid does). They match by
   the executable's hash; the Game of the Year / Platinum edition has the
   fullest set.
