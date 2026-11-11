@@ -3917,6 +3917,52 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
     normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
 
+    // hakuX-Boosted: diagnostics for tessellated draws (tessellation_debug).
+    if (cvars::tessellation_debug &&
+        Shader::IsHostVertexShaderTypeDomain(
+            primitive_processing_result.host_vertex_shader_type)) {
+      // The command processor's thread only: no locking.
+      static std::set<uint64_t> logged_draw_kinds;
+      static std::set<uint64_t> logged_shaders;
+      const uint32_t tess_mode =
+          uint32_t(regs.Get<reg::VGT_HOS_CNTL>().tess_mode);
+      const uint64_t draw_kind =
+          (uint64_t(primitive_processing_result.host_vertex_shader_type)
+           << 16) |
+          (uint64_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type) << 8) |
+          tess_mode;
+      if (logged_draw_kinds.insert(draw_kind).second) {
+        const auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+        XELOGI(
+            "Tessellated draw: guest primitive {}, tessellation mode {}, host "
+            "vertex shader type {}, {} host vertices, factor range {}..{} "
+            "(before +1), index offset {}, cull front {} back {}, front face "
+            "{}, depth test {} func {} write {}",
+            uint32_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type), tess_mode,
+            uint32_t(primitive_processing_result.host_vertex_shader_type),
+            primitive_processing_result.host_draw_vertex_count,
+            regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL),
+            regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL),
+            uint32_t(regs[XE_GPU_REG_VGT_INDX_OFFSET]),
+            uint32_t(pa_su_sc_mode_cntl.cull_front),
+            uint32_t(pa_su_sc_mode_cntl.cull_back),
+            uint32_t(pa_su_sc_mode_cntl.face),
+            uint32_t(normalized_depth_control.z_enable),
+            uint32_t(normalized_depth_control.zfunc),
+            uint32_t(normalized_depth_control.z_write_enable));
+      }
+      if (vertex_shader->is_ucode_analyzed() &&
+          logged_shaders.insert(vertex_shader->ucode_data_hash()).second) {
+        XELOGI("Tessellated draw's vertex shader {:016X}:\n{}",
+               vertex_shader->ucode_data_hash(),
+               vertex_shader->ucode_disassembly());
+      }
+      if (cvars::tessellation_debug & 2) {
+        normalized_depth_control.z_enable = 0;
+        normalized_depth_control.z_write_enable = 0;
+      }
+    }
+
     // Compute which color render targets are used.
     normalized_color_mask =
         pixel_shader ? draw_util::GetNormalizedColorMask(

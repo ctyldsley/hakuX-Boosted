@@ -16,6 +16,8 @@ DECLARE_bool(trace_gpu_stream);
 
 DECLARE_path(dump_shaders);
 
+DECLARE_int32(tessellation_debug);
+
 DECLARE_bool(guest_display_refresh_cap);
 
 DECLARE_uint32(framerate_limit);

@@ -1555,6 +1555,13 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
     // highest) based on which faces are not culled.
     bool cull_front = pa_su_sc_mode_cntl.cull_front;
     bool cull_back = pa_su_sc_mode_cntl.cull_back;
+    // hakuX-Boosted: tessellation_debug bit 0, tessellated draws not culled.
+    if ((cvars::tessellation_debug & 1) &&
+        Shader::IsHostVertexShaderTypeDomain(
+            primitive_processing_result.host_vertex_shader_type)) {
+      cull_front = false;
+      cull_back = false;
+    }
     description_out.cull_front = cull_front;
     description_out.cull_back = cull_back;
     if (device_properties.fillModeNonSolid) {

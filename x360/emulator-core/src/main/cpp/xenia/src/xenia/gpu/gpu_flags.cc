@@ -43,6 +43,18 @@ DEFINE_path(
     "For shader debugging, path to dump GPU shaders to as they are compiled.",
     "GPU");
 
+// hakuX-Boosted: diagnostics for draws that go through the tessellator
+// (4D5307F1's ground is one: continuous quad patches).
+DEFINE_int32(
+    tessellation_debug, 0,
+    "Diagnostics for tessellated draws (Vulkan). 0: off. Any other value "
+    "logs each kind of tessellated draw once and the guest vertex shader of "
+    "each (its ucode disassembly) to the log. Bit 0 (1): tessellated draws "
+    "are not culled. Bit 1 (2): tessellated draws skip the depth test and "
+    "don't write depth. 3 is both. For telling whether geometry that is "
+    "missing was culled, failed the depth test, or was never rasterized.",
+    "GPU");
+
 DEFINE_bool(guest_display_refresh_cap, true,
             "Control guest vblank timing.\n"
             "  true: Fixed rate vblanks (50Hz PAL, 60Hz NTSC based on "

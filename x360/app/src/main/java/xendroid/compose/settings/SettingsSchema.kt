@@ -204,6 +204,10 @@ object SettingsSchema {
             l("GPU", "gpu", "GPU backend", "vulkan",
                 "vulkan" to "vulkan", "null" to "null"),
             b("GPU", "depth_float24_convert_in_pixel_shader", "Depth float24 convert in pixel shader", false),
+            // hakuX-Boosted: for finding why tessellated geometry (Fable II's ground) is missing.
+            // A slider (an integer in the config): 0 off, 1 log + no culling, 2 log + no
+            // depth test, 3 log + neither.
+            i("GPU", "tessellation_debug", "Tessellation diagnostics (0 off, 1 no cull, 2 no depth, 3 both)", 0, 0, 3),
             b("GPU", "value_convert_7e3_8888_reuse", "value_convert_7e3_8888_reuse", true),
         )),
 
