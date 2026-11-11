@@ -50,12 +50,16 @@ Last updated: 2026-11-11 (after the first device run).
   the slot keeping a minimal layout with its stale flag clear. The new log
   line's flags decide between the storage-load path
   (`InitializeShaderStorage`, which never sets the flag) and the live one.
-- **To check on the next run: did the "Disable MSAA" patch apply?** Run 13
-  was meant to turn it on for Fable II by itself, yet that run's log says
-  the title creates 4x multisampled targets. Either the ISO's executable is
-  not one the bundled patch files match by hash, or the seeding did not
-  happen. Look for `Patcher: Applying patch for` in `xe.log` and for the
-  title's files in `Android/data/<package>/files/compose/patches/`.
+- **The "Disable MSAA" patch applied on run 13, and the title still made 4x
+  targets.** Answered from that run's `xe.log` (kept on the desktop):
+  module hash `4145F96D2DEE2AB5` (the GOTY file's), `Patcher: Applying
+  patch for: Fable II(4D5307F1) - Disable MSAA` and the streaming fix, both
+  sessions; all five patch files were seeded with the patch enabled. Then,
+  at frame 1, `This title creates multisampled render targets (4x MSAA)`.
+  So Canary's patch does not cover every target the game makes (or one made
+  before the patched code runs). The MSAA line's new detail (color or
+  depth, size) on the next run says which; until then tiled mode is not
+  safe for the title.
 - **Asked for by the owner, not started:** one library for both consoles
   instead of the separate "Xbox 360" section, on-screen controls and
   in-game settings (graphics, emulation, controls) for 360 games in the
@@ -256,6 +260,11 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-11 (desktop, later).** Answered the MSAA patch question from
+  run 13's log (above): applied, 4x targets regardless. The phone's adb
+  authorisation lapsed, so run 18 or later is not installed yet and the
+  page size is unchecked. No code changed.
 
 - **2026-11-11 (cloud, night).** Review pass for performance and misses:
   the 360 core to Release configuration, the branchless 16 KB page fix-up,
