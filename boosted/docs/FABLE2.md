@@ -28,8 +28,14 @@ Those notes are from 13 to 16 June 2026 and may be out of date on the
 ground: XenDroid's history has tessellation fixes from 12 June ("Fix
 tessellation spacing and CP-indexed control point indices", "Fix adaptive
 tessellation issues") and one from 5 July, after the notes ("Fix
-tessellation vertex index endian"). Step 0 of the plan below says whether
-the ground is still missing.
+tessellation vertex index endian"). That last one is a strong candidate
+for having fixed this title already: its message reads "Use
+host_shader_index_endian (kNone for auto draws) instead of raw
+VGT_DMA_SIZE.swap_mode", and this title's ground is drawn as auto-indexed
+patches, whose patch index would have been byte-swapped by a stale swap
+mode before it. The fix is in the tree this fork builds. Step 0 of the plan
+below says whether the ground is still missing; if it is drawn, skip steps
+3 to 5.
 
 Xenia Canary's tracker (game-compatibility issue 74) has the same history
 on Windows: "Ground is entirely missing" in January 2021, reported fixed in
