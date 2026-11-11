@@ -37,6 +37,12 @@ android {
         // raw-memory-reinterpretation code.
         cFlags("-O2", "-DNDEBUG", "-g", "-fno-strict-aliasing")
         cppFlags("-O2", "-DNDEBUG", "-g", "-fno-strict-aliasing")
+        // The NDK compiles everything with -g and leaves stripping to the
+        // packaging step, which the hakuX app turns off for every library
+        // (its own come stripped: keepDebugSymbols in app/build.gradle.kts).
+        // libe.so's debug information goes at link time instead; its symbol
+        // table stays, for simpleperf and crash reports.
+        arguments("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--strip-debug")
         if (System.getenv("USE_CCACHE") == "true") {
           arguments(
             "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
@@ -64,6 +70,22 @@ android {
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
+  }
+
+  // adrenotools' hook libraries are built here and by hakuX's core, from the
+  // same patched revision. When hakuX's are in the app's jniLibs they are
+  // the ones packed (built for Android 9, hakuX's minimum; these are built
+  // for 10); without them (an app built without hakuX's core) these are.
+  if (rootProject.file("app/src/main/jniLibs/arm64-v8a/libhook_impl.so").exists()) {
+    packaging {
+      jniLibs.excludes += setOf(
+        "**/libmain_hook.so",
+        "**/libfile_redirect_hook.so",
+        "**/libgsl_alloc_hook.so",
+        "**/libkgsl_context_hook.so",
+        "**/libhook_impl.so",
+      )
+    }
   }
 }
 

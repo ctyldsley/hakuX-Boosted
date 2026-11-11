@@ -23,6 +23,8 @@ import java.util.zip.ZipOutputStream
 object SessionLogs {
     private const val TAG = "SessionLogs"
     private const val CAPTURE_NAME = "logcat-current.txt"
+    /** The capture's logcat buffers: also how its process is told from others (findOwnLogcatPids). */
+    private const val CAPTURE_BUFFERS = "main,system,crash"
     private const val EXIT_TS_MARKER = ".exitinfo-ts"
     // Shelve only the newest portion of runaway logs.
     private const val MAX_SHELVED_BYTES = 64L * 1024 * 1024
@@ -66,10 +68,14 @@ object SessionLogs {
                     val pid = p.name.toInt()
                     if (pid == myPid) return@runCatching null
                     // NUL-separated argv; argv[0] is the executable.
-                    val argv0 = File(p, "cmdline").readBytes()
-                        .takeWhile { it != 0.toByte() }.toByteArray()
-                        .toString(Charsets.UTF_8)
+                    val argv = File(p, "cmdline").readBytes()
+                        .toString(Charsets.UTF_8).split('\u0000')
+                    val argv0 = argv.firstOrNull().orEmpty()
+                    // hakuX-Boosted: this capture's own logcat (startCapture's
+                    // buffers), not another logcat of the same app: inside
+                    // hakuX's app, hakuX's logs run logcat processes too.
                     if ((argv0 == "logcat" || argv0.endsWith("/logcat")) &&
+                        argv.contains(CAPTURE_BUFFERS) &&
                         android.system.Os.stat(p.absolutePath).st_uid == myUid)
                         pid else null
                 }.getOrNull()
@@ -230,7 +236,7 @@ object SessionLogs {
      *  it streams to disk, so a crash tail is already in the file. */
     private fun startCapture(capture: File) {
         runCatching {
-            ProcessBuilder("logcat", "-b", "main,system,crash", "-v", "threadtime", "-T", "1")
+            ProcessBuilder("logcat", "-b", CAPTURE_BUFFERS, "-v", "threadtime", "-T", "1")
                 .redirectOutput(ProcessBuilder.Redirect.to(capture))
                 .redirectErrorStream(true)
                 .start()
