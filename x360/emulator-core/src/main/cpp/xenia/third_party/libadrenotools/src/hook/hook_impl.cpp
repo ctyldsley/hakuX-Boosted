@@ -86,6 +86,15 @@ __attribute__((visibility("default"))) void *hook_android_dlopen_ext(const char 
         LOGI("hook_android_dlopen_ext: applied libfile_redirect_hook");
     }
 
+    if (hook_params->featureFlags & ADRENOTOOLS_DRIVER_KGSL_CONTEXT_PRIORITY) {
+        if (!linkernsbypass_namespace_dlopen("libkgsl_context_hook.so", RTLD_GLOBAL, driverNs)) {
+            LOGI("hook_android_dlopen_ext: hook failed: failed to apply libkgsl_context_hook!");
+            return fallback();
+        }
+
+        LOGI("hook_android_dlopen_ext: applied libkgsl_context_hook");
+    }
+
     // Use our new namespace to load the vulkan driver
     auto newExtinfo{*extinfo};
     newExtinfo.library_namespace = driverNs;
@@ -167,6 +176,21 @@ __attribute__((visibility("default"))) FILE *hook_fopen(const char *filename, co
     LOGI("hook_fopen: %s -> %s", filename, replacement.c_str());
 
     return fopen(replacement.c_str(), mode);
+}
+
+__attribute__((visibility("default"))) int hook_ioctl(int fd, int request, void *arg) {
+    if (static_cast<unsigned int>(request) == IOCTL_KGSL_DRAWCTXT_CREATE && arg && hook_params->kgslContextPriority >= 0) {
+        auto create{reinterpret_cast<kgsl_drawctxt_create *>(arg)};
+        // A priority the driver chose itself is kept
+        if ((create->flags & KGSL_CONTEXT_PRIORITY_MASK) == KGSL_CONTEXT_PRIORITY_UNDEF) {
+            create->flags |= (static_cast<unsigned int>(hook_params->kgslContextPriority) << KGSL_CONTEXT_PRIORITY_SHIFT) & KGSL_CONTEXT_PRIORITY_MASK;
+            int ret{ioctl(fd, request, arg)};
+            LOGI("hook_ioctl: kgsl draw context %u created at priority %d (%d)", create->drawctxt_id, hook_params->kgslContextPriority, ret);
+            return ret;
+        }
+    }
+
+    return ioctl(fd, request, arg);
 }
 
 static constexpr uintptr_t GslMemDescImportedPrivMagic{0xdeadb33f};

@@ -20,6 +20,8 @@ void *hook_android_load_sphal_library(const char *filename, int flags);
 
 FILE *hook_fopen(const char *filename, const char *mode);
 
+int hook_ioctl(int fd, int request, void *arg);
+
 int hook_gsl_memory_alloc_pure_64(uint64_t size, uint32_t flags, void *memDesc);
 
 int hook_gsl_memory_free_pure(void *memDesc);

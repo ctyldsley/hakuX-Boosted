@@ -16,6 +16,8 @@
 #include <adrenotools/driver.h>
 #include <unistd.h>
 
+static int kgslContextPriority{-1}; //!< See adrenotools_set_kgsl_context_priority
+
 void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *tmpLibDir, const char *hookLibDir, const char *customDriverDir, const char *customDriverName, const char *fileRedirectDir, void **userMappingHandle) {
     // Bail out if linkernsbypass failed to load, this probably means we're on api < 28
     if (!linkernsbypass_load_status())
@@ -84,7 +86,8 @@ void *adrenotools_open_libvulkan(int dlopenFlags, int featureFlags, const char *
         }
     }()};
 
-    initHookParam(new HookImplParams(featureFlags, tmpLibDir, hookLibDir, customDriverDir, customDriverName, fileRedirectDir, importMapping));
+    initHookParam(new HookImplParams(featureFlags, tmpLibDir, hookLibDir, customDriverDir, customDriverName, fileRedirectDir, importMapping,
+                                     (featureFlags & ADRENOTOOLS_DRIVER_KGSL_CONTEXT_PRIORITY) ? kgslContextPriority : -1));
 
     // Load the libvulkan hook into the isolated namespace
     if (!linkernsbypass_namespace_dlopen("libmain_hook.so", RTLD_GLOBAL, hookNs))
@@ -207,4 +210,8 @@ void adrenotools_set_turbo(bool turbo) {
 
     ioctl(kgslFd, IOCTL_KGSL_SETPROPERTY, &prop);
     close (kgslFd);
+}
+
+void adrenotools_set_kgsl_context_priority(int priority) {
+    kgslContextPriority = (priority >= 1 && priority <= (KGSL_CONTEXT_PRIORITY_MASK >> KGSL_CONTEXT_PRIORITY_SHIFT)) ? priority : -1;
 }

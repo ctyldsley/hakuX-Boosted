@@ -42,6 +42,7 @@ vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* pAllocator);
 #endif
 
 #if XE_PLATFORM_xendroid||XE_PLATFORM_ANDROID
+#include <strings.h>
 #include <sys/system_properties.h>
 
 #include "third_party/libadrenotools/include/adrenotools/priv.h"
@@ -103,6 +104,28 @@ bool IsVendorOsNeedingUbwcFlagHint() {
 
 }  // namespace
 
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid
+// Whether the custom driver in `dir` is Mesa's (Turnip): its package's
+// meta.json says so ("vendor": "Mesa"), or, without one, its library's name.
+static bool CustomDriverIsMesa(const std::string& dir,
+                               const std::string& lib_name) {
+  if (FILE* f = fopen((dir + "meta.json").c_str(), "r")) {
+    char json[4096];
+    size_t n = fread(json, 1, sizeof(json) - 1, f);
+    fclose(f);
+    json[n] = 0;
+    const char* v = strstr(json, "\"vendor\"");
+    v = v ? strchr(v + 8, ':') : nullptr;
+    v = v ? strchr(v, '"') : nullptr;
+    if (v) {
+      return !strncasecmp(v + 1, "mesa\"", 5);
+    }
+  }
+  return lib_name.find("freedreno") != std::string::npos ||
+         lib_name.find("turnip") != std::string::npos;
+}
+#endif
+
 DEFINE_string(vulkan_lib_path, "", "Custom Driver Library Path", "Vulkan");
 DEFINE_bool(
         adrenotools_force_max_clocks, false,
@@ -118,6 +141,23 @@ DEFINE_string(
         "rather than hidden. Empty leaves TU_DEBUG unset.",
         "Vulkan");
 UPDATE_from_string(turnip_debug, 2026, 7, 24, 12, "");
+
+// hakuX-Boosted: from hakuX's native/app/vkdriver.c (the same adrenotools
+// revision and patch, tools/native/adrenotools-kgsl-context-priority.patch).
+DEFINE_int32(
+    kgsl_context_priority, 7,
+    "KGSL priority of the draw contexts a custom Turnip (Mesa) driver creates: "
+    "1 (the highest) to 15 (the lowest), 0 to leave the driver's own. Turnip "
+    "leaves its contexts at the kernel's default, 8, the ringbuffer below "
+    "SurfaceFlinger's GPU composition: whenever the screen is composited on "
+    "the GPU, the compositor's work preempts the emulator's, and a sysmem "
+    "pass preempted with its draws in flight can hang an Adreno 6xx. At 7 the "
+    "contexts share the compositor's ringbuffer (nothing of it preempts "
+    "them) at its lowest priority (the compositor's work still runs first). "
+    "Only applied to a custom driver whose meta.json names Mesa as the "
+    "vendor (or whose library is named as Mesa's); a priority the driver sets "
+    "itself is kept.",
+    "Vulkan");
 
 DEFINE_string(
     fd_dev_features, "",
@@ -245,7 +285,24 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
 
         XELOGI("Loading custom Vulkan driver: {}", custom_lib_path);
 
-        vulkan_instance->loader_= adrenotools_open_libvulkan(RTLD_NOW,ADRENOTOOLS_DRIVER_CUSTOM,nullptr
+        // hakuX-Boosted: Turnip's kgsl draw contexts onto the compositor's
+        // ringbuffer (kgsl_context_priority).
+        int kgsl_priority = cvars::kgsl_context_priority;
+        if (kgsl_priority < 1 || kgsl_priority > 15 ||
+            !CustomDriverIsMesa(custom_lib_dir, custom_lib_name)) {
+          kgsl_priority = -1;
+        }
+        adrenotools_set_kgsl_context_priority(kgsl_priority);
+        if (kgsl_priority > 0) {
+          XELOGI("Custom Vulkan driver's kgsl draw contexts at priority {} "
+                 "(ringbuffer {} of 0-3)",
+                 kgsl_priority, kgsl_priority / 4);
+        }
+
+        vulkan_instance->loader_= adrenotools_open_libvulkan(RTLD_NOW,
+                ADRENOTOOLS_DRIVER_CUSTOM |
+                    (kgsl_priority > 0 ? ADRENOTOOLS_DRIVER_KGSL_CONTEXT_PRIORITY : 0),
+                nullptr
                 ,hook_dir.c_str()
                 ,custom_lib_dir.c_str()
                 ,custom_lib_name.c_str()

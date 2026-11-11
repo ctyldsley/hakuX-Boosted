@@ -30,7 +30,7 @@ endif()
 if (${GEN_INSTALL_TARGET})
   configure_file(adrenotools.pc.in adrenotools.pc @ONLY)
   install(FILES ${CMAKE_BINARY_DIR}/adrenotools.pc DESTINATION lib/pkgconfig)
-  install(TARGETS adrenotools main_hook file_redirect_hook gsl_alloc_hook hook_impl)
+  install(TARGETS adrenotools main_hook file_redirect_hook gsl_alloc_hook kgsl_context_hook hook_impl)
   install(DIRECTORY include/
           DESTINATION include
           FILES_MATCHING PATTERN "*.h*")

@@ -66,6 +66,16 @@ bool adrenotools_validate_gpu_mapping(void *handle);
  */
 void adrenotools_set_turbo(bool turbo);
 
+/**
+ * @brief Sets the KGSL priority of the draw contexts a driver opened with ADRENOTOOLS_DRIVER_KGSL_CONTEXT_PRIORITY creates afterwards
+ * @remark KGSL runs contexts on one of four ringbuffers by priority (priority / 4) and preempts a lower ringbuffer's work for a
+ * higher one's; a driver that leaves the priority unset (Turnip on KGSL) gets the kernel's default, 8, below SurfaceFlinger's GPU
+ * composition. On the compositor's ringbuffer neither preempts the other, and the lowest priority there lets the dispatcher run the
+ * compositor's work first.
+ * @param priority 1 (the highest) to 15 (the lowest), or -1 to leave the driver's own choice (the default)
+ */
+void adrenotools_set_kgsl_context_priority(int priority);
+
 #ifdef __cplusplus
 }
 #endif
