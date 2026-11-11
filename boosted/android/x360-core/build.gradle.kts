@@ -43,6 +43,13 @@ android {
         // libe.so's debug information goes at link time instead; its symbol
         // table stays, for simpleperf and crash reports.
         arguments("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--strip-debug")
+        // The core in xenia's Release configuration in every variant of the
+        // app: -O3 and ThinLTO (xenia/CMakeLists.txt), what XenDroid's own
+        // releases are built with. Gradle's debug variant asks CMake for
+        // Debug, which leaves the core at the -O2 above without link-time
+        // optimization, and a debug APK is what gets tested for speed here.
+        // The last CMAKE_BUILD_TYPE on the command line is the one CMake uses.
+        arguments("-DCMAKE_BUILD_TYPE=Release")
         if (System.getenv("USE_CCACHE") == "true") {
           arguments(
             "-DCMAKE_C_COMPILER_LAUNCHER=ccache",

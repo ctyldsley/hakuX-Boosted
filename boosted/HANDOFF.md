@@ -25,6 +25,31 @@ Last updated: 2026-11-11 (after the first device run).
   (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43050816108),
   the APK is its artifact `hakuX-Boosted-debug-apk`, now signed with one
   fixed debug key so later builds install over it. Not run on a device yet.
+- **Changed since run 18 (review pass, built on Actions: see the log's
+  newest line; none run on a device):**
+  - The 360 core is compiled in xenia's Release configuration (-O3,
+    ThinLTO) in the debug APK too. Until now Gradle's debug variant built
+    it as Debug: -O2, no link-time optimization. Every APK tested so far had
+    the slower core. The Actions step "How the 360 core was compiled"
+    prints the flags.
+  - On hosts with pages over 4 KB the JIT's address fix-up for 0xE0000000+
+    no longer branches (`a64_seq_util.h`). Check the phone:
+    `adb shell getconf PAGE_SIZE`. If it says 16384, every guest load and
+    store with a computed address carries that fix-up (four instructions),
+    and the E0 view's 4 KB offset is worth a proper look (ROADMAP phase 4).
+  - The game's surface asks for a 60 Hz (or 50) display mode
+    (`EmulatorHostActivity.hintFrameRate`), for even pacing on 120, 144 and
+    165 Hz panels.
+  - Diagnostics only: `Pipeline layout behind its shaders` in `xe.log`
+    names, once per vertex shader, the pipeline slot behind the skipped
+    draws (stale flag, handle, modification, host vertex shader type); the
+    MSAA line now says color or depth and the target's size.
+- **The skipped draws were read for, not found.** Ruled out by reading:
+  the layout key, the bindings publish (guarded, first translation only),
+  the claim wait, the bind's reread of the slot's layout. Still open:
+  the slot keeping a minimal layout with its stale flag clear. The new log
+  line's flags decide between the storage-load path
+  (`InitializeShaderStorage`, which never sets the flag) and the live one.
 - **To check on the next run: did the "Disable MSAA" patch apply?** Run 13
   was meant to turn it on for Fable II by itself, yet that run's log says
   the title creates 4x multisampled targets. Either the ISO's executable is
@@ -231,6 +256,12 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-11 (cloud, night).** Review pass for performance and misses:
+  the 360 core to Release configuration, the branchless 16 KB page fix-up,
+  the frame rate hint, the two diagnostics above. Verified: see whether the
+  Actions run for this commit passed and what its compile-flags step shows.
+  Not verified: anything on a device.
 
 - **2026-11-11 (cloud, evening).** Evaluated the owner's Gemini roadmap
   and two patch sketches against the tree (finding above); nothing in them

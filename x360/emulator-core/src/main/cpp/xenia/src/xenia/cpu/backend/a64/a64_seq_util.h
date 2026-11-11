@@ -278,12 +278,16 @@ inline XReg ComputeMemoryAddress(A64Emitter& e, const I64Op& guest) {
     // applying the host membase so guest pointers can't escape above 4 GB.
     e.mov(e.w0, WReg(src.getIdx()));
     if (xe::memory::allocation_granularity() > 0x1000) {
+      // hakuX-Boosted: without a branch. On hosts with pages over 4 KiB
+      // (16 KiB Android kernels) this runs at every load and store with a
+      // computed address, and the forward branch it used to be was taken at
+      // nearly all of them (few addresses are in 0xE0000000+): a taken
+      // branch per access for the front end to follow. The same four
+      // instructions' worth, flags clobbered as before.
       e.mov(e.w17, 0xE0000000u);
       e.cmp(e.w0, e.w17);
-      auto& skip = e.NewCachedLabel();
-      e.b(LO, skip);
-      e.add(e.w0, e.w0, 1, 12);  // add 0x1000 via LSL #12
-      e.L(skip);
+      e.cset(e.w17, HS);                   // 1 if the address is 0xE0000000+
+      e.add(e.w0, e.w0, e.w17, LSL, 12);   // + 0x1000 there, + 0 elsewhere
     }
     return e.x0;
   }

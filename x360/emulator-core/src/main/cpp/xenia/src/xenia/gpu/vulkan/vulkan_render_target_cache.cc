@@ -4268,21 +4268,34 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
   // the one combination measured to hang the Adreno 830
   // (docs/a830-gmem-msaa-plan.md); single-sample tiled passes run.
   if (key.msaa_samples != xenos::MsaaSamples::k1X) {
-    static std::atomic<bool> msaa_logged{false};
-    if (!msaa_logged.exchange(true, std::memory_order_relaxed)) {
+    // Once per sample count and kind (color, depth), with the target's size:
+    // a title whose MSAA patch took for its scene may still multisample a
+    // smaller target.
+    static std::atomic<uint32_t> msaa_logged{0};
+    const uint32_t logged_bit = UINT32_C(1)
+                                << (uint32_t(key.msaa_samples) * 2 +
+                                    (key.is_depth ? 1 : 0));
+    if (!(msaa_logged.fetch_or(logged_bit, std::memory_order_relaxed) &
+          logged_bit)) {
       const bool tiled =
           std::string(cvars::turnip_debug).find("sysmem") == std::string::npos;
       if (tiled) {
         XELOGW(
-            "This title creates multisampled render targets ({}x MSAA) while "
-            "Turnip's tiled rendering is on (turnip_debug has no 'sysmem'). "
-            "Multisampled tiled passes are known to hang Adreno 8xx: turn on "
-            "the title's 'Disable MSAA' patch if it has one, or set "
-            "turnip_debug = \"sysmem\".",
-            uint32_t(1) << uint32_t(key.msaa_samples));
+            "This title creates multisampled render targets ({}x MSAA, {}, "
+            "{}x{} host pixels) while Turnip's tiled rendering is on "
+            "(turnip_debug has no 'sysmem'). Multisampled tiled passes are "
+            "known to hang Adreno 8xx: turn on the title's 'Disable MSAA' "
+            "patch if it has one, or set turnip_debug = \"sysmem\".",
+            uint32_t(1) << uint32_t(key.msaa_samples),
+            key.is_depth ? "depth" : "color", image_create_info.extent.width,
+            image_create_info.extent.height);
       } else {
-        XELOGI("This title creates multisampled render targets ({}x MSAA)",
-               uint32_t(1) << uint32_t(key.msaa_samples));
+        XELOGI(
+            "This title creates multisampled render targets ({}x MSAA, {}, "
+            "{}x{} host pixels)",
+            uint32_t(1) << uint32_t(key.msaa_samples),
+            key.is_depth ? "depth" : "color", image_create_info.extent.width,
+            image_create_info.extent.height);
       }
     }
   }

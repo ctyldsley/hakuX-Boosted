@@ -452,7 +452,34 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     // SurfaceHolder.Callback: the load-bearing surface->boot ordering.
 
+    /**
+     * hakuX-Boosted: tells the system the picture is fixed-rate video at the
+     * console's refresh (60 Hz, or 50 in 50 Hz mode). On a panel whose rate is
+     * not a multiple of it (144, 165 Hz) a 30 or 60 fps game is otherwise shown
+     * for uneven numbers of refreshes; with the hint the system picks a display
+     * mode the rate divides, when it can switch without a flicker, and a 120 Hz
+     * phone may drop to 60 and run cooler. Android 11 and later.
+     */
+    private fun hintFrameRate(holder: SurfaceHolder) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        runCatching {
+            val fiftyHz = runCatching {
+                val handle = ConfigStore(applicationContext).openLiveSnapshot()
+                try {
+                    handle.getBool("Console", "use_50Hz_mode", false)
+                } finally {
+                    handle.closeString()
+                }
+            }.getOrDefault(false)
+            holder.surface.setFrameRate(
+                if (fiftyHz) 50f else 60f,
+                android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+            )
+        }.onFailure { Log.w(TAG, "frame rate hint failed", it) }
+    }
+
     override fun surfaceCreated(holder: SurfaceHolder) {
+        hintFrameRate(holder)
         if (!started) {
             started = true
             session.attachSurface(holder.surface)

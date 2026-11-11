@@ -136,6 +136,29 @@ jobs:
 
       # The log says what was built: both cores' libraries, the hook
       # libraries once each, both sides' activities, the bundled title files.
+      # The log says how the 360 core was compiled: its CMake configuration
+      # and the optimization flags of one of its sources.
+      - name: How the 360 core was compiled
+        run: |
+          python3 - <<'PY'
+          import glob, json, re
+          found = False
+          for path in glob.glob('boosted/android/x360-core/.cxx/**/compile_commands.json', recursive=True):
+              for entry in json.load(open(path)):
+                  if entry['file'].endswith('gpu/vulkan/vulkan_command_processor.cc'):
+                      command = entry.get('command') or ' '.join(entry.get('arguments', []))
+                      flags = [f for f in command.split() if re.match(r'-O|-flto|-DNDEBUG|-DDEBUG|-g$|-march|-fomit|-fno-omit', f)]
+                      print(path)
+                      print('  flags in order:', ' '.join(flags))
+                      found = True
+          for path in glob.glob('boosted/android/x360-core/.cxx/**/CMakeCache.txt', recursive=True):
+              for line in open(path):
+                  if line.startswith('CMAKE_BUILD_TYPE'):
+                      print(path, line.strip())
+          if not found:
+              print('::warning::no compile command found for the 360 core')
+          PY
+
       - name: What the APK holds
         run: |
           apk=$(ls android/app/build/outputs/apk/debug/*.apk | head -1)

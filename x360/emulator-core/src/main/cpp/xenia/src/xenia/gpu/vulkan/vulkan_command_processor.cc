@@ -4315,6 +4315,54 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Wrapped in a lambda so the same (EDS-aware) bind and descriptor-set
   // invalidation can be re-run after in-pass transfers replace the bound
   // pipeline (see below, after entering the render pass).
+  // hakuX-Boosted: a draw whose shaders' bindings are known, with a pipeline
+  // slot whose layout was made for other counts, is skipped by UpdateBindings
+  // below ("pipeline layout counts ... do not match"), for as long as the
+  // slot keeps that layout: 2,253 draws of one kind in the first device run.
+  // The log says, once per vertex shader, what the slot is, so the path that
+  // left the layout behind can be named.
+  {
+    const auto* slot_layout = static_cast<const PipelineLayout*>(
+        pipeline->pipeline_layout.load(std::memory_order_acquire));
+    const uint32_t vs_textures =
+        stage_bindings_ready[0]
+            ? uint32_t(vertex_shader->GetTextureBindingsAfterTranslation().size())
+            : 0;
+    const uint32_t vs_samplers =
+        stage_bindings_ready[0]
+            ? uint32_t(vertex_shader->GetSamplerBindingsAfterTranslation().size())
+            : 0;
+    if (slot_layout && stage_bindings_ready[0] &&
+        (slot_layout->texture_count_vertex() != vs_textures ||
+         slot_layout->sampler_count_vertex() != vs_samplers)) {
+      // The command processor's thread only: no locking.
+      static std::set<uint64_t> logged_vertex_shaders;
+      if (logged_vertex_shaders.insert(vertex_shader->ucode_data_hash())
+              .second) {
+        XELOGE(
+            "Pipeline layout behind its shaders: VS {:016X} (modification "
+            "{:016X}, host vertex shader type {}) has {} textures / {} "
+            "samplers, the slot's layout {} / {}; PS {:016X}; layout stale "
+            "flag {}, pipeline handle {}, placeholder {}, interpreter {}; "
+            "translated {}; cvars: placeholder pipelines {}, async shader "
+            "compilation {}",
+            vertex_shader->ucode_data_hash(),
+            vertex_shader_translation->modification(),
+            uint32_t(primitive_processing_result.host_vertex_shader_type),
+            vs_textures, vs_samplers, slot_layout->texture_count_vertex(),
+            slot_layout->sampler_count_vertex(),
+            pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+            pipeline->pipeline_layout_stale.load(std::memory_order_acquire),
+            current_pipeline != VK_NULL_HANDLE ? "set" : "null",
+            pipeline->is_placeholder.load(std::memory_order_acquire),
+            pipeline->uses_interpreter.load(std::memory_order_acquire),
+            vertex_shader_translation->is_translated(),
+            bool(cvars::vulkan_placeholder_pipelines),
+            bool(cvars::async_shader_compilation));
+      }
+    }
+  }
+
   auto bind_guest_graphics_pipeline = [&]() {
   // Bind the handle observed when this draw's bindings were decided
   // (current_pipeline, loaded above), not the slot at replay time: the
