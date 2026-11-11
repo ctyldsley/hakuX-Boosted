@@ -44,7 +44,27 @@ val syncTitleDefaults = tasks.register<Sync>("syncTitleDefaults") {
   }
   into(titleDefaultsGenDir.map { it.dir("title-defaults") })
 }
-tasks.named("preBuild") { dependsOn(syncGamePatches, syncTitleDefaults) }
+// The Turnip packages the app ships with (core/BundledDriver.kt): what
+// boosted/tools/fetch-turnip.py downloaded for boosted/drivers/turnip.lock.json,
+// and the lock itself, which says which package is for which Adreno. Without
+// the download (a build by hand that skipped it) nothing is packed and the app
+// runs on the system driver until the user installs one.
+val gpuDriversGenDir = layout.buildDirectory.dir("generated/gpuDrivers")
+val syncGpuDrivers = tasks.register<Sync>("syncGpuDrivers") {
+  val drivers = rootProject.file("../boosted/drivers")
+  val lock = File(drivers, "turnip.lock.json")
+  val names = Regex("\"file\"\\s*:\\s*\"([^\"]+)\"").findAll(lock.readText()).map { it.groupValues[1] }.toList()
+  val fetched = names.all { File(drivers, "cache/$it").isFile }
+  inputs.property("fetched", fetched)
+  if (fetched) {
+    from(lock)
+    from(File(drivers, "cache")) { include(names) }
+  } else {
+    logger.warn("hakuX-Boosted: no Turnip packages in boosted/drivers/cache (run boosted/tools/fetch-turnip.py): none bundled")
+  }
+  into(gpuDriversGenDir.map { it.dir("gpu-drivers") })
+}
+tasks.named("preBuild") { dependsOn(syncGamePatches, syncTitleDefaults, syncGpuDrivers) }
 
 android {
   // XenDroid's application namespace: its sources use xendroid.compose.BuildConfig.
@@ -71,6 +91,7 @@ android {
         File(x360App, "src/main/assets"),
         gamePatchesGenDir.get().asFile,
         titleDefaultsGenDir.get().asFile,
+        gpuDriversGenDir.get().asFile,
       )
     )
   }

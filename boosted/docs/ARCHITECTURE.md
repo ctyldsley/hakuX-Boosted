@@ -86,9 +86,9 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `emulator-core/.../xenia/gpu/vulkan/vulkan_pipeline_cache.cc`, `.h` | Tessellated triangle and quad lists (control-point-indexed, discrete or continuous) get 3 / 4 control points per patch and the 3cp / 4cp control shader, as on D3D12; they had 1. Also `tessellation_debug`'s no-culling bit |
 | `emulator-core/src/main/cpp/CMakeLists.txt` | Hook libraries as dependencies of `emu` |
 | `emulator-core/.../Application.java`, `DocumentsProvider.java` | `ensure_init` / `attach`, so the class need not be the process's Application |
-| `app/.../MainActivity.kt`, `EmulatorHostActivity.kt` | Call `ensure_init`; seed the per-title defaults |
+| `app/.../MainActivity.kt`, `EmulatorHostActivity.kt` | Call `ensure_init`; seed the per-title defaults; install the bundled Turnip driver |
 | `app/.../updater/updater.kt`, `ui/library/GameLibraryScreen.kt` | XenDroid's updater off when embedded |
-| `app/.../core/Embedded.kt`, `core/TitleDefaults.kt` | New files |
+| `app/.../core/Embedded.kt`, `core/TitleDefaults.kt`, `core/BundledDriver.kt` | New files |
 
 ## Taking a newer hakuX
 

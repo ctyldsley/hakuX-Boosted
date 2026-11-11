@@ -17,7 +17,14 @@ What is known about this version and how. Updated with each change.
   merged without a conflict.
 - XenDroid: `rfandango/XenDroid` main at 779680a.
 
-## Not verified: nothing has run on a device
+## First device run (2026-11-11)
+
+Run 13's APK on an Adreno 840 phone, Fable II: the app, the 360 library and
+the game start and reach play. It ran on Qualcomm's driver (no Turnip was
+installed), drew with flicker, skipped 2,253 draws and stalled at frame
+9210. Details in `boosted/HANDOFF.md`. Nothing has run on Turnip yet.
+
+## Not verified: nothing below has run on a device
 
 No build of this fork has been installed or run. In particular:
 

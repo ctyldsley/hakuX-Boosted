@@ -44,6 +44,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // hakuX-Boosted: the 360 side's process start (Application.onCreate when standalone).
         Application.ensure_init(this)
+        // hakuX-Boosted: the bundled Turnip driver, so that the settings show it in use.
+        xendroid.compose.core.BundledDriver.install(applicationContext)
 
         // Same intent shape as the in-app launch, which routes through the
         // manifest filter into the host's own task. Finishing here instead

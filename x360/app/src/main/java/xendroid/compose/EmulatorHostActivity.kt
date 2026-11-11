@@ -235,6 +235,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun prepareNativeRealPath(absPath: String) {
         // hakuX-Boosted: the bundled per-title defaults, before the core reads its configs.
         xendroid.compose.core.TitleDefaults.seed(applicationContext, java.io.File(Utils.get_storage_root_path()))
+        // hakuX-Boosted: the bundled Turnip driver, before the core reads vulkan_lib_path.
+        xendroid.compose.core.BundledDriver.install(applicationContext)
         session.setupContext(this)
         session.setupGamePathReal(absPath)
         session.setupLaunchArgs(arrayOf(

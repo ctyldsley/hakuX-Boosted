@@ -1,0 +1,59 @@
+# hakuX-Boosted: keeps the bundled Turnip driver at StevenMXZ's newest release
+# (https://github.com/StevenMXZ/Adreno-Tools-Drivers). When a newer Turnip
+# release is out, boosted/drivers/turnip.lock.json is moved to it (the release
+# and each package's SHA-256), committed to the work branch, and the app is
+# built with it.
+#
+# The packages are prebuilt binaries from a third party: the lock makes every
+# build use exactly the files this workflow saw, and its commit is the record
+# of each change. Try a new driver on a device before a build with it is
+# given to anyone else.
+#
+# GitHub runs a schedule only from the repository's default branch: until this
+# file is on it, run the workflow by hand (Actions, "Turnip sync", Run
+# workflow, on the work branch).
+name: Turnip sync
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  WORK_BRANCH: claude/xbox360-emulator-architecture-eac8l7
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.WORK_BRANCH }}
+
+      - name: Move the lock to the newest Turnip release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 boosted/tools/fetch-turnip.py --update
+
+      - name: Commit, and build the app with it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- boosted/drivers/turnip.lock.json; then
+            echo "The bundled Turnip driver is the newest."
+            exit 0
+          fi
+          tag=$(python3 -c "import json; print(json.load(open('boosted/drivers/turnip.lock.json'))['tag'])")
+          title=$(python3 -c "import json; print(json.load(open('boosted/drivers/turnip.lock.json'))['title'])")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add boosted/drivers/turnip.lock.json
+          git commit -m "drivers: the bundled Turnip driver is $tag ($title)" \
+            -m "StevenMXZ/Adreno-Tools-Drivers release $tag, by the Turnip sync workflow. Not run on a device yet."
+          git push origin "HEAD:$WORK_BRANCH"
+          # a push by this workflow's token starts no other workflow; a dispatch does
+          gh workflow run boosted.yml --ref "$WORK_BRANCH"

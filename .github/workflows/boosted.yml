@@ -105,6 +105,16 @@ jobs:
         if: steps.xbox.outcome != 'success'
         run: echo "::warning::hakuX's core libraries are missing (the Xbox core job failed), this APK runs Xbox 360 titles only"
 
+      # The Turnip packages the app ships with, as boosted/drivers/turnip.lock.json
+      # pins them; a newer upstream release is only pointed out (the Turnip
+      # sync workflow moves the lock).
+      - name: Bundled Turnip driver
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 boosted/tools/fetch-turnip.py
+          python3 boosted/tools/fetch-turnip.py --check || true
+
       - name: Build the debug APK
         working-directory: android
         run: |
@@ -126,6 +136,7 @@ jobs:
           echo "game patches: $(unzip -l "$apk" | grep -c ' assets/game-patches/')"
           unzip -l "$apk" | grep -E ' assets/(title-defaults|config)/' || true
           echo "hakuX mods: $(unzip -l "$apk" | grep -c ' assets/mods/')"
+          unzip -l "$apk" | grep -E ' assets/gpu-drivers/' || true
           "$ANDROID_HOME/build-tools/36.1.0/aapt2" dump xmltree "$apk" --file AndroidManifest.xml \
             | grep -E 'E: (activity|service|provider|uses-sdk|uses-permission)|A: .*(:name|:process|minSdkVersion)' \
             | sed 's/ (Raw: .*//' || true
@@ -134,6 +145,9 @@ jobs:
                      libgsl_alloc_hook.so libkgsl_context_hook.so libhook_impl.so; do
             n=$(unzip -l "$apk" | grep -c " lib/arm64-v8a/$lib\$" || true)
             if [ "$n" != "1" ]; then echo "::error::$lib: $n copies in the APK"; missing=1; fi
+          done
+          for f in turnip.lock.json $(python3 -c "import json; print(' '.join(p['file'] for p in json.load(open('boosted/drivers/turnip.lock.json'))['packages']))"); do
+            unzip -l "$apk" | grep -q " assets/gpu-drivers/$f\$" || { echo "::error::the bundled driver's $f is not in the APK"; missing=1; }
           done
           if [ "${{ steps.xbox.outcome }}" = "success" ]; then
             for lib in libhakuxcore.so libSDL3.so; do

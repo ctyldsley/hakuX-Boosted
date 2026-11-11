@@ -1,0 +1,26 @@
+{
+  "source": "StevenMXZ/Adreno-Tools-Drivers",
+  "tag": "v39",
+  "title": "Turnip Gen8 V39 / Turnip v27.0.0-R2",
+  "published": "2026-11-07T15:51:23Z",
+  "packages": [
+    {
+      "adreno": "8",
+      "file": "Turnip_Gen8_V39.zip",
+      "url": "https://github.com/StevenMXZ/Adreno-Tools-Drivers/releases/download/v39/Turnip_Gen8_V39.zip",
+      "sha256": "572e415c11b636ea2a4c4968c60a9b24e459302549c8ea38e814dbd07e40654d",
+      "name": "Turnip Gen8 V39",
+      "driverVersion": "Vulkan 1.4.367",
+      "library": "libvulkan_freedreno.so"
+    },
+    {
+      "adreno": "7",
+      "file": "Turnip_v27.0.0-R2.zip",
+      "url": "https://github.com/StevenMXZ/Adreno-Tools-Drivers/releases/download/v39/Turnip_v27.0.0-R2.zip",
+      "sha256": "8d30be022582d0c03b1918c019540491d00439e14e9e5e1359fe0bb19004f781",
+      "name": "Turnip 27.0.0-R2",
+      "driverVersion": "Vulkan 1.4.367",
+      "library": "libvulkan_freedreno.so"
+    }
+  ]
+}
