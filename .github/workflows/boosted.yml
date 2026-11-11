@@ -40,8 +40,15 @@ jobs:
 
       - name: Tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build ccache
+          # the runner's package mirror fails now and then (apt's exit code 100
+          # sank two runs): a failed update is not fatal while the lists the
+          # image came with still serve, and the install is tried three times
+          sudo apt-get -o Acquire::Retries=5 update || echo "::warning::apt-get update failed, installing from the lists at hand"
+          for try in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=5 install -y ninja-build ccache && break
+            [ "$try" = 3 ] && exit 1
+            sleep 30; sudo apt-get -o Acquire::Retries=5 update || true
+          done
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
           echo "ANDROID_NDK=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
@@ -82,8 +89,15 @@ jobs:
 
       - name: Tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build ccache python3 glslang-tools spirv-tools
+          # the runner's package mirror fails now and then (apt's exit code 100
+          # sank two runs): a failed update is not fatal while the lists the
+          # image came with still serve, and the install is tried three times
+          sudo apt-get -o Acquire::Retries=5 update || echo "::warning::apt-get update failed, installing from the lists at hand"
+          for try in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=5 install -y ninja-build ccache python3 glslang-tools spirv-tools && break
+            [ "$try" = 3 ] && exit 1
+            sleep 30; sudo apt-get -o Acquire::Retries=5 update || true
+          done
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" "platforms;android-36" "build-tools;36.1.0"
