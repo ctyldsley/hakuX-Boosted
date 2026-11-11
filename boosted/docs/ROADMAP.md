@@ -17,15 +17,47 @@ build pinned, differences under 2 fps treated as noise.
 - [x] Build of the whole app on GitHub Actions.
 - [ ] First run on a device. See `STATUS.md` for the checks to make.
 
-## Phase 2: zero-copy guest memory on Adreno
+## Phase 2: Fable II on an Adreno 8xx, with a device in the loop
+
+The plan and what to record are in `FABLE2.md`. In order:
+
+1. MSAA off by the title's patch, then Turnip's tiled rendering for the
+   title. Upstream's own measurements say multisampled passes are the only
+   thing that hangs tiled mode on the Adreno 830; this is the largest
+   performance lever that needs no new code.
+2. The missing ground: the in-shader 24-bit float depth switches first;
+   then code, guided by a comparison of the Vulkan and D3D12 depth paths.
+3. The loading-screen crash: needs the guest crash dump from a run (the
+   title patch upstream describes is not in its repository).
+4. If tiled mode holds: make it the title's shipped default, together with
+   the patch (`boosted/x360-titles`), and repeat for the next titles.
+
+## Phase 3: zero-copy guest memory on Adreno
 
 The largest piece of hakuX that the 360 side lacks (`CROSSOVER.md`, item 1).
+Read the two cautions first.
 
-What exists: XenDroid already has the consumer side. With
-`shared_memory_zero_copy` the Vulkan backend treats guest physical memory as
-the shared-memory buffer and skips uploads
-(`gpu/vulkan/vulkan_shared_memory.cc`, `TryInitializeZeroCopy`). It is dead
-on Adreno because the import uses `VK_EXT_external_memory_host`.
+**It is not correct without a write barrier.** With zero-copy the GPU reads
+guest memory when a submission executes, not when a draw is recorded. The
+360 side records a frame into a deferred command buffer and submits about
+once a frame, so a game that reuses a vertex buffer after issuing its draws
+would have the GPU read the new contents. XenDroid's existing zero-copy
+path (`TryInitializeZeroCopy`) has nothing against this. hakuX does: a page
+the GPU still has to read is write-protected, and the first write to it
+waits for the GPU (`hw/xbox/hle/mem/barrier.c`, `mem/pageuse.c`), with
+small or hot ranges copied instead so the wait is rare. Porting the import
+without the barrier would trade copies for corruption.
+
+**The gain is unproven.** Uploads are a CPU memcpy plus a GPU copy of the
+pages dirtied each frame. The one title profiled upstream was GPU-bound on
+fragment shading with the CPU mostly idle, where this buys little. It
+should matter most while streaming. Measure upload bytes per frame on the
+target titles before starting.
+
+What exists: XenDroid has the consumer side. With `shared_memory_zero_copy`
+the Vulkan backend treats guest physical memory as the shared-memory buffer
+and skips uploads (`gpu/vulkan/vulkan_shared_memory.cc`). It is dead on
+Adreno because the import uses `VK_EXT_external_memory_host`.
 
 What to build:
 
@@ -36,41 +68,34 @@ What to build:
    in `Memory::Initialize` / `MapViews` (`xenia/memory.cc`) in place of the
    shared memory file's physical range. hakuX's `hw/xbox/hle/uma/uma.c`
    (`hle_uma_ram_fd`) does exactly this, including the checks that the fd
-   is the buffer's memory and that `mprotect` write tracking works on it;
-   it can be lifted nearly as is. Fall back to the current file when any
-   check fails.
-2. **Import.** In `TryInitializeZeroCopy`, when the physical memory is an
-   AHardwareBuffer, import it with
+   is the buffer's memory and that `mprotect` write tracking works on it.
+   Fall back to the current file when any check fails.
+2. **Import.** In `TryInitializeZeroCopy`, import the buffer with
    `VK_ANDROID_external_memory_android_hardware_buffer`
    (`hw/xbox/hle/vk/guest_ram.c`, `import`, is the reference).
-3. **Cache maintenance.** The GPU does not see the CPU's cache through this
-   import. Before the GPU reads a range the CPU wrote, clean its cache lines
-   (`dc cvac`); after the GPU writes a range (resolves, memexport), the
-   CPU's lines over it must be invalidated before the CPU reads it.
-   XenDroid's shared memory already knows both sets: the modified pages it
-   would have uploaded, and the resolve and memexport destinations. hakuX's
-   `hw/xbox/hle/mem/barrier.c` is the reference for doing this only over
-   pages written since their last clean.
-4. **A cvar** (default off until it has run on at least an Adreno 6xx, 7xx
-   and 8xx), and a log line stating which path was taken.
+3. **The barrier.** Per page, the last submission that reads it; the
+   shared memory's invalidation callback (which already runs on the first
+   write to a watched page) asks the command processor to submit and waits
+   for that submission when it has not retired. Copy instead of alias for
+   ranges that are rewritten every frame.
+4. **Cache maintenance.** The GPU does not see the CPU's cache through this
+   import: clean the lines (`dc cvac`) of pages written since their last
+   clean before the GPU reads them, and clean and invalidate (`dc civac`)
+   a range the GPU is about to write (resolves, memexport), again once that
+   submission has retired.
+5. **A cvar**, default off until it has run on an Adreno 6xx, 7xx and 8xx.
 
-How to tell: `xe.log` reports the zero-copy import; upload byte counters
-drop to zero; frame time on a streaming-heavy scene (Fable II's Bowerstone)
-against the same scene with the cvar off; no texture or vertex corruption
-after ten minutes (stale cache lines show as flickering geometry).
+How to tell: `xe.log` reports the import; upload byte counters drop to
+zero; frame time on a streaming-heavy scene against the same scene with the
+cvar off; no flickering geometry after ten minutes.
 
-Risks: dma-buf mapping at an offset and write-protecting it may behave
-differently across vendors' kernels (hakuX checks at run time and falls
-back); a 512 MB BLOB buffer is larger than hakuX's 64 or 128 MB and may be
-refused by some gralloc implementations.
-
-## Phase 3: the measured list
+## Phase 4: the measured list
 
 Each needs a profile first; do not start one without the measurement named.
 
 | Item | Measure first | Where |
 |---|---|---|
-| GMEM instead of sysmem where it is stable | fps and hangs per title with `turnip_debug` empty, on each GPU generation | `ui/vulkan/vulkan_instance.cc` |
+| GMEM instead of sysmem beyond the titles with an MSAA patch | fps and hangs per title with `turnip_debug` empty, on each GPU generation | `ui/vulkan/vulkan_instance.cc` |
 | Fast paths for the hottest kernel exports (critical sections first) | Calls per second per export for three titles (add a counter in the export thunk) | `kernel/xboxkrnl/xboxkrnl_rtl.cc`, `cpu/backend/a64` |
 | A lighter guest-to-host thunk for exports that take no vector arguments | Share of CPU time in the thunk (simpleperf) | `cpu/backend/a64/a64_backend.cc` |
 | More allocatable integer registers; values kept across block edges | Share of JIT code that is context loads and stores | `cpu/compiler/passes/register_allocation_pass.cc` |
@@ -79,12 +104,6 @@ Each needs a profile first; do not start one without the measurement named.
 | 32-bit HDR targets where alpha is unused | Tile count and RB busy on the instrumented Turnip | same |
 | Frame pacing against Choreographer, as hakuX's `native/app/vsync.c` | Frame time variance at a locked 30 | `ui/vulkan/vulkan_presenter.cc` |
 | Thread placement and ADPF hints for the GPU command thread and guest CPU threads | Core residency (simpleperf) under load | `base/threading_posix.cc` |
-
-## Phase 4: correctness blockers for the target titles
-
-Tracked per title in `boosted/x360-titles` and, for Fable II, in
-`FABLE2.md`. Fable II's are a depth precision bug that leaves the ground
-unrendered on Vulkan, and a crash while streaming.
 
 ## Phase 5: one library
 
