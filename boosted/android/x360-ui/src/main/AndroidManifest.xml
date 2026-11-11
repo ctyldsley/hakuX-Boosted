@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- hakuX-Boosted: the Xbox 360 side's activities inside hakuX's app.
+     XenDroid's own manifest (x360/app/src/main/AndroidManifest.xml) with what
+     an application's has and a library's can't: no launcher entry (the hakuX
+     library opens the 360 library, boosted/X360.kt) and no Application class
+     (xendroid.compose.Application.ensure_init runs as the activities start). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Legacy storage (maxSdkVersion guards: SAF is the real path on 29+). -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <!-- All Files Access (API 30+): the 360 side's real-path mode, asked for
+         only when the user chooses it there. SAF stays its default. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+
+    <application>
+        <!-- The 360 side's screens: library, settings, content, profiles. -->
+        <activity
+            android:name="xendroid.compose.MainActivity"
+            android:theme="@style/Theme.xendroidCompose"
+            android:label="@string/x360_label"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:exported="false" />
+
+        <!-- The 360 core: libe.so in its own process (single-shot per process),
+             exported for frontends (x360/docs/frontend-integration.md). -->
+        <activity
+            android:name="xendroid.compose.EmulatorHostActivity"
+            android:process=":emu"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:windowSoftInputMode="adjustNothing"
+            android:theme="@style/Theme.xendroidEmu">
+            <intent-filter>
+                <action android:name="xendroid.intent.action.xendroid" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <!-- A pinned shortcut's cold start: a VIEW without data, within the
+                 package (hakuX's own VIEW filter takes those with data). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- No android:process on purpose: must land in the main process. -->
+        <service
+            android:name="xendroid.compose.core.MainAliveService"
+            android:exported="false" />
+    </application>
+</manifest>

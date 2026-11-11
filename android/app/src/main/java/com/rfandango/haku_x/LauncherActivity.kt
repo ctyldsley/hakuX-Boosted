@@ -99,6 +99,12 @@ class LauncherActivity : ComponentActivity() {
     launchedExternally: Boolean,
     state: String? = null,
   ) {
+    // hakuX-Boosted: an Xbox 360 image goes to the 360 core (boosted/X360.kt);
+    // the library stays under it, a frontend's launch leaves nothing behind
+    if (com.rfandango.haku_x.boosted.X360.launchIfXbox360(this, uri, launchedExternally)) {
+      if (launchedExternally) finish()
+      return
+    }
     AppPrefs(this).rememberLaunch(uri, relativePath, title)
     startActivity(Intent(this, NativeCoreActivity::class.java).apply {
       putExtra(NativeCoreActivity.EXTRA_DVD_URI, uri.toString())

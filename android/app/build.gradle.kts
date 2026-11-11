@@ -94,6 +94,15 @@ android {
       "META-INF/NOTICE*"
     )
     jniLibs.useLegacyPackaging = true
+    // hakuX-Boosted: adrenotools' hook libraries come from both cores' builds
+    // (the same adrenotools revision and patch): one copy of each is packed.
+    jniLibs.pickFirsts += setOf(
+      "**/libmain_hook.so",
+      "**/libfile_redirect_hook.so",
+      "**/libgsl_alloc_hook.so",
+      "**/libkgsl_context_hook.so",
+      "**/libhook_impl.so",
+    )
     jniLibs.keepDebugSymbols += setOf("**/*.so")
   }
 
@@ -135,6 +144,9 @@ dependencies {
   implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.1")
   implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.1")
   debugImplementation("androidx.compose.ui:ui-tooling")
+
+  // hakuX-Boosted: the Xbox 360 side (boosted/android/x360-ui, x360/)
+  implementation(project(":x360-ui"))
 
   // JVM unit tests (the hard disk image formats: data/hdd)
   testImplementation("junit:junit:4.13.2")

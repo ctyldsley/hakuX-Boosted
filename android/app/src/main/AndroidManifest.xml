@@ -1,4 +1,10 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+
+  <!-- hakuX-Boosted: the Xbox 360 modules ask for Android 10 (their native
+       library's thread-locals); hakuX itself still installs on Android 9,
+       where the 360 side isn't offered (boosted/X360.kt). -->
+  <uses-sdk tools:overrideLibrary="xendroid.compose, xendroid.compose.core" />
 
   <!-- The games' rumble, on the controllers (and a handheld's body). -->
   <uses-permission android:name="android.permission.VIBRATE" />

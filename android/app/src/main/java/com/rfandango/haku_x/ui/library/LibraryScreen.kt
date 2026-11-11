@@ -153,6 +153,8 @@ fun LibraryScreen(
             )
           }
         }
+        // hakuX-Boosted: the Xbox 360 side's library (boosted/X360.kt)
+        com.rfandango.haku_x.boosted.X360LibraryButton()
         // the folders listed again, as a pull does (a controller can't pull)
         IconButton(onClick = vm::refresh, modifier = Modifier.padding(start = 4.dp)) {
           Icon(Icons.Filled.Refresh, contentDescription = stringResource(R.string.library_refresh))
