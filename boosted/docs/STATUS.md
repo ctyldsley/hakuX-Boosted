@@ -26,6 +26,9 @@ No build of this fork has been installed or run. In particular:
 - **Per-title defaults.** Check that
   `Android/data/<package>/files/compose/config/4D5307F1.config.toml` exists
   after Fable II's first launch and that `xe.log` reports the override.
+- **The MSAA log line and `tessellation_debug`.** Built, not run. They
+  change nothing unless multisampled targets are created or the setting is
+  not 0.
 - **Performance.** No change in this version has been measured. The only
   one expected to affect frame delivery is `kgsl_context_priority`, and its
   expected effect is fewer GPU hangs and stalls under GPU composition, not
@@ -50,6 +53,11 @@ No build of this fork has been installed or run. In particular:
   (`-Werror` on a missing initialiser in `test_pusher.c`, `libm` not linked
   for `test_apu_hrtf`). Upstream's issue, untouched; the tests are not part
   of the Actions build.
+- Tessellated triangle and quad lists (patches given by control points,
+  discrete or continuous) are built with one control point per patch on
+  Vulkan where the evaluation shader reads three or four
+  (`gpu/vulkan/vulkan_pipeline_cache.cc`). Found while reading the path
+  Fable II's ground takes; it does not affect that title. Not fixed here.
 - The Fable II streaming-crash patch that `x360/GAME_COMPAT.md` describes is
   not in XenDroid's repository, so it is not here either.
 - The two sides have separate libraries, settings and driver managers

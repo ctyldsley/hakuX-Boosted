@@ -23,6 +23,48 @@ by this fork.
 So before performance, Fable II has one rendering bug and one stability bug
 that decide whether it is playable at all.
 
+## The ground is drawn by the tessellator
+
+Xenia's source names this title's ground in two places: `gpu/xenos.h`
+("4D5307F1 draws single ground patches by passing 1 as the index count",
+"auto-indexed patches with a nonzero VGT_INDX_OFFSET") and
+`gpu/primitive_processor.cc` ("4D5307F1 - ground - continuous", under quad
+patches). So the missing ground is the one part of the scene that goes
+through the console's tessellator: on Vulkan, a small vertex shader and a
+tessellation control shader of the emulator's own, then the game's vertex
+shader run as the tessellation evaluation shader. That path is newer than
+the rest of the Vulkan backend (a "TODO: Tessellation" from before it was
+written still sits beside it) and few titles use it, so it has had far less
+use than the ordinary draw path. It changes where to look: a fault there
+would also make draws "issued, but writing nothing".
+
+A read of that path against the reference translator (the D3D12 one, in the
+same tree, written when this title's ground was first made to work) found:
+
+- For this title's kind of patch (quad, patch-indexed, continuous) the
+  register set-up, the tessellation factors, the index handling and the
+  constants match, with one difference: the Vulkan translator puts 1.0 in
+  `r0.w` where the reference leaves 0. Unlikely to matter (nothing maps to
+  that component), not ruled out.
+- A separate fault that does not affect this title: discrete and continuous
+  patches given by control points (triangle and quad lists) are built with
+  one control point per patch and the one-control-point shader
+  (`vulkan_pipeline_cache.cc`, `patchControlPoints`), while the evaluation
+  shader reads three or four. The reference uses the 3 and 4 control point
+  shaders there.
+- Upstream's depth reading is not excluded by any of this.
+
+Reading cannot settle it, a run can. `tessellation_debug` (per-game
+settings, GPU) logs each kind of tessellated draw with its state and the
+game's vertex shader, and can turn off culling or the depth test for
+tessellated draws only:
+
+| Ground appears with | Then the fault is |
+|---|---|
+| 1 (no culling) | Winding of the tessellator's triangles: a one-line fix |
+| 2 (no depth test) | The depth the ground's shader produces or is tested against |
+| Neither | Position: the patches are not where they should be, or not rasterized. The logged shader says what it reads |
+
 ## The performance lever on an Adreno 8xx
 
 By default the 360 side tells Turnip to render untiled (`turnip_debug =
@@ -75,9 +117,10 @@ must be selected (360 settings, Vulkan, Custom Vulkan driver).
 | 0 | Global settings, Storage: **Mount cache** on. Nothing else. | fps; is the ground drawn; does `xe.log` say "multisampled render targets" |
 | 1 | Game patches: **Disable MSAA** | fps; the MSAA line should be gone from `xe.log` |
 | 2 | Per-game, Vulkan, **Turnip debug mode: None (GMEM)**, with step 1 kept | fps; any hang or device-lost in the first minutes |
-| 3 | Per-game, GPU, **Depth float24 convert in pixel shader** on | Is the ground drawn; fps cost |
-| 4 | Step 3 plus **Depth float24 round** on | Is the ground drawn |
-| 5 | Game patches: **High Tick Rate**, then **60 FPS** | Only if steps 1 to 2 hold a steady 30 |
+| 3 | Per-game, GPU, **Tessellation diagnostics**: 1, then 2, then 3 (a launch each), then back to 0 | For each: is the ground drawn. Send `xe.log` from the run at 3 |
+| 4 | Per-game, GPU, **Depth float24 convert in pixel shader** on | Is the ground drawn; fps cost |
+| 5 | Step 4 plus **Depth float24 round** on | Is the ground drawn |
+| 6 | Game patches: **High Tick Rate**, then **60 FPS** | Only if steps 1 to 2 hold a steady 30 |
 
 Notes on the steps:
 
@@ -85,7 +128,11 @@ Notes on the steps:
   dies, set Turnip debug mode back to sysmem. If `xe.log` still shows the
   multisampled line with the patch on, some pass is still multisampled
   (send the log: it names the sample count).
-- **Step 3** is the existing switch that does what upstream names as the
+- **Step 3** is the most useful one for the ground: its three answers and
+  the logged shader decide what gets fixed next (the table above). With the
+  depth test off the ground will draw over things in front of it; that is
+  expected.
+- **Step 4** is the existing switch that does what upstream names as the
   remaining lead for the ground (quantising the pixel's depth to the
   console's 24-bit float in the shader). It is not on upstream's list of
   things already tried. It costs fragment shader time and early depth
