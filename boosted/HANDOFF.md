@@ -9,6 +9,31 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
 
 ## Right now
 
+- **STOP: run 22's APK cannot load Fable II past character selection.**
+  Second device run (2026-11-11 22:18, run 22, commit `60a088e`, the
+  bundled Turnip in use: `driverID: MesaTurnip`, Mesa 27.0.0-devel). At
+  frame 556 `xe.log` says `Host-side crash on fiber thread (handle
+  0xF80000F4, guest tid 0x1A) ... guest lr 0x822D74D8. Halting fiber`. The
+  thread is the one that opens `\dataudio`; with it halted the load
+  screen runs for ever (tooltips cycle, 248,000 draws every 600 frames,
+  nothing else). The host PC is in `libe.so` at offset `0x153BA84`:
+  `xe::kernel::XObject::Wait(uint, uint, uint, ulong*)` + `0x75C` (from the
+  APK's own symbol table and the process's maps). Run 13 (the core built
+  Debug, -O2) passed this point with the same ISO.
+  - **Suspect: the Release configuration (`ab7db16`).** It is the only
+    change to how `XObject::Wait` is compiled; the JIT change is not
+    emitted on this phone (4 KiB pages), and the thread does file I/O, not
+    graphics. Not proven: run 18's APK (Turnip, the core as before) is the
+    test. If run 18 loads, take `-DCMAKE_BUILD_TYPE=Release` back out (and
+    the Actions check that demands -O3) until the fault in `Wait` is found.
+  - Good news in the same log: on Turnip none of the 2,253 skipped draws
+    (`UpdateBindings`) appeared in 4,200 frames, and the KGSL priority hook
+    is active.
+  - The 4x target the MSAA patch leaves is one 640x1024 colour and depth
+    pair: 18,600 of about 248,000 draws per 600 frames go to it.
+  - The phone's pages are 4 KiB (`getconf PAGE_SIZE`): the 16 KiB fix-up
+    does not apply to it.
+
 - **Branch:** `claude/xbox360-emulator-architecture-eac8l7`. All work is on
   it. `master` is still upstream hakuX 1.2.0; nothing has been merged to it
   and there is no pull request.
@@ -272,6 +297,11 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-11 (desktop, night).** Second device run, run 22 on the
+  bundled Turnip: the driver and the touch controls work as built; a
+  host-side crash in `XObject::Wait` halts a loading thread (top of "Right
+  now"). Logs kept on the desktop (`device-logs/run2`). No code changed.
 
 - **2026-11-11 (cloud, late).** Added the multisampled-draws line (above)
   after the desktop's MSAA finding. Run 19 confirmed the review-pass
