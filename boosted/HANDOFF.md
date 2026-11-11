@@ -139,8 +139,7 @@ throwaway key and has to be uninstalled once.
 - `gh` is for search only (`gh api -X GET search/commits`, `search/issues`).
   Searching `repo:rfandango/XenDroid` commits is how the Fable II patch was
   found; `git fetch <sha>` from a public repository works.
-- Pushes queue builds; a newer push replaces a queued one but does not
-  cancel a running one.
+- A newer push cancels the run before it.
 
 **On a desktop:** the same branch. With the Android SDK installed you can
 build locally and use adb; the device etiquette in upstream's own
