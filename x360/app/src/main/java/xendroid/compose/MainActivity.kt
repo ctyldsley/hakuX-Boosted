@@ -42,6 +42,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // hakuX-Boosted: the 360 side's process start (Application.onCreate when standalone).
+        Application.ensure_init(this)
 
         // Same intent shape as the in-app launch, which routes through the
         // manifest filter into the host's own task. Finishing here instead

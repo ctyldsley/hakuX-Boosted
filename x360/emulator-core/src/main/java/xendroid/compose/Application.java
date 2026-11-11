@@ -69,12 +69,27 @@ public class Application extends android.app.Application{
 
     public  static Context ctx;
     public static String gpu_device_name_vk;
-    @Override
-    public void onCreate()
-    {
-        super.onCreate();
+    private static boolean initialized;
 
-        Application.ctx=this;
+    /** hakuX-Boosted: the context alone, for callers that only need the data
+     *  directories (the DocumentsProvider, created before any activity). */
+    public static synchronized void attach(Context context) {
+        if (ctx == null) {
+            ctx = context.getApplicationContext();
+        }
+    }
+
+    /**
+     * hakuX-Boosted: what onCreate did, callable from wherever the 360 side is
+     * first entered. Inside hakuX's app this class is not the process's
+     * Application (hakuX's own is), so the 360 activities call this as they
+     * start; standalone XenDroid still gets here from onCreate. Once a process.
+     */
+    public static synchronized void ensure_init(Context context) {
+        if (initialized) {
+            return;
+        }
+        Application.ctx = context.getApplicationContext();
         gpu_device_name_vk= ProcessorInfo.gpu_get_physical_device_name_vk();
 
         String[] entry={"cache","cache0","cache1",};
@@ -85,14 +100,21 @@ public class Application extends android.app.Application{
         // Refresh, not just create: it is a cache of the bundled asset, and the
         // settings UI diffs against it to decide what is modified from default.
         File default_config_file=get_default_config_file();
-        String bundled_config=load_default_config_str(this);
+        String bundled_config=load_default_config_str(ctx);
         if(!default_config_file.exists()
                 || !bundled_config.equals(Utils.load_string(default_config_file)))
             Utils.save_string(default_config_file,bundled_config);
 
         if(!should_delay_load())
             Emulator.load_library();
+        initialized = true;
+    }
 
+    @Override
+    public void onCreate()
+    {
+        super.onCreate();
+        ensure_init(this);
     }
 
 }

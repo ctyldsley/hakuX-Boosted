@@ -145,6 +145,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // hakuX-Boosted: the 360 side's process start (Application.onCreate when standalone).
+        Application.ensure_init(this)
         enterImmersiveMode()
 
         // Keep the launcher out of the cached band so lmkd stops reaping it mid-game, and
@@ -231,6 +233,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     /** PRE-surface setup in order: setupContext -> setupGamePathReal -> launch args ->
      *  uri info list. [absPath] is an absolute host path. */
     private fun prepareNativeRealPath(absPath: String) {
+        // hakuX-Boosted: the bundled per-title defaults, before the core reads its configs.
+        xendroid.compose.core.TitleDefaults.seed(applicationContext, java.io.File(Utils.get_storage_root_path()))
         session.setupContext(this)
         session.setupGamePathReal(absPath)
         session.setupLaunchArgs(arrayOf(

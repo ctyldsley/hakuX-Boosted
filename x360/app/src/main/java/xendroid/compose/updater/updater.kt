@@ -74,6 +74,8 @@ fun getRemainingCooldown(context: Context): Long {
 }
 
 fun shouldCheckForUpdates(context: Context): Boolean {
+    // hakuX-Boosted: XenDroid's releases are not this app's.
+    if (xendroid.compose.core.Embedded.isEmbedded(context)) return false
     val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     val lastCheck = prefs.getLong(KEY_LAST_CHECK, 0L)

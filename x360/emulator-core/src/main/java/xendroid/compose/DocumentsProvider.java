@@ -72,6 +72,9 @@ public class DocumentsProvider extends android.provider.DocumentsProvider{
 
     @Override
     public boolean onCreate() {
+        // hakuX-Boosted: inside hakuX's app the 360 side's Application.onCreate
+        // doesn't run; the data directory needs only the context.
+        Application.attach(getContext());
         return true;
     }
     @Override

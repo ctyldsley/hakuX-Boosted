@@ -159,7 +159,8 @@ fun GameLibraryScreen(
                             onClick = { menuOpen = false; onOpenAbout() },
                         )
 
-                        DropdownMenuItem(
+                        // hakuX-Boosted: XenDroid's updater is XenDroid's alone.
+                        if (!xendroid.compose.core.Embedded.isEmbedded(context)) DropdownMenuItem(
                             text = { Text("Check for Updates") },
                             onClick = {
                                 menuOpen = false

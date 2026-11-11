@@ -1,0 +1,12 @@
+# Fable II (4D5307F1): hakuX-Boosted's default per-game config.
+#
+# Seeded to <storage_root>/config/4D5307F1.config.toml when the title has no
+# per-game config yet (x360/app/.../core/TitleDefaults.kt); the per-game
+# settings screen edits the same file.
+#
+# From XenDroid's notes on the title (x360/GAME_COMPAT.md, 2026-06-13): the
+# float32 depth emulation path instead of native D24_UNORM_S8_UINT gave the
+# best overall result on Adreno 830 with Turnip. Kept per-game: forcing it
+# globally risks the float32-depth fault other titles have.
+[Vulkan]
+vulkan_depth_unorm24 = false
