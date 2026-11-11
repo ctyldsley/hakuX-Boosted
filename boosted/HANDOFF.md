@@ -117,8 +117,18 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
   draws are back on Turnip (390 by frame 2,475, the same `VS 6t/3s` against
   an empty layout, `PM4_DRAW_INDX(1, 18, 2)`), so they are the emulator's,
   not the driver's. Slow: about 2,500 frames in 10 minutes including the
-  loads. The owner was still playing when the log was read; the frame 9210
-  stall is not confirmed either way on Turnip.
+  loads. **The frame 9210 stall did not happen on Turnip:** the owner
+  played on to frame 11,388 (18 minutes) and was still progressing; the XMA
+  thread's warning pair appeared once (frame 3,162) and cleared; 392 draws
+  skipped in all. The owner's eyes: playable, some stutter, an occasional
+  texture glitch.
+- **The UI work is on its own branch, `claude/xbox-ui`,** in a cloud
+  session started from the desktop. It merges this branch in before each
+  push; this branch takes it back once a build has been checked on the
+  phone. Core work stays here.
+- **Wanted by the owner after the game runs smoothly: Fable II at 60 fps.**
+  Canary's "60 FPS" patch is in the bundled catalog (off). It needs the
+  frame time first: measure on the optimised core before turning it on.
 - **Next for the owner's phone:** the APK of the first green run at or
   after `2c2c6ec` (the never-inlined per-thread readers on the optimised
   core). It is signed with the fork's key and installs over run 18.
