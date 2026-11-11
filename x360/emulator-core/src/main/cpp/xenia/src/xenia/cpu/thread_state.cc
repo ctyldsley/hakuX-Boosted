@@ -14,6 +14,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/processor.h"
 
@@ -104,9 +105,11 @@ void ThreadState::Bind(ThreadState* thread_state) {
   thread_state_ = thread_state;
 }
 
-ThreadState* ThreadState::Get() { return thread_state_; }
+// hakuX-Boosted: never inlined (a thread_local read by code that fibers carry
+// between host threads: kernel/xthread.cc, XThread::GetCurrentThread).
+XE_NOINLINE ThreadState* ThreadState::Get() { return thread_state_; }
 
-uint32_t ThreadState::GetThreadID() {
+XE_NOINLINE uint32_t ThreadState::GetThreadID() {
   return thread_state_ ? thread_state_->thread_id_ : 0xFFFFFFFF;
 }
 

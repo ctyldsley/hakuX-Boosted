@@ -20,12 +20,26 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
   `xe::kernel::XObject::Wait(uint, uint, uint, ulong*)` + `0x75C` (from the
   APK's own symbol table and the process's maps). Run 13 (the core built
   Debug, -O2) passed this point with the same ISO.
-  - **Suspect: the Release configuration (`ab7db16`).** It is the only
-    change to how `XObject::Wait` is compiled; the JIT change is not
-    emitted on this phone (4 KiB pages), and the thread does file I/O, not
-    graphics. Not proven: run 18's APK (Turnip, the core as before) is the
-    test. If run 18 loads, take `-DCMAKE_BUILD_TYPE=Release` back out (and
-    the Actions check that demands -O3) until the fault in `Wait` is found.
+  - **Cause found by disassembling run 22's `libe.so`, fix pushed (see the
+    log's newest line for whether it is built).** `XObject::Wait` reads
+    the thread's TLS base once on entry (`mrs x28, tpidr_el0` at
+    `+0x1C`), calls `GuestScheduler::BlockCurrentThread`, then reads the
+    current `XThread` through that same base (`ldr x29, [x28, x22]` at
+    `+0x758`) and dereferences it. Guest threads are fibers the scheduler
+    moves between host threads: after the switch the fiber was on another
+    host thread, the base was the previous one's, the pointer there was
+    null. ThinLTO inlined `XThread::GetCurrentThread` into the wait loop;
+    the Debug build called it, so it worked. The optimised build stays:
+    the readers of per-thread variables that fiber code uses are now
+    `XE_NOINLINE` (`XThread::GetCurrentThread`, `GetCurrentFiberThread`,
+    `IsInThread`, `cpu::Thread`'s, `ThreadState::Get`, `Fiber::
+    GetCurrentFiber`, `current_thread_id`, the host `Thread::
+    GetCurrentThread`, and the scheduler's CPU index through
+    `CurrentCpu()`). **The same fault can be anywhere a `thread_local` is
+    read directly on both sides of a fiber switch**: a new `Host-side crash
+    on fiber thread` line is the sign, and the offset in it plus the APK's
+    symbol table names the function (`device-logs` method above).
+  - Run 18's APK (Turnip, the core as before) is on the phone meanwhile.
   - Good news in the same log: on Turnip none of the 2,253 skipped draws
     (`UpdateBindings`) appeared in 4,200 frames, and the KGSL priority hook
     is active.
@@ -297,6 +311,10 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-11 (desktop, late).** Found run 22's crash (a TLS base kept
+  over a fiber switch, top of "Right now") and made the per-thread readers
+  never inline, keeping -O3 and ThinLTO. Not built or run yet.
 
 - **2026-11-11 (desktop, night).** Second device run, run 22 on the
   bundled Turnip: the driver and the touch controls work as built; a

@@ -18,6 +18,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/mutex.h"
+#include "xenia/base/platform.h"
 #include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
@@ -41,9 +42,16 @@ namespace kernel {
 // non-dispatch thread. Set by each CPU's RunLoop.
 static thread_local int t_current_cpu = -1;
 
+// hakuX-Boosted: every read goes through this, never inlined. A fiber that
+// yields can resume on another CPU's host thread, and code that reads the
+// index on both sides of the yield (YieldCurrentThread compares them) must
+// read the thread it is on now, not the TLS block the compiler found on entry
+// (kernel/xthread.cc, XThread::GetCurrentThread).
+XE_NOINLINE static int CurrentCpu() { return t_current_cpu; }
+
 // Off a dispatch thread there is no CPU to index, so the caller must bail.
 static bool OnDispatchThread(const char* what) {
-  if (t_current_cpu >= 0) {
+  if (CurrentCpu() >= 0) {
     return true;
   }
   XELOGW("GuestScheduler: {} called off a dispatch thread, ignoring", what);
@@ -354,7 +362,7 @@ void GuestScheduler::EnqueueReady(XThread* thread, int cpu_index,
     }
     // A running fiber's context is not saved until it yields, so only the
     // dispatch thread that owns it, links.cpu, may re-queue it.
-    if (links.running && links.cpu != t_current_cpu) {
+    if (links.running && links.cpu != CurrentCpu()) {
       return;
     }
     if (links.queued) {
@@ -677,15 +685,15 @@ void GuestScheduler::SwitchTo(XThread* next) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     assert_true(links.running);
-    cpus_[t_current_cpu].switch_seq.fetch_add(1, std::memory_order_relaxed);
-    cpus_[t_current_cpu].current_thread = next;
+    cpus_[CurrentCpu()].switch_seq.fetch_add(1, std::memory_order_relaxed);
+    cpus_[CurrentCpu()].current_thread = next;
     // Grant a fresh slice only if the previous one was consumed. A preempted
     // thread resumes with its remainder, so its quantum end still arrives.
     if (!links.quantum_deadline_tick) {
       links.quantum_deadline_tick =
           Clock::host_tick_count_raw() + quantum_ticks_;
     }
-    cpus_[t_current_cpu].quantum_deadline_tick = links.quantum_deadline_tick;
+    cpus_[CurrentCpu()].quantum_deadline_tick = links.quantum_deadline_tick;
   }
   stats_.switches.fetch_add(1, std::memory_order_relaxed);
   XThread::SetCurrentThread(next);
@@ -698,7 +706,7 @@ void GuestScheduler::SwitchTo(XThread* next) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     links.running = false;
-    cpus_[t_current_cpu].current_thread = nullptr;
+    cpus_[CurrentCpu()].current_thread = nullptr;
   }
   XThread::SetCurrentThread(nullptr);
 }
@@ -771,7 +779,7 @@ void GuestScheduler::YieldToScheduler() {
       xe::global_critical_region::is_held_by_current_thread()) {
     ReportGlobalLockHazard();
   }
-  cpus_[t_current_cpu].idle_fiber->SwitchTo();
+  cpus_[CurrentCpu()].idle_fiber->SwitchTo();
 }
 
 void GuestScheduler::ExitIfTerminated() {
@@ -806,7 +814,7 @@ bool GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
   // next call takes the slow path.
   if (!quantum_end && !links.preempted && self->suspend_count() == 0 &&
       !self->thread_state()->context()->preempt_requested) {
-    const Cpu& cpu = cpus_[t_current_cpu];
+    const Cpu& cpu = cpus_[CurrentCpu()];
     if (cpu.ready_summary.load(std::memory_order_relaxed) == 0 &&
         !cpu.repoll_now.load(std::memory_order_relaxed)) {
       return false;  // nothing else ran, which is exactly what we report
@@ -821,18 +829,18 @@ bool GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
   if (!links.preempted) {
     links.quantum_deadline_tick = 0;
   }
-  int cpu_index = t_current_cpu;
+  int cpu_index = CurrentCpu();
   uint64_t seq_before =
       cpus_[cpu_index].switch_seq.load(std::memory_order_relaxed);
   // Re-queue on the current CPU, not the affinity CPU, because our context is
   // not saved until the yield below and another CPU must not grab it yet.
-  EnqueueReady(self, t_current_cpu, to_lower);
+  EnqueueReady(self, CurrentCpu(), to_lower);
   YieldToScheduler();
   // Terminated while queued.
   ExitIfTerminated();
   // One dispatch is our own resume, more means another fiber ran in between.
   // A migration to another CPU counts as scheduling activity outright.
-  return t_current_cpu != cpu_index ||
+  return CurrentCpu() != cpu_index ||
          cpus_[cpu_index].switch_seq.load(std::memory_order_relaxed) -
                  seq_before >
              1;
@@ -1091,7 +1099,7 @@ void GuestScheduler::NotifyThreadExited(XThread* thread) {
          thread->thread_name());
   // This CPU's dispatch loop reclaims it, since we can't drop the last handle
   // while running on its fiber.
-  cpus_[t_current_cpu].exited_thread = thread;
+  cpus_[CurrentCpu()].exited_thread = thread;
 }
 
 void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
@@ -1104,7 +1112,7 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
     ExitIfTerminated();
   }
   XThread* self = XThread::GetCurrentThread();
-  int cpu_index = t_current_cpu;
+  int cpu_index = CurrentCpu();
   // Gate only types whose every satisfying transition calls
   // WakeCooperativeWaiters, anything else polls every pass.
   XObject* wait_object = self->cooperative_wait_object();

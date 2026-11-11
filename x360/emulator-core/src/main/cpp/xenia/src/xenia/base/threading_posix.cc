@@ -2092,7 +2092,9 @@ std::unique_ptr<Thread> Thread::Create(CreationParameters params,
   return thread;
 }
 
-Thread* Thread::GetCurrentThread() {
+// hakuX-Boosted: never inlined (a thread_local read by code that fibers carry
+// between host threads: kernel/xthread.cc, XThread::GetCurrentThread).
+XE_NOINLINE Thread* Thread::GetCurrentThread() {
   if (current_thread_) {
     return current_thread_;
   }

@@ -9,6 +9,8 @@
 
 #include "xenia/base/threading.h"
 
+#include "xenia/base/platform.h"
+
 namespace xe {
 namespace threading {
 
@@ -22,12 +24,14 @@ uint32_t logical_processor_count() {
 
 thread_local uint32_t current_thread_id_ = UINT_MAX;
 
-uint32_t current_thread_id() {
+// hakuX-Boosted: never inlined (thread_local reads by code that fibers carry
+// between host threads: kernel/xthread.cc, XThread::GetCurrentThread).
+XE_NOINLINE uint32_t current_thread_id() {
   return current_thread_id_ == UINT_MAX ? current_thread_system_id()
                                         : current_thread_id_;
 }
 
-void set_current_thread_id(uint32_t id) { current_thread_id_ = id; }
+XE_NOINLINE void set_current_thread_id(uint32_t id) { current_thread_id_ = id; }
 
 }  // namespace threading
 }  // namespace xe

@@ -130,11 +130,19 @@ void HostThreadExitCleanupThunk(void* argument) {
 
 bool XThread::IsInThread() { return Thread::IsInThread(); }
 
-bool XThread::IsInThread(XThread* other) {
+// hakuX-Boosted: never inlined. Guest threads are fibers that the scheduler
+// moves between host dispatch threads, and a function that reads a
+// thread_local on both sides of a fiber switch must find the variable of the
+// host thread it is on *now*. Inlined (ThinLTO does it across files), the
+// compiler computes the thread's TLS base once per function and keeps it over
+// the switch: the read after it lands in the previous host thread's copy.
+// That halted Fable II's audio loading thread in XObject::Wait (run 22, the
+// first -O3/ThinLTO build: a null current thread after BlockCurrentThread).
+XE_NOINLINE bool XThread::IsInThread(XThread* other) {
   return current_xthread_tls_ == other;
 }
 
-XThread* XThread::GetCurrentThread() {
+XE_NOINLINE XThread* XThread::GetCurrentThread() {
   XThread* thread = reinterpret_cast<XThread*>(current_xthread_tls_);
   if (!thread) {
     assert_always("Attempting to use guest stuff from a non-guest thread.");
@@ -142,7 +150,7 @@ XThread* XThread::GetCurrentThread() {
   return thread;
 }
 
-XThread* XThread::GetCurrentFiberThread() {
+XE_NOINLINE XThread* XThread::GetCurrentFiberThread() {
   XThread* thread = current_xthread_tls_;
   return (thread && thread->fiber_) ? thread : nullptr;
 }

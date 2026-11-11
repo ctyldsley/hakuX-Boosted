@@ -351,7 +351,10 @@ std::unique_ptr<Fiber> Fiber::CreateFromThread() {
   return fiber;
 }
 
-Fiber* Fiber::GetCurrentFiber() { return current_fiber_; }
+// hakuX-Boosted: never inlined: the caller may have been moved to another host
+// thread by a fiber switch since it last asked (kernel/xthread.cc,
+// XThread::GetCurrentThread).
+XE_NOINLINE Fiber* Fiber::GetCurrentFiber() { return current_fiber_; }
 
 bool Fiber::IsStackOverflowFault(const void* address) {
   auto addr = reinterpret_cast<uintptr_t>(address);

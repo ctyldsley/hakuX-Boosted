@@ -8,6 +8,7 @@
  */
 
 #include "xenia/cpu/thread.h"
+#include "xenia/base/platform.h"
 #include "xenia/cpu/thread_state.h"
 
 namespace xe {
@@ -18,9 +19,11 @@ thread_local Thread* Thread::current_thread_ = nullptr;
 Thread::Thread() {}
 Thread::~Thread() {}
 
-bool Thread::IsInThread() { return current_thread_ != nullptr; }
+// hakuX-Boosted: never inlined (a thread_local read by code that fibers carry
+// between host threads: kernel/xthread.cc, XThread::GetCurrentThread).
+XE_NOINLINE bool Thread::IsInThread() { return current_thread_ != nullptr; }
 
-Thread* Thread::GetCurrentThread() { return current_thread_; }
+XE_NOINLINE Thread* Thread::GetCurrentThread() { return current_thread_; }
 uint32_t Thread::GetCurrentThreadId() {
   return Thread::GetCurrentThread()->thread_state()->thread_id();
 }
