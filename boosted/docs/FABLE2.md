@@ -1,9 +1,10 @@
 # Fable II (4D5307F1) on the 360 side
 
-Where the title stands, what this version does for it, and what to try on a
-device, in order. The starting point is XenDroid's own entry for the title
-(`x360/GAME_COMPAT.md`, dated 2026-06-13); nothing here has been run by this
-fork.
+Where the title stands, what this version does for it, and a test plan for
+an Adreno 8xx device. The starting point is XenDroid's own entry for the
+title (`x360/GAME_COMPAT.md`, 2026-06-13) and its Adreno 830 notes
+(`x360/docs/a830-gmem-msaa-plan.md`, 2026-08-13). Nothing here has been run
+by this fork.
 
 ## Where it stands upstream
 
@@ -11,8 +12,7 @@ fork.
   fixed upstream without title-specific code.
 - **Open: the ground is not drawn** on the Vulkan backend. The draws are
   issued and fail the per-fragment depth test. Upstream's reading is a
-  reversed-Z and 24-bit float depth precision mismatch, and notes that no
-  Xenia fork has a Vulkan fix.
+  reversed-Z and 24-bit float depth precision mismatch.
 - **Open: an intermittent crash on loading screens** while the disc streams.
   Upstream describes a one-instruction title patch for a race in the game's
   own lock-free pool and says it ships in the repository; it is not in
@@ -23,84 +23,81 @@ fork.
 So before performance, Fable II has one rendering bug and one stability bug
 that decide whether it is playable at all.
 
+## The performance lever on an Adreno 8xx
+
+By default the 360 side tells Turnip to render untiled (`turnip_debug =
+"sysmem"`). The settings screen itself labels that mode "untiled, slower".
+It is the default because tiled rendering hangs the Adreno 830, and
+upstream's notes pin down exactly when:
+
+| Measured on Adreno 830 (`a830-gmem-msaa-plan.md`) | |
+|---|---|
+| Single-sample pass, tiled | Runs indefinitely |
+| 2x MSAA pass, tiled | GPU fault within about 400 ms, every run |
+| 2x MSAA pass, untiled | Fine |
+
+The hang is multisampled passes in tiled mode and nothing else. Fable II
+renders with MSAA, and xenia-canary's patch set (bundled) has a "Disable
+MSAA" patch for it. With that patch on, every pass should be single-sample,
+which is the case measured as stable in tiled mode. So for this title on
+this GPU, tiled rendering may be usable, and it is the mode a tile-based GPU
+is built for. That is the first thing to measure.
+
+This version helps you check it: `xe.log` now says once whether the title
+creates multisampled render targets ("This title creates multisampled render
+targets"), so you can see that the patch took, and warns if MSAA and tiled
+mode are on together.
+
 ## What this version does
 
 - Ships the best-known per-game config
   (`boosted/x360-titles/config/4D5307F1.config.toml`):
-  `[Vulkan] vulkan_depth_unorm24 = false`. It is written to the title's
-  per-game config on first launch if you have not made one.
-- Bundles xenia-canary's Fable II patches (they were already bundled by
-  XenDroid). Open the title's Patches screen to turn them on. They match by
-  the executable's hash; the Game of the Year / Platinum edition
-  (`4145F96D2DEE2AB5`) has the fullest set.
+  `vulkan_depth_unorm24 = false`, written to the title's per-game config on
+  first launch if you have not made one.
+- Bundles xenia-canary's Fable II patches (as XenDroid does). They match by
+  the executable's hash; the Game of the Year / Platinum edition has the
+  fullest set.
 - Moves Turnip's KGSL contexts off the ringbuffer the compositor preempts
-  (`kgsl_context_priority`), which matters with the default `sysmem` mode.
+  (`kgsl_context_priority`).
+- Puts every switch below in the per-game settings screen
+  (`vulkan_depth_unorm24` and `kgsl_context_priority` were config-file only).
 
-## What to try, in order
+## Test plan
 
-Change one thing at a time and confirm in `xe.log` that it applied (search
-for the cvar's name and for `Applied N game config override(s)`). Per-game
-settings go in the title's per-game settings screen, or in
-`Android/data/<package>/files/compose/config/4D5307F1.config.toml` under the
-section named.
+In the 360 library, long-press the game for **Per-game settings** and
+**Game patches**. Change one thing per step, play the same scene (Bowerstone
+Market is a good heavy one), and take the second run's numbers: the first
+run after any change compiles shaders. A custom Turnip driver for Adreno 8xx
+must be selected (360 settings, Vulkan, Custom Vulkan driver).
 
-### 1. Baseline
+| Step | Change | Record |
+|---|---|---|
+| 0 | Global settings, Storage: **Mount cache** on. Nothing else. | fps; is the ground drawn; does `xe.log` say "multisampled render targets" |
+| 1 | Game patches: **Disable MSAA** | fps; the MSAA line should be gone from `xe.log` |
+| 2 | Per-game, Vulkan, **Turnip debug mode: None (GMEM)**, with step 1 kept | fps; any hang or device-lost in the first minutes |
+| 3 | Per-game, GPU, **Depth float24 convert in pixel shader** on | Is the ground drawn; fps cost |
+| 4 | Step 3 plus **Depth float24 round** on | Is the ground drawn |
+| 5 | Game patches: **High Tick Rate**, then **60 FPS** | Only if steps 1 to 2 hold a steady 30 |
 
-Global setting `mount_cache = true` (section `[Storage]`; it cannot be set
-per game). Custom Turnip driver selected. Note fps in Bowerstone Market and
-whether the ground is drawn.
+Notes on the steps:
 
-### 2. The ground
-
-Upstream lists what did not help: `readback_resolve`, `readback_memexport`,
-`occlusion_query`, `depth_float24_round`, `render_target_path_vulkan=fsi`,
-`turnip_debug=nolrz`. One existing switch is not on that list and does what
-upstream names as the remaining lead (quantising the pixel's depth to the
-console's 24-bit float in the shader):
-
-```toml
-[GPU]
-depth_float24_convert_in_pixel_shader = true
-```
-
-Try it with `vulkan_depth_unorm24 = false` kept, then with
-`depth_float24_round = true` added. It costs fragment shader time and early
-depth rejection, so if it does not fix the ground, turn it off again. If it
-does, the next step is to find which draws need it and apply it only there.
-
-### 3. Anti-aliasing off
-
-Patches screen: "Disable MSAA". On a tile-based GPU this is likely the
-largest single performance setting for the title, and it avoids the MSAA
-paths behind the Adreno 830 hang described in
-`x360/docs/a830-gmem-msaa-plan.md`.
-
-### 4. Tiled rendering
-
-With MSAA disabled by the patch, try Turnip's tiled mode:
-
-```toml
-[Vulkan]
-turnip_debug = ""
-```
-
-Compare fps with step 3 over the same scene. If the GPU hangs or the picture
-breaks, go back to `"sysmem"`. This is the step most likely to differ
-between an Adreno 6xx, 7xx and 8xx.
-
-### 5. Frame rate patches
-
-"High Tick Rate" (30 Hz game logic), then "60 FPS". Only once steps 1 to 4
-hold a steady 30.
-
-### 6. Resolution
-
-`draw_resolution_scale` above 1 turns off the `uma` readback path
-(`readback_resolve`), so expect a cost beyond the extra pixels. Leave until
-last.
+- **Step 2 is the one that may hang.** If the picture freezes or the app
+  dies, set Turnip debug mode back to sysmem. If `xe.log` still shows the
+  multisampled line with the patch on, some pass is still multisampled
+  (send the log: it names the sample count).
+- **Step 3** is the existing switch that does what upstream names as the
+  remaining lead for the ground (quantising the pixel's depth to the
+  console's 24-bit float in the shader). It is not on upstream's list of
+  things already tried. It costs fragment shader time and early depth
+  rejection, so turn it off again if it changes nothing.
+- **Resolution scale** above 1x turns off the direct readback path
+  (`readback_resolve = uma`), so it costs more than the extra pixels. Leave
+  it until the above is settled.
 
 ## What to send back
 
-For each step: device and GPU, the Turnip build, the fps before and after
-(second run of each), whether the ground is drawn, and `xe.log`. With those,
-the roadmap's phase 4 can be turned into code changes rather than guesses.
+For each step: fps before and after, whether the ground is drawn, any hang,
+and `xe.log` (360 library menu, "Open user data"; the file is in the data
+folder's root, and older sessions are zipped under `logs/`). Also the device
+and the Turnip build's name. With those, the next changes can be aimed at
+what your device actually does.

@@ -29,6 +29,11 @@ object SettingsSchema {
             i("Vulkan", "vulkan_pipeline_creation_threads", "Pipeline creation threads", 4, 0, 5),
             Action("Vulkan", "vulkan_lib_path", "Custom Vulkan driver", "", desc("vulkan_lib_path")),
             b("Vulkan", "adrenotools_force_max_clocks", "Force max GPU clocks (adrenotools)", false),
+            // hakuX-Boosted: Turnip's kgsl draw contexts off the ringbuffer the compositor
+            // preempts (hakuX's hook). 0 leaves the driver's own priority.
+            i("Vulkan", "kgsl_context_priority", "KGSL context priority (Turnip, 0=driver's)", 7, 0, 15),
+            // hakuX-Boosted: per-game for Fable II (GAME_COMPAT.md); was config-file only.
+            b("Vulkan", "vulkan_depth_unorm24", "Native 24-bit unorm depth", true),
             // 'sysmem' forces untiled rendering (much slower) but avoids a class of Adreno GPU
             // hangs. Applied at vkCreateInstance, so it takes effect on the next game launch.
             l("Vulkan", "turnip_debug", "Turnip debug mode", "sysmem",

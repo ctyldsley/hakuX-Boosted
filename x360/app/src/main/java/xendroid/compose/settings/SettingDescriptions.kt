@@ -5,6 +5,8 @@ package xendroid.compose.settings
 object SettingDescriptions {
     val byName: Map<String, String> = mapOf(
         "accurate_resolve_number_formats" to "Handle signed/integer resolve destinations and gamma-decode 8_8_8_8_GAMMA sources; a few titles need it, but it enlarges every full resolve shader and costs significant frame rate on mobile GPUs",
+        "kgsl_context_priority" to "KGSL priority of a custom Turnip driver's draw contexts, 1 highest to 15 lowest. 7 shares the compositor's ringbuffer, so screen composition cannot preempt the game's GPU work; 0 keeps the driver's default. Takes effect on the next launch",
+        "vulkan_depth_unorm24" to "Use the driver's native 24-bit unorm depth format; off forces the 32-bit float depth emulation path (best known setting for Fable II)",
         "adrenotools_force_max_clocks" to "Force the GPU to its maximum clocks via the custom driver; more speed, more heat and battery drain",
         "allow_incompatible_title_update" to "Applies title updates even when their signature doesn't match the game",
         "allow_plugins" to "Allows loading homebrew plugin/trainer XEX modules per title; experimental",

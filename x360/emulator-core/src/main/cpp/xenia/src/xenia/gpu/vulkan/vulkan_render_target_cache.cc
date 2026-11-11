@@ -10,7 +10,9 @@
 #include "xenia/gpu/vulkan/vulkan_render_target_cache.h"
 
 #include <algorithm>
+#include <atomic>
 #include <set>
+#include <string>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +40,9 @@
 DECLARE_bool(accurate_resolve_number_formats);
 DECLARE_bool(rt_cache_ownership_claim_memo);
 DECLARE_bool(vulkan_dynamic_rendering);
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid
+DECLARE_string(turnip_debug);
+#endif
 
 DEFINE_bool(
     vulkan_in_pass_resolve_debug_read_usage, false,
@@ -4256,6 +4261,32 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
     image_create_info.samples =
         VkSampleCountFlagBits(uint32_t(1) << uint32_t(key.msaa_samples));
   }
+#if XE_PLATFORM_ANDROID || XE_PLATFORM_xendroid
+  // hakuX-Boosted: the log says, once, that the title renders multisampled
+  // (so a title's "Disable MSAA" patch can be seen to have taken), and warns
+  // when that meets Turnip's tiled rendering: multisampled passes in GMEM are
+  // the one combination measured to hang the Adreno 830
+  // (docs/a830-gmem-msaa-plan.md); single-sample tiled passes run.
+  if (key.msaa_samples != xenos::MsaaSamples::k1X) {
+    static std::atomic<bool> msaa_logged{false};
+    if (!msaa_logged.exchange(true, std::memory_order_relaxed)) {
+      const bool tiled =
+          std::string(cvars::turnip_debug).find("sysmem") == std::string::npos;
+      if (tiled) {
+        XELOGW(
+            "This title creates multisampled render targets ({}x MSAA) while "
+            "Turnip's tiled rendering is on (turnip_debug has no 'sysmem'). "
+            "Multisampled tiled passes are known to hang Adreno 8xx: turn on "
+            "the title's 'Disable MSAA' patch if it has one, or set "
+            "turnip_debug = \"sysmem\".",
+            uint32_t(1) << uint32_t(key.msaa_samples));
+      } else {
+        XELOGI("This title creates multisampled render targets ({}x MSAA)",
+               uint32_t(1) << uint32_t(key.msaa_samples));
+      }
+    }
+  }
+#endif
   image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
   image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
   image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
