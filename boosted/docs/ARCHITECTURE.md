@@ -83,6 +83,7 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 |---|---|
 | `emulator-core/.../third_party/libadrenotools/*` | hakuX's KGSL context priority patch |
 | `emulator-core/.../xenia/ui/vulkan/vulkan_instance.cc` | The `kgsl_context_priority` cvar |
+| `emulator-core/.../xenia/gpu/vulkan/vulkan_pipeline_cache.cc`, `.h` | Tessellated triangle and quad lists (control-point-indexed, discrete or continuous) get 3 / 4 control points per patch and the 3cp / 4cp control shader, as on D3D12; they had 1. Also `tessellation_debug`'s no-culling bit |
 | `emulator-core/src/main/cpp/CMakeLists.txt` | Hook libraries as dependencies of `emu` |
 | `emulator-core/.../Application.java`, `DocumentsProvider.java` | `ensure_init` / `attach`, so the class need not be the process's Application |
 | `app/.../MainActivity.kt`, `EmulatorHostActivity.kt` | Call `ensure_init`; seed the per-title defaults |
