@@ -45,6 +45,14 @@ public class Emulator extends xendroid.emulator.Emulator{
     public native boolean show_debug_overlay_enabled();
     public native boolean show_touch_overlay_enabled();
     public native void set_show_touch_overlay(boolean value);
+    // hakuX-Boosted: the in-game menu. live_setting: the running core's value of a
+    // setting that can change while the game runs, as the config file spells it; null
+    // for any other setting. set_live_setting: false when the setting is not one of
+    // those or the value does not parse. current_title_id: 8 hex digits, null until a
+    // title is open (set on the boot thread). The list is in emulator_xendroid.cpp.
+    public native String live_setting(String name);
+    public native boolean set_live_setting(String name, String value);
+    public native String current_title_id();
 
     // Mount the ISO at isoPath (a REAL host ISO path == game.launchUri in
     // real-path mode), walk its filesystem and pack it into a VERIFIED .zar at

@@ -100,6 +100,20 @@ class EmulatorSession {
     fun showTouchOverlayEnabled(): Boolean = if (booted) core.show_touch_overlay_enabled() else true
     fun setShowTouchOverlay(value: Boolean) { if (booted) core.set_show_touch_overlay(value) }
 
+    // hakuX-Boosted: the in-game menu's settings (the list is in emulator_xendroid.cpp).
+    /** The running core's value of a setting that can change mid-game, as the config file
+     *  spells it; null for any other setting, or before boot. */
+    fun liveSetting(name: String): String? =
+        if (booted) runCatching { core.live_setting(name) }.getOrNull() else null
+
+    /** False: not a live setting, a value that does not parse, or before boot. */
+    fun setLiveSetting(name: String, value: String): Boolean =
+        booted && runCatching { core.set_live_setting(name, value) }.getOrDefault(false)
+
+    /** 8 hex digits; null until the title is open (it is set on the boot thread). */
+    fun currentTitleId(): String? =
+        if (booted) runCatching { core.current_title_id() }.getOrNull() else null
+
     /** A pending guest text prompt, or null. Holds a dispatch thread until [keyboardSubmit]
      *  answers, so every shown panel must be answered. */
     fun keyboardRequest(): Emulator.KeyboardRequest? =

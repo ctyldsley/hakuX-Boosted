@@ -90,7 +90,11 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `app/.../updater/updater.kt`, `ui/library/GameLibraryScreen.kt` | XenDroid's updater off when embedded |
 | `xenia/kernel/xthread.cc`, `guest_scheduler.cc`, `cpu/thread.cc`, `thread_state.cc`, `base/threading*.cc` | The readers of per-thread variables are never inlined: a fiber resumes on another host thread, and an inlined reader keeps the old thread's TLS base (the optimised build's crash in `XObject::Wait`) |
 | `app/.../settings/TouchOverlayDefault.kt` | hakuX's test of a real controller, so a phone's built-in pseudo-gamepad doesn't hide the touch controls |
-| `app/.../core/Embedded.kt`, `core/TitleDefaults.kt`, `core/BundledDriver.kt` | New files |
+| `emulator-core/.../cpp/emulator_xendroid.cpp`, `xendroid_emu.cpp`, `emulator.h`, `java/xendroid/compose/Emulator.java` | Three JNI calls for the in-game menu: `live_setting`, `set_live_setting` (the cvars the core rereads every frame, a fixed list) and `current_title_id` |
+| `app/.../core/EmulatorSession.kt` | Their Kotlin wrappers |
+| `app/.../ui/pause/PauseMenuPanel.kt`, `EmulatorHostActivity.kt` | The in-game menu gains "Edit controls" and "Settings": pages of the menu (`MenuPage`), each with its own `PanelNav` |
+| `app/.../gamepad/GamepadEditorScreen.kt` | An `inGame` mode: leaves the game window's orientation and system bars alone, shows the game behind |
+| `app/.../core/Embedded.kt`, `core/TitleDefaults.kt`, `core/BundledDriver.kt`, `ui/pause/InGameSettings.kt` | New files |
 
 ## Taking a newer hakuX
 

@@ -61,6 +61,11 @@ import xendroid.compose.ui.keyboard.GuestKeyboardPanel
 import xendroid.compose.ui.keyboard.clampToUtf16Units
 import xendroid.compose.ui.messagebox.GuestMessageBoxPanel
 import xendroid.compose.ui.pause.PAUSE_OPTION_COUNT
+import xendroid.compose.ui.pause.PAUSE_OPTION_EDIT_CONTROLS
+import xendroid.compose.ui.pause.PAUSE_OPTION_SETTINGS
+import xendroid.compose.ui.pause.InGameSettingsController
+import xendroid.compose.ui.pause.InGameSettingsPanel
+import xendroid.compose.gamepad.GamepadEditorScreen
 import xendroid.compose.settings.ConfigStore
 import xendroid.compose.ui.pause.PAUSE_OPTION_QUIT
 import xendroid.compose.ui.pause.PAUSE_OPTION_TOUCH_OVERLAY
@@ -127,6 +132,17 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
     // the core is still booting.
     private val showTouchOverlay = mutableStateOf<Boolean?>(null)
     private val menuOpenState = mutableStateOf(false)
+    // hakuX-Boosted: which page of the in-game menu is up. The settings page and the
+    // controls editor are pages of the menu: the game stays paused under them.
+    private enum class MenuPage { MAIN, SETTINGS, EDIT_CONTROLS }
+    private val menuPageState = mutableStateOf(MenuPage.MAIN)
+    private val inGameSettings by lazy {
+        InGameSettingsController(
+            applicationContext, session, gamepad, lifecycleScope,
+            touchOverlayShown = { showTouchOverlay.value == true },
+            toggleTouchOverlay = { toggleTouchOverlay() },
+        )
+    }
     private val keyboardRequestState =
         mutableStateOf<Emulator.KeyboardRequest?>(null)
     private val discRequestState =
@@ -287,7 +303,10 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                     // Stay MOUNTED whenever enabled (alpha drives only the DRAW): the pointerInput
                     // must keep receiving touches so the auto-hide wake tap fires, and so a held
                     // control is never unmounted mid-press (stuck).
-                    if (booted && cfg.globals.enabled && padVisible) {
+                    // hakuX-Boosted: not under the controls editor, which draws the pad itself.
+                    val editingControls =
+                        menuOpenState.value && menuPageState.value == MenuPage.EDIT_CONTROLS
+                    if (booted && cfg.globals.enabled && padVisible && !editingControls) {
                         GamepadOverlay(
                             controls = controls,
                             opacity = alpha,
@@ -417,19 +436,41 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 }
                 BackHandler(enabled = !menuOpen && !keyboardOpen && !discOpen && !messageBoxOpen) {
                     panelSelectedState.intValue = PAUSE_OPTION_RESUME
+                    menuPageState.value = MenuPage.MAIN
                     menuOpenState.value = true
                     if (session.booted) session.pause()
                 }
-                BackHandler(enabled = menuOpen) { closeMenuAndResume() }
+                // hakuX-Boosted: back leaves a page of the menu for the menu, the menu for the game.
+                BackHandler(enabled = menuOpen) { menuBack() }
                 if (menuOpen) xendroidTheme {
-                    PauseMenuPanel(
-                        selected = panelSelectedState.intValue,
-                        touchOverlayShown = showTouchOverlay.value == true,
-                        onToggleTouchOverlay = { toggleTouchOverlay() },
-                        onResume = { closeMenuAndResume() },
-                        onQuit = { finish() },
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    when (menuPageState.value) {
+                        MenuPage.MAIN -> PauseMenuPanel(
+                            selected = panelSelectedState.intValue,
+                            touchOverlayShown = showTouchOverlay.value == true,
+                            onToggleTouchOverlay = { toggleTouchOverlay() },
+                            onEditControls = { openMenuPage(MenuPage.EDIT_CONTROLS) },
+                            onSettings = { openMenuPage(MenuPage.SETTINGS) },
+                            onResume = { closeMenuAndResume() },
+                            onQuit = { finish() },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        MenuPage.SETTINGS -> InGameSettingsPanel(
+                            rows = inGameSettings.rows,
+                            ready = inGameSettings.ready,
+                            selected = panelSelectedState.intValue,
+                            onActivate = { i ->
+                                panelSelectedState.intValue = i
+                                inGameSettings.rows.getOrNull(i)?.onActivate?.invoke()
+                            },
+                            onBack = { menuBack() },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        MenuPage.EDIT_CONTROLS -> GamepadEditorScreen(
+                            controller = gamepad,
+                            onDone = { menuBack() },
+                            inGame = true,
+                        )
+                    }
                 }
             }
         }
@@ -733,17 +774,54 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         // Last: a guest prompt opened over the menu owns the input until it is answered.
         if (menuOpenState.value) {
-            return PanelNav(PAUSE_OPTION_COUNT,
-                { i ->
-                    when (i) {
-                        PAUSE_OPTION_QUIT -> finish()
-                        PAUSE_OPTION_TOUCH_OVERLAY -> toggleTouchOverlay()
-                        else -> closeMenuAndResume()
-                    }
-                },
-                { closeMenuAndResume() })
+            // hakuX-Boosted: one PanelNav per page of the menu, each in its page's own order.
+            return when (menuPageState.value) {
+                MenuPage.MAIN -> PanelNav(PAUSE_OPTION_COUNT,
+                    { i ->
+                        when (i) {
+                            PAUSE_OPTION_QUIT -> finish()
+                            PAUSE_OPTION_TOUCH_OVERLAY -> toggleTouchOverlay()
+                            PAUSE_OPTION_EDIT_CONTROLS -> openMenuPage(MenuPage.EDIT_CONTROLS)
+                            PAUSE_OPTION_SETTINGS -> openMenuPage(MenuPage.SETTINGS)
+                            else -> closeMenuAndResume()
+                        }
+                    },
+                    { closeMenuAndResume() })
+                // The rows in order, then "Back"; only "Back" until the title is open.
+                MenuPage.SETTINGS -> {
+                    val rows = if (inGameSettings.ready) inGameSettings.rows else emptyList()
+                    PanelNav(rows.size + 1,
+                        { i -> rows.getOrNull(i)?.onActivate?.invoke() ?: menuBack() },
+                        { menuBack() })
+                }
+                // The editor is worked by touch (it places the touch controls); B leaves it.
+                MenuPage.EDIT_CONTROLS -> PanelNav(0, { }, { menuBack() })
+            }
         }
         return null
+    }
+
+    /** hakuX-Boosted: to a page of the in-game menu, its first option selected. */
+    private fun openMenuPage(page: MenuPage) {
+        if (page == MenuPage.SETTINGS) inGameSettings.load()
+        panelSelectedState.intValue = 0
+        menuPageState.value = page
+    }
+
+    /** hakuX-Boosted: from a page back to the menu (on the option that opened it), from the
+     *  menu back to the game. */
+    private fun menuBack() {
+        when (menuPageState.value) {
+            MenuPage.MAIN -> closeMenuAndResume()
+            MenuPage.SETTINGS -> {
+                panelSelectedState.intValue = PAUSE_OPTION_SETTINGS
+                menuPageState.value = MenuPage.MAIN
+            }
+            MenuPage.EDIT_CONTROLS -> {
+                panelSelectedState.intValue = PAUSE_OPTION_EDIT_CONTROLS
+                menuPageState.value = MenuPage.MAIN
+            }
+        }
     }
 
     /** Flips the live cvar for an immediate effect and persists it, leaving the menu open so
@@ -763,6 +841,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun closeMenuAndResume() {
         menuOpenState.value = false
+        menuPageState.value = MenuPage.MAIN
         if (session.booted) session.resumeIfPaused()
     }
 
