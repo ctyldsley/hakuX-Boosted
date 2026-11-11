@@ -25,8 +25,15 @@ Last updated: 2026-11-11 (after the first device run).
   (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43050816108),
   the APK is its artifact `hakuX-Boosted-debug-apk`, now signed with one
   fixed debug key so later builds install over it. Not run on a device yet.
-- **Changed since run 18 (review pass, built on Actions: see the log's
-  newest line; none run on a device):**
+- **Changed since run 18 (review pass; none run on a device).** Run 19
+  (`ab7db16`) compiled and packaged them and its two checks passed, but its
+  APK upload failed on GitHub's side, and the runs after it sat queued
+  without a runner for over half an hour (GitHub Actions trouble on the
+  evening of 2026-11-11, not the build). **The APK to install is the
+  artifact of the newest green run on the branch**; if none is green after
+  `ab7db16`, re-run the newest one from the Actions page. That run also
+  fails by itself if the 360 core is not -O3 with ThinLTO.
+  The changes:
   - The 360 core is compiled in xenia's Release configuration (-O3,
     ThinLTO) in the debug APK too. Until now Gradle's debug variant built
     it as Debug: -O2, no link-time optimization. Every APK tested so far had
@@ -57,9 +64,14 @@ Last updated: 2026-11-11 (after the first device run).
   sessions; all five patch files were seeded with the patch enabled. Then,
   at frame 1, `This title creates multisampled render targets (4x MSAA)`.
   So Canary's patch does not cover every target the game makes (or one made
-  before the patched code runs). The MSAA line's new detail (color or
-  depth, size) on the next run says which; until then tiled mode is not
-  safe for the title.
+  before the patched code runs). The patch is one byte (0x8238DF3F = 1, in
+  the function that also holds the 1120 of the resolution patch). Two log
+  lines on the next run settle it: the creation line's new detail (color or
+  depth, size), and `Draws in frames A-B: N, of them M into multisampled
+  targets` every 600 frames (first 40 windows). M at 0 once in play means
+  the 4x targets are boot or loading screens only and tiled mode can be
+  tried; M above 0 means the scene is still multisampled and tiled mode
+  is not safe for the title.
 - **Asked for by the owner, not started:** one library for both consoles
   instead of the separate "Xbox 360" section, on-screen controls and
   in-game settings (graphics, emulation, controls) for 360 games in the
@@ -260,6 +272,12 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-11 (cloud, late).** Added the multisampled-draws line (above)
+  after the desktop's MSAA finding. Run 19 confirmed the review-pass
+  commit compiles and packages; no APK from it (upload failed at GitHub),
+  later runs queued without runners. The workflow's concurrency group was
+  renamed on a wrong guess that run 19 was holding it; harmless.
 
 - **2026-11-11 (desktop, later).** Answered the MSAA patch question from
   run 13's log (above): applied, 4x targets regardless. The phone's adb

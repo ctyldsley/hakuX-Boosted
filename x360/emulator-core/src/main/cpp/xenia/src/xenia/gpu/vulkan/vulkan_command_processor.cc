@@ -4783,6 +4783,33 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   submission_in_progress_.last_render_pass_key =
       render_target_cache_->last_update_render_pass_key().key;
 
+  // hakuX-Boosted: how many of the draws go to multisampled targets, every
+  // 600 frames for the first 40 such windows. A title's "Disable MSAA" patch
+  // may leave some targets multisampled (the creation line in the render
+  // target cache says which); this says whether they are still drawn to
+  // during play, which is what decides if Turnip's tiled rendering is safe.
+  {
+    static uint64_t window_start_frame = 0;
+    static uint32_t window_draws = 0, window_msaa_draws = 0, windows_logged = 0;
+    ++window_draws;
+    if (render_target_cache_->last_update_render_pass_key().msaa_samples !=
+        xenos::MsaaSamples::k1X) {
+      ++window_msaa_draws;
+    }
+    if (frame_current_ - window_start_frame >= 600) {
+      if (windows_logged < 40) {
+        ++windows_logged;
+        XELOGI(
+            "Draws in frames {}-{}: {}, of them {} into multisampled targets",
+            window_start_frame, frame_current_, window_draws,
+            window_msaa_draws);
+      }
+      window_start_frame = frame_current_;
+      window_draws = 0;
+      window_msaa_draws = 0;
+    }
+  }
+
   // Draw.
   if (primitive_processing_result.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
