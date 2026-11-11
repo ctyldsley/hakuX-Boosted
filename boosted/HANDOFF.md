@@ -20,8 +20,17 @@ Last updated: 2026-11-11 (after the first device run).
 - **The bundled Turnip driver is the change waiting to be tried.** That run
   was on Qualcomm's stock driver: no Turnip package had been installed, so
   none of the Turnip-side work was in effect. The app now ships StevenMXZ's
-  Turnip (v39) and uses it for the 360 core by default. Built on Actions?
-  See the session log's newest line; not run on a device yet.
+  Turnip (v39) and uses it for the 360 core by default. Built on Actions:
+  run 18, commit `8a8618a`
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43050816108),
+  the APK is its artifact `hakuX-Boosted-debug-apk`, now signed with one
+  fixed debug key so later builds install over it. Not run on a device yet.
+- **To check on the next run: did the "Disable MSAA" patch apply?** Run 13
+  was meant to turn it on for Fable II by itself, yet that run's log says
+  the title creates 4x multisampled targets. Either the ISO's executable is
+  not one the bundled patch files match by hash, or the seeding did not
+  happen. Look for `Patcher: Applying patch for` in `xe.log` and for the
+  title's files in `Android/data/<package>/files/compose/patches/`.
 - **Asked for by the owner, not started:** one library for both consoles
   instead of the separate "Xbox 360" section, on-screen controls and
   in-game settings (graphics, emulation, controls) for 360 games in the
@@ -200,6 +209,11 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-11 (cloud, later).** Checked what the desktop session pushed:
+  all five commits are on the main branch, none on a side branch, and run
+  18 built them (after three runs lost to the runner's package mirror).
+  Noted the MSAA patch question above. No code changed.
 
 - **2026-11-11 (desktop, phone on adb).** Read the first device run's logs
   (section above). Bundled StevenMXZ's Turnip v39 as the 360 core's default
