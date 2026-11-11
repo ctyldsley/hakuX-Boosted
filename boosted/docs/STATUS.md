@@ -41,7 +41,9 @@ No build of this fork has been installed or run. In particular:
   layout and the pipeline storage version are unchanged: a stored pipeline
   of this kind is rebuilt correctly when it is loaded. Checked by reading
   and by compiling the control shaders (3 / 4 output vertices, one index
-  passed through per control point); not run. Known user: title 58410823,
+  passed through per control point); built (Actions, job "APK (both
+  cores)", at 5d7f29e, which is also the first build of
+  `tessellation_debug`); not run. Known user: title 58410823,
   the retro screen and beams in the main menu (quad list, continuous);
   `tessellation_debug` logs host vertex shader type 3 (triangle) or 5 (quad)
   for such draws. Fable II's ground is patch-indexed (type 6): not a test
