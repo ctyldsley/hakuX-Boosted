@@ -42,7 +42,9 @@ fetch glslang       https://github.com/KhronosGroup/glslang.git                 
 fetch spirv_reflect https://github.com/KhronosGroup/SPIRV-Reflect.git                  vulkan-sdk-1.4.328.0
 fetch vma           https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git v3.3.0
 fetch SDL3          https://github.com/libsdl-org/SDL.git                              release-3.4.18
-fetch libslirp      https://gitlab.freedesktop.org/slirp/libslirp.git                  v4.7.0 26be815b
+# libslirp 4.7.0 at the commit android/README.md names (xemu's slirp.wrap pin,
+# a few commits past the v4.7.0 tag)
+fetch libslirp      https://gitlab.freedesktop.org/slirp/libslirp.git                  26be815b86e8d49add8c9a8b320239b9594ff03d
 fetch root/subprojects/nv2a_vsh_cpu https://github.com/xemu-project/nv2a_vsh_cpu.git   561fe80da57a881f89000256b459440c0178a7ce
 
 # adrenotools, with its linkernsbypass submodule and hakuX's KGSL draw
