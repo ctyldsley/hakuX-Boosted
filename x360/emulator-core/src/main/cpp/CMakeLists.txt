@@ -101,6 +101,10 @@ endif()
 add_subdirectory(xenia EXCLUDE_FROM_ALL)
 
 add_subdirectory(xenia/third_party/libadrenotools EXCLUDE_FROM_ALL)
+# hakuX-Boosted: adrenotools' hook libraries are loaded by name from the
+# app's native library directory; built with libe.so, kgsl_context_hook
+# (the kgsl_context_priority cvar's) included.
+add_dependencies(emu main_hook file_redirect_hook gsl_alloc_hook kgsl_context_hook hook_impl)
 
 target_include_directories(emu PRIVATE
         xenia
