@@ -29,6 +29,23 @@ No build of this fork has been installed or run. In particular:
 - **The MSAA log line and `tessellation_debug`.** Built, not run. They
   change nothing unless multisampled targets are created or the setting is
   not 0.
+- **Control points of tessellated triangle and quad lists.** Discrete and
+  continuous patches given by control points were built with one control
+  point per patch on Vulkan, where the evaluation shader (the game's vertex
+  shader) reads three or four: each index was a patch of its own and the
+  other corners were read out of bounds. They now get 3 / 4 and the 3cp / 4cp
+  control shader, as the D3D12 backend does
+  (`gpu/vulkan/vulkan_pipeline_cache.cc`). Patch-indexed and adaptive draws
+  are as they were. The kind of draw is read from the vertex shader
+  modification the pipeline description already holds, so the description's
+  layout and the pipeline storage version are unchanged: a stored pipeline
+  of this kind is rebuilt correctly when it is loaded. Checked by reading
+  and by compiling the control shaders (3 / 4 output vertices, one index
+  passed through per control point); not run. Known user: title 58410823,
+  the retro screen and beams in the main menu (quad list, continuous);
+  `tessellation_debug` logs host vertex shader type 3 (triangle) or 5 (quad)
+  for such draws. Fable II's ground is patch-indexed (type 6): not a test
+  for this.
 - **Performance.** No change in this version has been measured. The only
   one expected to affect frame delivery is `kgsl_context_priority`, and its
   expected effect is fewer GPU hangs and stalls under GPU composition, not
@@ -53,11 +70,6 @@ No build of this fork has been installed or run. In particular:
   (`-Werror` on a missing initialiser in `test_pusher.c`, `libm` not linked
   for `test_apu_hrtf`). Upstream's issue, untouched; the tests are not part
   of the Actions build.
-- Tessellated triangle and quad lists (patches given by control points,
-  discrete or continuous) are built with one control point per patch on
-  Vulkan where the evaluation shader reads three or four
-  (`gpu/vulkan/vulkan_pipeline_cache.cc`). Found while reading the path
-  Fable II's ground takes; it does not affect that title. Not fixed here.
 - The Fable II streaming-crash patch that `x360/GAME_COMPAT.md` describes is
   not in XenDroid's repository, so it is not here either.
 - The two sides have separate libraries, settings and driver managers

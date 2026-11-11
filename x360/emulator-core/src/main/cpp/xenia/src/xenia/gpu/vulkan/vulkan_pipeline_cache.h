@@ -509,6 +509,20 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   VkShaderModule GetTessellationVertexShader(
       PipelineTessellationMode mode) const;
 
+  // hakuX-Boosted: whether a discrete or continuous tessellated pipeline takes
+  // one control point per patch corner (the guest's triangle and quad lists,
+  // kTriangleDomainCPIndexed and kQuadDomainCPIndexed) rather than one per
+  // patch (kTriangleDomainPatchIndexed, kQuadDomainPatchIndexed). Read from the
+  // host vertex shader type in the description's vertex shader modification,
+  // as the Direct3D 12 backend does, so the description's layout (and the
+  // pipeline storage) is as it was.
+  static bool IsTessellationControlPointIndexed(
+      const PipelineDescription& description);
+  // hakuX-Boosted: VkPipelineTessellationStateCreateInfo::patchControlPoints
+  // for the description, 0 if it's not tessellated.
+  static uint32_t GetTessellationPatchControlPointCount(
+      const PipelineDescription& description);
+
   // Can be called from creation threads - all needed data must be fully set up
   // at the point of the call: shaders must be translated, pipeline layout and
   // render pass objects must be available.

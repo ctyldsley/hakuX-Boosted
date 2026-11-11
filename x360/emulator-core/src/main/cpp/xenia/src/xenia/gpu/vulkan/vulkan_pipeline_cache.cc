@@ -758,17 +758,25 @@ bool VulkanPipelineCache::ConfigurePipeline(
   // Get tessellation shaders if needed.
   VkShaderModule tessellation_vertex_shader = VK_NULL_HANDLE;
   VkShaderModule tessellation_control_shader = VK_NULL_HANDLE;
-  XELOGD("VulkanPipelineCache: ConfigurePipeline tessellation_mode={} patch={}",
-         static_cast<uint32_t>(description.tessellation_mode),
-         static_cast<uint32_t>(description.tessellation_patch));
+  XELOGD(
+      "VulkanPipelineCache: ConfigurePipeline tessellation_mode={} patch={} "
+      "control_points={}",
+      static_cast<uint32_t>(description.tessellation_mode),
+      static_cast<uint32_t>(description.tessellation_patch),
+      GetTessellationPatchControlPointCount(description));
   if (description.tessellation_mode != PipelineTessellationMode::kNone) {
     tessellation_vertex_shader =
         GetTessellationVertexShader(description.tessellation_mode);
     // Determine if we should use multi-control-point hull shaders.
     // For adaptive mode, we always use multi-control-point (per-edge factors).
     // For discrete/continuous, the host vertex shader type determines this.
+    // hakuX-Boosted: and now it does - the 3cp / 4cp control shaders for the
+    // control-point-indexed domains (the guest's tessellated triangle and quad
+    // lists), which used to get the 1cp ones like the patch-indexed domains.
     bool use_control_point_count =
-        (description.tessellation_mode == PipelineTessellationMode::kAdaptive);
+        (description.tessellation_mode ==
+         PipelineTessellationMode::kAdaptive) ||
+        IsTessellationControlPointIndexed(description);
     tessellation_control_shader = GetTessellationControlShader(
         description.tessellation_mode, description.tessellation_patch,
         use_control_point_count);
@@ -2077,6 +2085,48 @@ VkShaderModule VulkanPipelineCache::GetTessellationControlShader(
   }
 }
 
+// hakuX-Boosted: see the declaration.
+bool VulkanPipelineCache::IsTessellationControlPointIndexed(
+    const PipelineDescription& description) {
+  if (description.tessellation_mode != PipelineTessellationMode::kDiscrete &&
+      description.tessellation_mode != PipelineTessellationMode::kContinuous) {
+    return false;
+  }
+  switch (SpirvShaderTranslator::Modification(
+              description.vertex_shader_modification)
+              .vertex.host_vertex_shader_type) {
+    case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
+      return description.tessellation_patch ==
+             PipelineTessellationPatchType::kTriangle;
+    case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
+      return description.tessellation_patch ==
+             PipelineTessellationPatchType::kQuad;
+    default:
+      return false;
+  }
+}
+
+// hakuX-Boosted: see the declaration.
+uint32_t VulkanPipelineCache::GetTessellationPatchControlPointCount(
+    const PipelineDescription& description) {
+  if (description.tessellation_mode == PipelineTessellationMode::kNone) {
+    return 0;
+  }
+  // Adaptive: one control point per patch corner, each carrying the factor of
+  // an edge. Discrete and continuous: one per corner (its vertex index) if the
+  // domain is control-point-indexed, the count the translated guest vertex
+  // shader (the evaluation shader) declares and reads and the 3cp / 4cp control
+  // shaders pass through; otherwise 1, the patch index.
+  if (description.tessellation_mode == PipelineTessellationMode::kAdaptive ||
+      IsTessellationControlPointIndexed(description)) {
+    return description.tessellation_patch ==
+                   PipelineTessellationPatchType::kTriangle
+               ? 3
+               : 4;
+  }
+  return 1;
+}
+
 VkShaderModule VulkanPipelineCache::GetTessellationVertexShader(
     PipelineTessellationMode mode) const {
   if (mode == PipelineTessellationMode::kNone) {
@@ -2675,15 +2725,13 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
     // 4 for quads) since each control point has its own edge factor.
     // For discrete/continuous modes, we use 1 control point (the Xenos vertex
     // shader receives the patch index and computes all corners internally).
-    if (description.tessellation_mode == PipelineTessellationMode::kAdaptive) {
-      tessellation_state.patchControlPoints =
-          (description.tessellation_patch ==
-           PipelineTessellationPatchType::kTriangle)
-              ? 3
-              : 4;
-    } else {
-      tessellation_state.patchControlPoints = 1;
-    }
+    // hakuX-Boosted: 1 only if the domain is patch-indexed. For a
+    // control-point-indexed one (a tessellated triangle or quad list) it's the
+    // corner count too: the evaluation shader reads an index per corner, and
+    // with 1 every index was a patch of its own and the other corners' indices
+    // were read out of bounds.
+    tessellation_state.patchControlPoints =
+        GetTessellationPatchControlPointCount(description);
   }
 
   // Dynamic rendering support (VK_KHR_dynamic_rendering / Vulkan 1.3).
@@ -3128,9 +3176,12 @@ void VulkanPipelineCache::InitializeShaderStorage(
           PipelineTessellationMode::kNone) {
         tessellation_vertex_shader =
             GetTessellationVertexShader(pipeline_description.tessellation_mode);
+        // hakuX-Boosted: as in ConfigurePipeline, the 3cp / 4cp control
+        // shaders for the control-point-indexed domains.
         bool use_control_point_count =
             (pipeline_description.tessellation_mode ==
-             PipelineTessellationMode::kAdaptive);
+             PipelineTessellationMode::kAdaptive) ||
+            IsTessellationControlPointIndexed(pipeline_description);
         tessellation_control_shader = GetTessellationControlShader(
             pipeline_description.tessellation_mode,
             pipeline_description.tessellation_patch, use_control_point_count);

@@ -46,12 +46,12 @@ same tree, written when this title's ground was first made to work) found:
   constants match, with one difference: the Vulkan translator puts 1.0 in
   `r0.w` where the reference leaves 0. Unlikely to matter (nothing maps to
   that component), not ruled out.
-- A separate fault that does not affect this title: discrete and continuous
-  patches given by control points (triangle and quad lists) are built with
-  one control point per patch and the one-control-point shader
-  (`vulkan_pipeline_cache.cc`, `patchControlPoints`), while the evaluation
-  shader reads three or four. The reference uses the 3 and 4 control point
-  shaders there.
+- A separate fault that does not affect this title, since fixed: discrete
+  and continuous patches given by control points (triangle and quad lists)
+  were built with one control point per patch and the one-control-point
+  shader (`vulkan_pipeline_cache.cc`, `patchControlPoints`), while the
+  evaluation shader reads three or four. They now use the 3 and 4 control
+  point shaders, as the reference does (`STATUS.md`).
 - Upstream's depth reading is not excluded by any of this.
 
 Reading cannot settle it, a run can. `tessellation_debug` (per-game
