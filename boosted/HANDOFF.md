@@ -111,12 +111,67 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
   the 4x targets are boot or loading screens only and tiled mode can be
   tried; M above 0 means the scene is still multisampled and tiled mode
   is not safe for the title.
-- **Asked for by the owner, not started:** one library for both consoles
-  instead of the separate "Xbox 360" section, on-screen controls and
-  in-game settings (graphics, emulation, controls) for 360 games in the
-  same style as hakuX's. A 360 image opened from hakuX's library already
-  goes to the 360 core (`boosted/X360.kt`); the screens are still XenDroid's
-  own.
+- **Third device run (22:25, run 18's APK: Turnip, the core built Debug).**
+  Fable II loads into play: no host-side crash, which confirms the Release
+  configuration as what exposed the `XObject::Wait` fault. The skipped
+  draws are back on Turnip (390 by frame 2,475, the same `VS 6t/3s` against
+  an empty layout, `PM4_DRAW_INDX(1, 18, 2)`), so they are the emulator's,
+  not the driver's. Slow: about 2,500 frames in 10 minutes including the
+  loads. The owner was still playing when the log was read; the frame 9210
+  stall is not confirmed either way on Turnip.
+- **Next for the owner's phone:** the APK of the first green run at or
+  after `2c2c6ec` (the never-inlined per-thread readers on the optimised
+  core). It is signed with the fork's key and installs over run 18.
+
+## The UI work the owner asked for (for a cloud session; not started)
+
+The owner's words: the Xbox 360 being a separate section with separate
+ROMs is wrong; one "Xbox" emulator for both consoles, polished, with
+on-screen controls and in-emulation settings (graphics, emulation,
+controls). It can be built and checked on Actions without a device; say
+plainly what was not seen running.
+
+What exists, so nothing is rebuilt:
+
+- Both sides are Jetpack Compose. hakuX: `android/app/.../ui/` (library,
+  settings, per-game settings, controls editor, driver screen), its game
+  activity `NativeCoreActivity` with `OnScreenController`. 360:
+  `x360/app/.../ui/` (library, settings, per-game settings, patches,
+  content, profiles), `gamepad/GamepadOverlay.kt` and
+  `GamepadEditorScreen.kt` (touch controls and their editor),
+  `ui/pause/PauseMenuPanel.kt` (in-game menu: show or hide controls,
+  resume, quit; nothing else).
+- A 360 image in one of hakuX's game folders is already listed by hakuX's
+  library and starts in the 360 core (`boosted/X360.kt`,
+  `LauncherActivity.startCore`). What is separate is the "Xbox 360" button
+  that opens XenDroid's own library with its own folder setting.
+
+Order, smallest useful step first:
+
+1. **The in-game menu for 360 games** (`PauseMenuPanel`, wired in
+   `EmulatorHostActivity`): add "Edit controls" (the gamepad editor), and a
+   settings panel for what can change while the game runs. Find which cvars
+   the core applies live before offering them (`show_touch_overlay` is set
+   live through `session.setShowTouchOverlay`; most of `SettingsSchema` is
+   read at boot): live ones change at once, the rest are shown as "applies
+   on the next start" and written to the title's per-game config. The menu
+   is driven by a controller too (`PanelNav`): keep the option order in
+   step with it.
+2. **One library.** hakuX's `LibraryScreen` is the app's library: list 360
+   titles in it with the console marked, their real names and icons (the
+   360 side's `GameMetadataSource`, `IconCache`; hakuX's `DiscInfo` reads
+   only Xbox discs), and the formats hakuX's scanner does not know (XEX
+   folders, ZAR, GOD: `GameLibraryRepository.classifyFile`). A 360 title's
+   long-press menu opens the 360 side's per-game settings, patches and
+   content screens. Then the "Xbox 360" button goes, and the 360 side's
+   folder setting with it.
+3. **One settings screen and one look.** hakuX's settings gains an Xbox 360
+   section that opens the 360 settings; the 360 screens take hakuX's theme
+   (`ui/theme/Theme.kt` on both sides).
+
+Rules that still hold: hakuX's own files change as little as possible and
+through `boosted/X360.kt` where they can, each change marked
+`hakuX-Boosted:` and listed in `docs/ARCHITECTURE.md`.
 
 ## First device run (2026-11-11): what the logs say
 
@@ -311,6 +366,11 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-11 (desktop, end).** Third device run read (run 18 loads into
+  play, skipped draws are the emulator's). The package step skips mirrors
+  that do not answer. Wrote the UI work up for a cloud session. Not
+  verified: the build of `2c2c6ec`, the fix on a device.
 
 - **2026-11-11 (desktop, late).** Found run 22's crash (a TLS base kept
   over a fiber switch, top of "Right now") and made the per-thread readers
