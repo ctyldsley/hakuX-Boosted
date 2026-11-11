@@ -16,7 +16,7 @@ permissions:
 # A newer push replaces a run that is still going: only the newest commit's
 # APK is wanted, and a run stuck on the runner's side would hold up the next.
 concurrency:
-  group: boosted-build-${{ github.ref }}
+  group: boosted-${{ github.ref }}
   cancel-in-progress: true
 
 env:
