@@ -5,7 +5,7 @@ where the work stands, what is waiting on whom, and how to work in this
 repository. **Update it before a session ends** (the "Right now" section
 and a line in the log at the bottom), and commit it with the work.
 
-Last updated: 2026-11-11 (after the first device run).
+Last updated: 2026-11-11 (after the first device run and the review pass; run 22 is the build to test).
 
 ## Right now
 
@@ -25,14 +25,14 @@ Last updated: 2026-11-11 (after the first device run).
   (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43050816108),
   the APK is its artifact `hakuX-Boosted-debug-apk`, now signed with one
   fixed debug key so later builds install over it. Not run on a device yet.
-- **Changed since run 18 (review pass; none run on a device).** Run 19
-  (`ab7db16`) compiled and packaged them and its two checks passed, but its
-  APK upload failed on GitHub's side, and the runs after it sat queued
-  without a runner for over half an hour (GitHub Actions trouble on the
-  evening of 2026-11-11, not the build). **The APK to install is the
-  artifact of the newest green run on the branch**; if none is green after
-  `ab7db16`, re-run the newest one from the Actions page. That run also
-  fails by itself if the 360 core is not -O3 with ThinLTO.
+- **The APK to install: run 22, commit `60a088e`**
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43099465293),
+  artifact `hakuX-Boosted-debug-apk`. It holds everything below and
+  installs over run 18's (same debug key). Its check that the 360 core is
+  compiled -O3 with ThinLTO passed. Not run on a device.
+- **Changed since run 18 (review pass; none run on a device).** Runs 19 to
+  21 gave no APK: GitHub Actions trouble that evening (an upload that
+  failed, runs queued without runners), not the build.
   The changes:
   - The 360 core is compiled in xenia's Release configuration (-O3,
     ThinLTO) in the debug APK too. Until now Gradle's debug variant built
@@ -277,7 +277,9 @@ Newest first. One or two lines each: what changed, what was verified.
   after the desktop's MSAA finding. Run 19 confirmed the review-pass
   commit compiles and packages; no APK from it (upload failed at GitHub),
   later runs queued without runners. The workflow's concurrency group was
-  renamed on a wrong guess that run 19 was holding it; harmless.
+  renamed on a wrong guess that run 19 was holding it; harmless. Verified:
+  run 22 green at `60a088e`, including the -O3 and ThinLTO check and the
+  APK upload.
 
 - **2026-11-11 (desktop, later).** Answered the MSAA patch question from
   run 13's log (above): applied, 4x targets regardless. The phone's adb
