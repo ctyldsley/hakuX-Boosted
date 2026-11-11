@@ -1,0 +1,123 @@
+# hakuX-Boosted: builds the whole app (hakuX's core, the Xbox 360 core, the
+# APK with both) on every push to a work branch, and on request.
+name: hakuX-Boosted
+
+on:
+  push:
+    branches:
+      - 'claude/**'
+      - 'boosted/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: boosted-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: 29.0.14206865
+  CMAKE_VERSION: 3.30.3
+  USE_CCACHE: 'true'
+  CCACHE_COMPILERCHECK: content
+
+jobs:
+  # hakuX's own core: libhakuxcore.so and the libraries it loads.
+  xbox-core:
+    name: Xbox core (hakuX)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: FEX (submodule, with the submodules it builds with)
+        run: |
+          git submodule update --init --depth 1 external/fex
+          git -C external/fex submodule update --init --depth 1 \
+            External/fmt External/range-v3 External/rpmalloc \
+            External/unordered_dense External/xxhash Source/Common/cpp-optparse
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: xbox-core-ndk${{ env.NDK_VERSION }}
+          max-size: 1G
+
+      - name: Build
+        run: boosted/tools/build-xbox-core.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xbox-core-libs
+          path: android/app/src/main/jniLibs/arm64-v8a/*.so
+          retention-days: 7
+
+  # The APK: the Xbox 360 core is built by Gradle (the x360-core module),
+  # hakuX's comes from the job above.
+  apk:
+    name: APK (both cores)
+    needs: xbox-core
+    # still built when hakuX's core failed: the 360 side's build is checked,
+    # and the APK then lacks the Xbox core (the step below says so)
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: The 360 side's submodules
+        run: git submodule update --init --recursive --depth 1 --jobs 8 -- x360
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache python3 glslang-tools spirv-tools
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" "platforms;android-36" "build-tools;36.1.0"
+
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: x360-core-ndk${{ env.NDK_VERSION }}
+          max-size: 2G
+
+      - name: hakuX's core libraries
+        id: xbox
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: xbox-core-libs
+          path: android/app/src/main/jniLibs/arm64-v8a
+
+      - name: Without hakuX's core
+        if: steps.xbox.outcome != 'success'
+        run: echo "::warning::hakuX's core libraries are missing (the Xbox core job failed), this APK runs Xbox 360 titles only"
+
+      - name: Build the debug APK
+        working-directory: android
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          # the repository's gradle.properties names the upstream author's JDK
+          # path and a 2 GB heap: this runner's JDK 21, and room for R8 over
+          # both sides' code
+          ./gradlew assembleDebug --no-daemon --stacktrace \
+            -Dorg.gradle.java.home="$JAVA_HOME_21_X64" \
+            -Dorg.gradle.jvmargs="-Xmx5g -Dfile.encoding=UTF-8"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hakuX-Boosted-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
