@@ -11,6 +11,9 @@ directory or listed in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), so that
 a newer hakuX and a newer XenDroid can each be merged in without touching
 the other.
 
+Picking the work up, in a new session or on another machine: read
+[HANDOFF.md](HANDOFF.md) first.
+
 ## Where things are
 
 | Path | What |
