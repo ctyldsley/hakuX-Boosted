@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: boosted-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   NDK_VERSION: 29.0.14206865
@@ -115,6 +115,32 @@ jobs:
           ./gradlew assembleDebug --no-daemon --stacktrace \
             -Dorg.gradle.java.home="$JAVA_HOME_21_X64" \
             -Dorg.gradle.jvmargs="-Xmx5g -Dfile.encoding=UTF-8"
+
+      # The log says what was built: both cores' libraries, the hook
+      # libraries once each, both sides' activities, the bundled title files.
+      - name: What the APK holds
+        run: |
+          apk=$(ls android/app/build/outputs/apk/debug/*.apk | head -1)
+          ls -la "$apk"
+          unzip -l "$apk" | grep -E ' lib/' || true
+          echo "game patches: $(unzip -l "$apk" | grep -c ' assets/game-patches/')"
+          unzip -l "$apk" | grep -E ' assets/(title-defaults|config)/' || true
+          echo "hakuX mods: $(unzip -l "$apk" | grep -c ' assets/mods/')"
+          "$ANDROID_HOME/build-tools/36.1.0/aapt2" dump xmltree "$apk" --file AndroidManifest.xml \
+            | grep -E 'E: (activity|service|provider|uses-sdk|uses-permission)|A: .*(:name|:process|minSdkVersion)' \
+            | sed 's/ (Raw: .*//' || true
+          missing=0
+          for lib in libe.so libhardware_ProcessorInfo.so libmain_hook.so libfile_redirect_hook.so \
+                     libgsl_alloc_hook.so libkgsl_context_hook.so libhook_impl.so; do
+            n=$(unzip -l "$apk" | grep -c " lib/arm64-v8a/$lib\$" || true)
+            if [ "$n" != "1" ]; then echo "::error::$lib: $n copies in the APK"; missing=1; fi
+          done
+          if [ "${{ steps.xbox.outcome }}" = "success" ]; then
+            for lib in libhakuxcore.so libSDL3.so; do
+              unzip -l "$apk" | grep -q " lib/arm64-v8a/$lib\$" || { echo "::error::$lib is not in the APK"; missing=1; }
+            done
+          fi
+          exit $missing
 
       - uses: actions/upload-artifact@v4
         with:

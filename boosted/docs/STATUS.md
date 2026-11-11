@@ -8,12 +8,8 @@ What is known about this version and how. Updated with each change.
 |---|---|
 | hakuX's core builds from this tree on Linux with NDK 29.0.14206865 | GitHub Actions, job "Xbox core (hakuX)" |
 | The native dependency revisions in `boosted/tools/fetch-native-deps.sh` are the ones hakuX's sources build against | The same job; and hakuX's host tests (`tests/hle`) configured against them |
+| The whole app builds into one debug APK: hakuX's core, the 360 core (libe.so), the Kotlin of both sides under hakuX's toolchain (Kotlin 2.2, AGP 8.13, R8 on), one merged manifest | GitHub Actions, job "APK (both cores)", first passed at d043094. The job's "What the APK holds" step lists the libraries and activities in the log |
 | hakuX's adrenotools patch applies unchanged to the 360 side's adrenotools | `git apply --check`; the files' blob hashes are the patch's own base |
-
-## Build of the combined APK
-
-PENDING: the first Actions run of the job "APK (both cores)" had not
-finished when this was written.
 
 ## Not verified: nothing has run on a device
 
