@@ -170,12 +170,69 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
   session started from the desktop. It merges this branch in before each
   push; this branch takes it back once a build has been checked on the
   phone. Core work stays here.
+- **The look the owner wants for the UI** (told to the desktop session; pass
+  it to the UI branch): Xbox-inspired without any branded assets, and as
+  polished as the open-source Cocoon launcher feels.
 - **Wanted by the owner after the game runs smoothly: Fable II at 60 fps.**
   Canary's "60 FPS" patch is in the bundled catalog (off). It needs the
   frame time first: measure on the optimised core before turning it on.
 - **Next for the owner's phone:** the APK of the first green run at or
   after `2c2c6ec` (the never-inlined per-thread readers on the optimised
   core). It is signed with the fork's key and installs over run 18.
+
+## Watching a test run (`boosted/tools/device-watch.py`)
+
+Written after the fourth run; **not yet run against the phone** (it was
+unplugged). `start` records the phone's screen in rolling 60 s pieces;
+`grab [secs]` takes the last seconds as still frames (ffmpeg), a
+screenshot, `xe.log` with a summary, a thread dump on request, and frame
+pacing from SurfaceFlinger (average, median, 95th and 99th percentile frame
+time: the stutter the owner feels, as numbers); `fps` and `dump` do the last
+two alone. The owner says "now" when a glitch shows, the session runs
+`grab` and reads the frames. Check the first use: the layer name
+`pacing()` picks, and that a piece closed by `pkill -2` plays.
+
+## The performance work: what the owner wants and what the profile says
+
+The owner's aim: the emulator's own overhead cut down so far that a
+Snapdragon 8 Gen 2 reaches 60 fps in games and lesser chips hold a game's
+native 30, for every title, with Fable II only the test. Nothing here is a
+promise: each step is measured on the phone (`device-watch.py fps`,
+simpleperf as in run 4) and kept only if the number moves.
+
+Order, by what the run 4 profile showed (CPU-bound: guest code 52%, the
+emulator 24%, libc 15%, the driver under 5%):
+
+1. **The scheduler's yield and wait path** (a fifth of the busiest game
+   thread). Done so far: `page_size()` and the clock resolution cached.
+   Next: the `thread_local` reads through `tlsdesc_resolver_dynamic` (6.8%
+   of that thread: `libe.so` is dlopen'ed, so every read is a call into the
+   linker; keep the scheduler's per-thread state behind one pointer, or in
+   the PPC context the JIT already holds in a register); `std::mutex`
+   three times per yield (`lock_` is one lock for all six CPUs); a yield
+   that finds nothing else ready should return without the two fiber
+   switches.
+2. **Draws dropped while their pipeline compiles** (`Pipeline layout
+   behind its shaders`: stale layout flag, null handle, async compilation):
+   refresh the layout or wait instead of failing the draw. Missing
+   geometry and flicker in any title that compiles shaders during play.
+3. **The JIT.** Take the hottest guest functions from a profile
+   (`perf-<pid>.map` names them: `sub_82C62548` is 8% of everything, the
+   title's own audio mixer) and read what the A64 backend emitted for
+   them: loads and stores through `ComputeMemoryAddress`, VMX operations
+   that leave for C helpers (`PpcVrsqrtefpLane` showed), flag and
+   condition register traffic. This is where a title-independent gain of
+   the size the owner wants would have to come from; measure before
+   believing any of it.
+4. **eDRAM and resolves.** Not the limit in this scene (the GPU thread is
+   half a core, Turnip 5%), so after the above; it becomes the limit when
+   the CPU side stops being one. Tiled rendering needs the remaining 4x
+   target (640x1024, colour and depth) gone first.
+5. **The 60 fps patch** for Fable II (bundled, off) only once the frame
+   time at 30 has headroom.
+
+The stall at the trader (frames presented, script waiting, music only, no
+speech starting) is separate: next occurrence, `device-watch.py dump`.
 
 ## The UI work the owner asked for (for a cloud session; not started)
 
@@ -420,6 +477,10 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-11 (desktop, 23:40).** `device-watch.py` (rolling screen
+  capture, grab, frame pacing, thread dump) and the performance order
+  above. The tool compiles; not run against the phone. No core change.
 
 - **2026-11-11 (desktop, 23:15).** Fourth device run profiled on the phone
   (top of "Right now"). Added the thread dump on request, cached
