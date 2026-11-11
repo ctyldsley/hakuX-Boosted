@@ -4,15 +4,28 @@ import android.content.Context
 import android.preference.PreferenceManager
 import android.util.Log
 import android.view.InputDevice
+import android.view.MotionEvent
 
-/** A gamepad or joystick is attached right now (virtual devices excluded, since the
- *  emulator's own injected device advertises gamepad sources). */
+/**
+ * A gamepad or joystick is attached right now (virtual devices excluded, since the
+ * emulator's own injected device advertises gamepad sources).
+ *
+ * hakuX-Boosted: hakuX's test of a real controller (data/Controllers.kt): stick axes
+ * as well as the sources. Phones have built-in devices that claim gamepad keys
+ * without being one (Xiaomi's uinput-xiaomi reports KEYBOARD | GAMEPAD): on those the
+ * touch overlay started hidden with no controller attached.
+ */
 fun hasPhysicalController(): Boolean = InputDevice.getDeviceIds().any { id ->
     val device = InputDevice.getDevice(id) ?: return@any false
+    if (device.isVirtual) return@any false
+    val name = device.name?.lowercase() ?: ""
+    if (listOf("accelerometer", "gyroscope", "sensor", "gpio", "uinput").any { it in name }) return@any false
     val sources = device.sources
-    !device.isVirtual &&
-        (sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
-            sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK)
+    val gamepad = sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD
+    val joystick = sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
+    (gamepad || joystick) &&
+        device.getMotionRange(MotionEvent.AXIS_X) != null &&
+        device.getMotionRange(MotionEvent.AXIS_Y) != null
 }
 
 /**

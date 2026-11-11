@@ -88,6 +88,7 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `emulator-core/.../Application.java`, `DocumentsProvider.java` | `ensure_init` / `attach`, so the class need not be the process's Application |
 | `app/.../MainActivity.kt`, `EmulatorHostActivity.kt` | Call `ensure_init`; seed the per-title defaults; install the bundled Turnip driver |
 | `app/.../updater/updater.kt`, `ui/library/GameLibraryScreen.kt` | XenDroid's updater off when embedded |
+| `app/.../settings/TouchOverlayDefault.kt` | hakuX's test of a real controller, so a phone's built-in pseudo-gamepad doesn't hide the touch controls |
 | `app/.../core/Embedded.kt`, `core/TitleDefaults.kt`, `core/BundledDriver.kt` | New files |
 
 ## Taking a newer hakuX

@@ -57,6 +57,10 @@ The logs are the 360 side's session ZIP
   emulator activity, which booted the game again. The phone was short of
   memory for the whole session (65 background apps killed in 8 minutes);
   what the emulator process itself held was not captured.
+- **No touch controls at first: fixed.** The phone's built-in
+  `uinput-xiaomi` device reports gamepad keys, so the 360 side took it for a
+  controller and started with the touch controls hidden. It now uses hakuX's
+  test of a real controller (`settings/TouchOverlayDefault.kt`).
 - **The title is 4x MSAA** (the log line this fork added), so tiled mode
   needs the MSAA patch first, as expected.
 
