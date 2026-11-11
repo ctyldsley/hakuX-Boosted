@@ -101,7 +101,7 @@ ThreadState::~ThreadState() {
   }
 }
 
-void ThreadState::Bind(ThreadState* thread_state) {
+XE_NOINLINE void ThreadState::Bind(ThreadState* thread_state) {
   thread_state_ = thread_state;
 }
 

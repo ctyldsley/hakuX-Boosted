@@ -8,6 +8,8 @@
  */
 
 #include "xenia/base/mutex.h"
+
+#include "xenia/base/platform.h"
 #if XE_PLATFORM_WIN32 == 1
 #include "xenia/base/platform_win.h"
 #elif XE_PLATFORM_LINUX == 1
@@ -92,7 +94,11 @@ inline int futex_wake(std::atomic<uint32_t>* addr, int count) {
                  0);
 }
 
-inline pid_t gettid() {
+// hakuX-Boosted: never inlined. The cached id is a thread_local; inlined into
+// a caller that a fiber switch moved to another host thread, the read went
+// through the previous thread's TLS base and the global lock took that
+// thread's id as its owner (kernel/xthread.cc, XThread::GetCurrentThread).
+XE_NOINLINE pid_t gettid() {
   // Cached per thread: this is on the xe_global_mutex lock/unlock fast path
   // (taken per kernel call and per GPU packet), and the raw syscall showed up
   // as ~2% of the GPU command processor thread in profiles.

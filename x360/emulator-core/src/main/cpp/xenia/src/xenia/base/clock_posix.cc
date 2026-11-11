@@ -24,13 +24,19 @@ uint64_t Clock::host_tick_frequency_platform() {
   return (uint64_t)((1000000000ull * (uint64_t)info.denom) /
                     (uint64_t)info.numer);
 #else
-  timespec res;
-  int error = clock_getres(CLOCK_MONOTONIC_RAW, &res);
-  assert_zero(error);
-  assert_zero(res.tv_sec);  // Sub second resolution is required.
+  // hakuX-Boosted: asked once. The resolution does not change, and this is
+  // called for every QueryHostUptimeMillis (each yield and wait of the guest
+  // scheduler): a clock_getres system call each time in the device profile.
+  static const uint64_t frequency = [] {
+    timespec res;
+    int error = clock_getres(CLOCK_MONOTONIC_RAW, &res);
+    assert_zero(error);
+    assert_zero(res.tv_sec);  // Sub second resolution is required.
 
-  // Convert nano seconds to hertz. Resolution is 1ns on most systems.
-  return 1000000000ull / res.tv_nsec;
+    // Convert nano seconds to hertz. Resolution is 1ns on most systems.
+    return uint64_t(1000000000ull / res.tv_nsec);
+  }();
+  return frequency;
 #endif
 }
 

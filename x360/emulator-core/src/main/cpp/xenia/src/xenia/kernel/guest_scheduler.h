@@ -293,7 +293,10 @@ class GuestScheduler {
   uint32_t last_frame_number_ = 0;
   uint32_t no_progress_ticks_ = 0;
   bool no_progress_reported_ = false;
-  void ReportNoProgress();
+  // hakuX-Boosted: on_request is the dump asked for with the trigger file
+  // (WatchdogLoop), the same report without the no-frame wording.
+  void ReportNoProgress(bool on_request = false);
+  uint32_t dump_request_ticks_ = 0;
 
   // Watchdog-only stall detection state, touched under lock_.
   static constexpr uint32_t kStallReportTicks = 2000;  // ~2 s at a 1 ms period

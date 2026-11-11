@@ -8,6 +8,8 @@
  */
 
 #include "xenia/kernel/util/shim_utils.h"
+
+#include "xenia/base/platform.h"
 #include "xenia/kernel/xthread.h"
 namespace xe {
 namespace kernel {
@@ -15,7 +17,11 @@ namespace shim {
 
 thread_local StringBuffer string_buffer_;
 
-StringBuffer* thread_local_string_buffer() { return &string_buffer_; }
+// hakuX-Boosted: never inlined (a thread_local reached from code that fibers
+// carry between host threads: kernel/xthread.cc, XThread::GetCurrentThread).
+XE_NOINLINE StringBuffer* thread_local_string_buffer() {
+  return &string_buffer_;
+}
 
 XThread* ContextParam::CurrentXThread() const {
   return XThread::GetCurrentThread();

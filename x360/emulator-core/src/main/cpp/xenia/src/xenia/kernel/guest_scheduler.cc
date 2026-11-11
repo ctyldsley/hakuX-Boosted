@@ -10,6 +10,7 @@
 #include "xenia/kernel/guest_scheduler.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,8 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
+
+DECLARE_path(log_file);
 
 DEFINE_bool(
     guest_scheduler_stats, false,
@@ -1549,12 +1552,19 @@ std::string FormatWaitShape(const XThread::SchedulerLinks& links) {
 }
 }  // namespace
 
-void GuestScheduler::ReportNoProgress() {
-  XELOGW(
-      "GuestScheduler: no guest frame presented in {} watchdog ticks while the "
-      "dispatch threads keep switching. Every fiber below is waiting on "
-      "something none of them is producing:",
-      no_progress_ticks_);
+void GuestScheduler::ReportNoProgress(bool on_request) {
+  if (on_request) {
+    XELOGW(
+        "GuestScheduler: thread dump on request (frame {}). What every guest "
+        "thread is running or waiting on:",
+        xe::logging::GetFrameNumber());
+  } else {
+    XELOGW(
+        "GuestScheduler: no guest frame presented in {} watchdog ticks while "
+        "the dispatch threads keep switching. Every fiber below is waiting on "
+        "something none of them is producing:",
+        no_progress_ticks_);
+  }
   uint64_t now_ms = Clock::QueryHostUptimeMillis();
   std::lock_guard<std::mutex> lock(lock_);
   for (int i = 0; i < kMaxCpus; ++i) {
@@ -1648,6 +1658,25 @@ void GuestScheduler::WatchdogLoop() {
     }
     if (shutting_down_.load()) {
       break;
+    }
+    // hakuX-Boosted: a dump of every guest thread on request. The report
+    // below only comes when no frame is presented, and a game whose picture
+    // still moves while its script waits for ever (Fable II at the trader:
+    // frames presented, one thread polling) leaves nothing in the log. Create
+    // a file called dump_threads beside the log file and the next second's
+    // tick writes the report and removes the file:
+    //   adb shell touch <storage root>/dump_threads
+    // Checked about once a second, outside lock_.
+    if (++dump_request_ticks_ >= 1000000 / period_us) {
+      dump_request_ticks_ = 0;
+      if (!cvars::log_file.empty()) {
+        std::error_code ec;
+        auto trigger = cvars::log_file.parent_path() / "dump_threads";
+        if (std::filesystem::exists(trigger, ec)) {
+          std::filesystem::remove(trigger, ec);
+          ReportNoProgress(true);
+        }
+      }
     }
     // No-progress detection, outside lock_ (ReportNoProgress takes it).
     // Only meaningful once something has been dispatched, so a title still

@@ -869,7 +869,7 @@ bool XThread::HasPendingUserApc() {
   return !kthread->apc_lists[1].empty(thread_state_->context());
 }
 
-void XThread::SetCurrentThread(XThread* thread) {
+XE_NOINLINE void XThread::SetCurrentThread(XThread* thread) {
   current_xthread_tls_ = thread;
   current_thread_ = thread;
   if (thread) {
