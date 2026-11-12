@@ -9,6 +9,28 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
 
 ## Right now
 
+- **Longest clean run so far: 48 minutes, frame 36,890 (run 33, the 60 FPS
+  patch on, `kgsl_context_priority = 0`, a warm shader cache; 2026-11-12
+  14:30 to 15:18).** No not-responding report, no guest stall, no skipped
+  draw, no `thread identity mismatch` line, no host-side crash. 28 to 30
+  frames a second in this later area (34 to 43 in the opening scenes). The
+  owner: playable, graphical faults "very minimal" this time, performance
+  uneven, touch input laggy at this frame rate.
+  - The hook is now off by default in the code (see the log's newest line
+    for the build).
+  - **What stopped the guest deadlock is not known.** Three things changed
+    at once against the runs that stalled: the caller's identity from the
+    control region (run 33), the hook off, the 60 FPS patch. The identity
+    change logged no mismatch at all, so on its own evidence it changed
+    nothing. Take them apart one at a time when the stall has to be
+    understood rather than avoided: first the same build with the patch
+    off.
+  - **No skipped draws with a warm cache** (414 to 1,601 on cold ones):
+    the dropped draws and much of the flicker belong to shaders compiling
+    during play. Fixing the draw that arrives before its pipeline, and
+    compiling ahead, is the stability item for a first run.
+  - **Order agreed with the owner:** stability first, then performance.
+
 - **Run 33 with the 60 FPS patch: the app's own UI thread starves and
   Android reports it not responding (2026-11-12 13:57;
   `device-logs/run33`).** Not the guest deadlock, and no `thread identity
@@ -577,7 +599,7 @@ build locally and use adb; the device etiquette in upstream's own
 
 | Setting | Section | Default | What |
 |---|---|---|---|
-| `kgsl_context_priority` | Vulkan | 7 | Turnip's KGSL contexts on the compositor's ringbuffer (hakuX's hook); 0 leaves the driver's |
+| `kgsl_context_priority` | Vulkan | 0 (was 7) | Turnip's KGSL contexts on the compositor's ringbuffer (hakuX's hook) when 1 to 15; off by default since it starved the app's own UI with a title uncapped |
 | `tessellation_debug` | GPU | 0 | Logs tessellated draws and their vertex shader; 1 no culling, 2 no depth test, 3 both |
 | (log line) | | | "This title creates multisampled render targets", a warning when tiled mode is on |
 

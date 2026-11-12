@@ -31,7 +31,7 @@ object SettingsSchema {
             b("Vulkan", "adrenotools_force_max_clocks", "Force max GPU clocks (adrenotools)", false),
             // hakuX-Boosted: Turnip's kgsl draw contexts off the ringbuffer the compositor
             // preempts (hakuX's hook). 0 leaves the driver's own priority.
-            i("Vulkan", "kgsl_context_priority", "KGSL context priority (Turnip, 0=driver's)", 7, 0, 15),
+            i("Vulkan", "kgsl_context_priority", "KGSL context priority (Turnip, 0=driver's)", 0, 0, 15),
             // hakuX-Boosted: per-game for Fable II (GAME_COMPAT.md); was config-file only.
             b("Vulkan", "vulkan_depth_unorm24", "Native 24-bit unorm depth", true),
             // 'sysmem' forces untiled rendering (much slower) but avoids a class of Adreno GPU

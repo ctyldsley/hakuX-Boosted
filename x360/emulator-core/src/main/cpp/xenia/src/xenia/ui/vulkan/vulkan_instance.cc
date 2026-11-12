@@ -144,8 +144,17 @@ UPDATE_from_string(turnip_debug, 2026, 7, 24, 12, "");
 
 // hakuX-Boosted: from hakuX's native/app/vkdriver.c (the same adrenotools
 // revision and patch, tools/native/adrenotools-kgsl-context-priority.patch).
+//
+// Off by default (0) since the device runs of 2026-11-12. At 7 and with a
+// title's frame rate uncapped (Fable II, Canary's 60 FPS patch) the
+// emulator's contexts never left the GPU free: the app's own render thread,
+// which draws the touch controls over the game, could not get a frame through
+// for 12 s at a time, the UI thread waited on it (nSyncAndDrawFrame), touches
+// went unanswered and Android declared the app not responding. With the hook
+// off the same title ran 48 minutes without one. A hang of an Adreno 6xx on a
+// preempted sysmem pass is what 7 is for; it stays a setting for that.
 DEFINE_int32(
-    kgsl_context_priority, 7,
+    kgsl_context_priority, 0,
     "KGSL priority of the draw contexts a custom Turnip (Mesa) driver creates: "
     "1 (the highest) to 15 (the lowest), 0 to leave the driver's own. Turnip "
     "leaves its contexts at the kernel's default, 8, the ringbuffer below "

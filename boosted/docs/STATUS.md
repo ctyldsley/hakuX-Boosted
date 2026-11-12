@@ -31,11 +31,12 @@ No build of this fork has been installed or run. In particular:
 - **The combined app.** That the 360 library opens from hakuX's library,
   that a 360 image picked in hakuX's library boots in the 360 core, that
   both sides' settings and data survive side by side.
-- **`kgsl_context_priority`.** hakuX runs the same hook on the same driver
-  stack, but through its own loader code. Check `xe.log` for `Custom Vulkan
-  driver's kgsl draw contexts at priority 7` and logcat for
-  `hook_ioctl: kgsl draw context ... created at priority 7`. To rule it out
-  when chasing a problem: `[Vulkan] kgsl_context_priority = 0`.
+- **`kgsl_context_priority`.** Run on a device (2026-11-12, Adreno 840)
+  and turned off by default: at 7, with Fable II uncapped, the emulator
+  starved the app's own UI of the GPU and Android reported the app not
+  responding; at 0 the same title ran 48 minutes clean. Still a setting
+  (`[Vulkan] kgsl_context_priority = 7`) for the Adreno 6xx hang it was
+  ported for; `xe.log` says `kgsl draw contexts at priority 7` when on.
 - **Per-title defaults.** Check that
   `Android/data/<package>/files/compose/config/4D5307F1.config.toml` exists
   after Fable II's first launch and that `xe.log` reports the override.
