@@ -9,6 +9,30 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
 
 ## Right now
 
+- **The merged build on the phone (run 35, `daee679`, 2026-11-12 16:21).**
+  The owner's first look at the UI work: the library "looks right" (Fable
+  II in hakuX's list), the in-game menu's five options, Settings with the
+  frame rate counter appearing at once, and Edit controls all work. The
+  in-game settings write to the title's config without losing the bundled
+  defaults (`mount_cache`, `vulkan_depth_unorm24` still there).
+  - **UI to refine (the owner's notes, for one pass after stability):**
+    hakuX's settings should be tabbed Global / Xbox / Xbox 360 rather than
+    an Xbox 360 section of links; the frame rate counter's left edge is
+    cut off at the top left of this phone (rounded corner or cutout: it
+    needs the display's safe inset); the look overall is to move towards
+    the Xbox-inspired, Cocoon-launcher polish noted below.
+  - **The attract video is wrong (new, seen by the owner on run 35).**
+    Leave Fable II's title screen alone and its video plays washed out to
+    white and yellow, with a striped band across the top, a cyan line and
+    a cyan block, flickering constantly (screenshots kept by the owner).
+    The title screen itself and gameplay are right. A video frame is a
+    texture the game fills itself every frame: look at how that texture is
+    read (format, tiling, the planes of a YUV frame) and at the same
+    front-buffer question as the scene-cut flash.
+  - **Running now:** the same build with the 60 FPS patch off, to see
+    whether the guest deadlock comes back (it did within 2 to 20 minutes
+    on runs 13, 24, 26 and 32).
+
 - **`claude/xbox-ui` is merged in (2026-11-12).** The next APK from this
   branch has both: the core as tested on run 33 (the hook off by default)
   and the UI work, which has built but never run. What to look at on the
