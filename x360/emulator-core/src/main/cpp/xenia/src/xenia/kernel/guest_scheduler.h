@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <unordered_set>
 
 #include "xenia/base/threading.h"
@@ -111,6 +112,25 @@ class GuestScheduler {
 
   // Counts a safepoint preemption forced through a deferring IRQL.
   void NoteForcedPreempt();
+
+  // hakuX-Boosted: how late guest threads run after what they wait for.
+  // Fable II's stall is its worker's per-frame job not being finished when
+  // the main thread comes back for it (boosted/HANDOFF.md, 2026-11-12), and
+  // nothing said whether the worker was woken late, kept waiting for a
+  // critical section, or simply slow. These count every satisfied wait by
+  // the time from the signal to the waiter running again, and every
+  // contended critical section by the time spent waiting for it; a slow one
+  // (kLateWakeLogUs and over) is logged by thread, a budgeted number of
+  // times. The totals are in the once-a-second counters
+  // (guest_scheduler_stats) and in every thread dump.
+  static uint64_t NowMicros() {
+    return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count());
+  }
+  void NoteWakeLatency(uint64_t latency_us, XThread* thread);
+  void NoteCriticalSectionWait(uint64_t wait_us, uint32_t section_address,
+                               uint32_t caller_lr, XThread* thread);
 
   // Yields the running guest fiber back to its CPU's idle fiber. Returns (on
   // the calling fiber) once the dispatcher switches back into it.
@@ -350,6 +370,23 @@ class GuestScheduler {
     std::atomic<uint64_t> io_queue_max_ns{0};
   };
   Stats stats_;
+  // hakuX-Boosted: see NoteWakeLatency. Never reset, so a thread dump has
+  // the whole run; the once-a-second line prints the change since the last.
+  static constexpr uint64_t kLateWakeLogUs = 16000;
+  static constexpr size_t kWakeLatencyBuckets = 7;
+  // Upper bounds in microseconds: 250, 1000, 4000, 16000, 33000, 64000, more.
+  std::atomic<uint64_t> wake_latency_counts_[kWakeLatencyBuckets] = {};
+  std::atomic<uint64_t> wake_latency_max_us_{0};
+  std::atomic<uint64_t> section_waits_{0};
+  std::atomic<uint64_t> section_wait_us_{0};
+  std::atomic<uint64_t> section_wait_max_us_{0};
+  std::atomic<uint64_t> section_waits_late_{0};
+  uint64_t wake_latency_reported_[kWakeLatencyBuckets] = {};
+  uint64_t section_waits_reported_ = 0;
+  uint64_t section_wait_us_reported_ = 0;
+  std::string LatencyTotalsLine(const uint64_t* since_counts,
+                                uint64_t since_section_waits,
+                                uint64_t since_section_wait_us);
   uint64_t stats_last_report_ms_ = 0;
   // Missed-wake tripwire window, guarded by lock_.
   uint64_t backstop_rescue_window_ms_ = 0;

@@ -239,10 +239,33 @@ void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
 // uptime, 0 = infinite) elapses. Polling the host primitive preserves its exact
 // acquire semantics, only the blocking is made cooperative. |wait_object| is
 // the single object waited on, null for a multi-wait.
+// hakuX-Boosted: a wait that parked and was then satisfied reports how long
+// the signal took to reach it. Only a signal that arrived while the fiber was
+// parked is counted (the object's last signal is at or after the first park),
+// so a wait that outlasted an older signal is not mistaken for a slow wake.
+// Timers, threads and other objects that become signalled without waking
+// cooperative waiters have no signal time and are left out.
+static void ReportWakeLatency(GuestScheduler* scheduler, XObject* wait_object,
+                              uint64_t first_block_us) {
+  XThread* self = XThread::GetCurrentThread();
+  uint64_t signal_us = 0;
+  if (wait_object) {
+    signal_us = wait_object->cooperative_signal_time_us();
+  } else if (self) {
+    signal_us = self->cooperative_wait_set_signal_time_us();
+  }
+  if (!signal_us || signal_us < first_block_us) {
+    return;
+  }
+  uint64_t now_us = GuestScheduler::NowMicros();
+  scheduler->NoteWakeLatency(now_us > signal_us ? now_us - signal_us : 0, self);
+}
+
 template <typename PollFn>
 X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
                          XObject* wait_object, bool alertable,
                          uint64_t deadline_ms, PollFn&& poll) {
+  uint64_t first_block_us = 0;
   while (true) {
     // Alertable waits return on a queued user APC (the cooperative equivalent
     // of a host alertable-wait wake), then the caller runs xeProcessUserApcs.
@@ -263,12 +286,18 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
     }
     std::optional<X_STATUS> resolved = poll();
     if (resolved) {
+      if (first_block_us) {
+        ReportWakeLatency(scheduler, wait_object, first_block_us);
+      }
       WaitExit(kthread, *resolved);
       return *resolved;
     }
     if (deadline_ms != 0 && Clock::QueryHostUptimeMillis() >= deadline_ms) {
       WaitExit(kthread, X_STATUS_TIMEOUT);
       return X_STATUS_TIMEOUT;
+    }
+    if (!first_block_us) {
+      first_block_us = GuestScheduler::NowMicros();
     }
     scheduler->BlockCurrentThread(deadline_ms, wait_epoch, alertable);
   }
@@ -390,6 +419,8 @@ std::vector<XObject::SignalRecord> XObject::RecentCooperativeSignals(
 }
 
 void XObject::WakeCooperativeWaiters() {
+  cooperative_signal_time_us_.store(GuestScheduler::NowMicros(),
+                                    std::memory_order_relaxed);
   cooperative_signal_epoch_.fetch_add(1);
   RecordCooperativeSignal(this);
   // Wake only the CPUs that can act on this signal instead of every CPU with

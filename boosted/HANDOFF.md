@@ -18,6 +18,9 @@ Stability (first):
 - The guest stall: Fable II joins its worker while holding a lock the
   worker needs (see Right now). Run 39 still stalls. Measure wake
   latency and lock hand-off cost next; nothing fixed yet.
+  Measurement written (`NoteWakeLatency`, `NoteCriticalSectionWait`):
+  in the build after run 39. Read "late wake" and "waited ... for critical
+  section" lines, and the totals line in a thread dump.
 - The glitches that survive waiting for pipelines: cause not seen, needs
   a capture (`device-watch.py`), ideally in an area already visited.
 - Scrambled frames at scene cuts: may be the same thing, unconfirmed.

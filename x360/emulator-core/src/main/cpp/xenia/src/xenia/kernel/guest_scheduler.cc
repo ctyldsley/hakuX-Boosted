@@ -1457,6 +1457,90 @@ void GuestScheduler::NoteForcedPreempt() {
   stats_.forced_preempts.fetch_add(1, std::memory_order_relaxed);
 }
 
+// hakuX-Boosted: see the header.
+static void RaiseMax(std::atomic<uint64_t>& max, uint64_t value) {
+  uint64_t seen = max.load(std::memory_order_relaxed);
+  while (value > seen &&
+         !max.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+  }
+}
+
+void GuestScheduler::NoteWakeLatency(uint64_t latency_us, XThread* thread) {
+  static constexpr uint64_t kBounds[kWakeLatencyBuckets - 1] = {
+      250, 1000, 4000, 16000, 33000, 64000};
+  size_t bucket = kWakeLatencyBuckets - 1;
+  for (size_t i = 0; i < kWakeLatencyBuckets - 1; ++i) {
+    if (latency_us <= kBounds[i]) {
+      bucket = i;
+      break;
+    }
+  }
+  wake_latency_counts_[bucket].fetch_add(1, std::memory_order_relaxed);
+  RaiseMax(wake_latency_max_us_, latency_us);
+  if (latency_us >= kLateWakeLogUs && thread) {
+    static std::atomic<int> budget{400};
+    if (budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+      const auto& links = thread->scheduler_links();
+      XELOGW(
+          "GuestScheduler: late wake, tid={:08X} '{}' ran {:.1f} ms after the "
+          "signal it waited for (handle {:08X}, {} handle(s), cpu {}, frame "
+          "{})",
+          thread->thread_id(), thread->thread_name(),
+          double(latency_us) / 1000.0,
+          links.wait_handle_count ? links.wait_handles[0] : 0,
+          uint32_t(links.wait_handle_count), links.cpu,
+          xe::logging::GetFrameNumber());
+    }
+  }
+}
+
+void GuestScheduler::NoteCriticalSectionWait(uint64_t wait_us,
+                                             uint32_t section_address,
+                                             uint32_t caller_lr,
+                                             XThread* thread) {
+  section_waits_.fetch_add(1, std::memory_order_relaxed);
+  section_wait_us_.fetch_add(wait_us, std::memory_order_relaxed);
+  RaiseMax(section_wait_max_us_, wait_us);
+  if (wait_us >= kLateWakeLogUs) {
+    section_waits_late_.fetch_add(1, std::memory_order_relaxed);
+    static std::atomic<int> budget{400};
+    if (budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+      XELOGW(
+          "GuestScheduler: tid={:08X} '{}' waited {:.1f} ms for critical "
+          "section {:08X} (lr={:08X}, frame {})",
+          thread ? thread->thread_id() : 0,
+          thread ? thread->thread_name() : std::string("none"),
+          double(wait_us) / 1000.0, section_address, caller_lr,
+          xe::logging::GetFrameNumber());
+    }
+  }
+}
+
+std::string GuestScheduler::LatencyTotalsLine(const uint64_t* since_counts,
+                                              uint64_t since_section_waits,
+                                              uint64_t since_section_wait_us) {
+  uint64_t counts[kWakeLatencyBuckets];
+  for (size_t i = 0; i < kWakeLatencyBuckets; ++i) {
+    counts[i] = wake_latency_counts_[i].load(std::memory_order_relaxed) -
+                (since_counts ? since_counts[i] : 0);
+  }
+  uint64_t waits =
+      section_waits_.load(std::memory_order_relaxed) - since_section_waits;
+  uint64_t wait_us =
+      section_wait_us_.load(std::memory_order_relaxed) - since_section_wait_us;
+  return fmt::format(
+      "wakes by delay after the signal: <=0.25ms {}, <=1ms {}, <=4ms {}, "
+      "<=16ms {}, <=33ms {}, <=64ms {}, more {} (longest of the run {:.1f} "
+      "ms) | critical sections: {} contended, {} us each on average (longest "
+      "of the run {:.1f} ms, {} of 16 ms or more in the run)",
+      counts[0], counts[1], counts[2], counts[3], counts[4], counts[5],
+      counts[6],
+      double(wake_latency_max_us_.load(std::memory_order_relaxed)) / 1000.0,
+      waits, waits ? wait_us / waits : 0,
+      double(section_wait_max_us_.load(std::memory_order_relaxed)) / 1000.0,
+      section_waits_late_.load(std::memory_order_relaxed));
+}
+
 void GuestScheduler::ReportStatsIfDue() {
   if (!cvars::guest_scheduler_stats) {
     return;
@@ -1492,6 +1576,16 @@ void GuestScheduler::ReportStatsIfDue() {
       io_calls,
       io_calls ? to_us(io_queue / io_calls) : 0, to_us(io_queue_max),
       io_calls ? to_us(io_run / io_calls) : 0);
+  // hakuX-Boosted: the last second's wakes and critical section waits.
+  XELOGI("GuestScheduler: {}",
+         LatencyTotalsLine(wake_latency_reported_, section_waits_reported_,
+                           section_wait_us_reported_));
+  for (size_t i = 0; i < kWakeLatencyBuckets; ++i) {
+    wake_latency_reported_[i] =
+        wake_latency_counts_[i].load(std::memory_order_relaxed);
+  }
+  section_waits_reported_ = section_waits_.load(std::memory_order_relaxed);
+  section_wait_us_reported_ = section_wait_us_.load(std::memory_order_relaxed);
 }
 
 // Names what a fiber is parked on, for the no-progress dump.
@@ -1568,6 +1662,8 @@ void GuestScheduler::ReportNoProgress(bool on_request) {
         no_progress_ticks_);
   }
   uint64_t now_ms = Clock::QueryHostUptimeMillis();
+  // hakuX-Boosted: the whole run's wake delays and critical section waits.
+  XELOGW("  {}", LatencyTotalsLine(nullptr, 0, 0));
   // hakuX-Boosted: the handles the parked fibers wait on, described once
   // lock_ is released (looking an object up takes the kernel's own locks).
   std::vector<uint32_t> waited_handles;

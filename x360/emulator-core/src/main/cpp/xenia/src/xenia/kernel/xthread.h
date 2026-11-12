@@ -548,6 +548,20 @@ class XThread : public XObject, public cpu::Thread {
   uint8_t cooperative_wait_set_count() const {
     return scheduler_links_.wait_gate_count;
   }
+  // hakuX-Boosted: the latest signal time among a tracked multi-wait set's
+  // members (XObject::cooperative_signal_time_us), 0 when untracked or never
+  // signalled.
+  uint64_t cooperative_wait_set_signal_time_us() const {
+    uint64_t latest = 0;
+    for (uint8_t i = 0; i < scheduler_links_.wait_gate_count; ++i) {
+      uint64_t t =
+          scheduler_links_.wait_gate_objects[i]->cooperative_signal_time_us();
+      if (t > latest) {
+        latest = t;
+      }
+    }
+    return latest;
+  }
 
   XObject* cooperative_wait_object() const {
     return cooperative_wait_object_.load(std::memory_order_acquire);

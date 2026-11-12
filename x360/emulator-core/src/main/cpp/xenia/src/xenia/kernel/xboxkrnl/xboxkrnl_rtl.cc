@@ -682,9 +682,17 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs,
   }
 
   if (xe::atomic_inc(&cs->lock_count) != 0) {
-    // Create a full waiter.
+    // Create a full waiter. hakuX-Boosted: timed, see
+    // GuestScheduler::NoteCriticalSectionWait.
+    GuestScheduler* scheduler = kernel_state()->guest_scheduler();
+    const uint64_t wait_start_us = scheduler ? GuestScheduler::NowMicros() : 0;
     xeKeWaitForSingleObject(reinterpret_cast<void*>(cs.host_address()), 8, 0, 0,
                             nullptr);
+    if (scheduler) {
+      scheduler->NoteCriticalSectionWait(
+          GuestScheduler::NowMicros() - wait_start_us, cs.guest_address(),
+          uint32_t(ctx->lr), queued_as ? queued_as : XThread::GetCurrentThread());
+    }
   } else if (queued_as) {
     // The owner left before the increment: nothing was set, nothing to wait
     // for.

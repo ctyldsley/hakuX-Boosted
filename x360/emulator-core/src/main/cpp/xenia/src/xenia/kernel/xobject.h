@@ -303,6 +303,13 @@ class XObject {
   uint32_t cooperative_signal_epoch() const {
     return cooperative_signal_epoch_.load();
   }
+  // hakuX-Boosted: when this object last woke its cooperative waiters, in
+  // microseconds of the host's steady clock (GuestScheduler::NowMicros), 0 if
+  // it never has. The waiter a signal satisfies reads it to say how long the
+  // wake took to reach it (GuestScheduler::NoteWakeLatency).
+  uint64_t cooperative_signal_time_us() const {
+    return cooperative_signal_time_us_.load(std::memory_order_relaxed);
+  }
   // Bumped by a release-everyone-then-reset transition (a manual-reset pulse),
   // which is gone from the host primitive before any parked fiber re-polls it.
   virtual uint32_t cooperative_pulse_epoch() const { return 0; }
@@ -364,6 +371,7 @@ class XObject {
   uint32_t priority_increment_ = 0;
 
   std::atomic<uint32_t> cooperative_signal_epoch_{0};
+  std::atomic<uint64_t> cooperative_signal_time_us_{0};
 
   // Host objects are persisted through resets/etc.
   bool host_object_ = false;
