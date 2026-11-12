@@ -229,6 +229,19 @@ DEFINE_bool(
     "shader so the interim geometry is visible (host render target path "
     "only). Requires async_shader_vs_interpreter.",
     "GPU");
+// hakuX-Boosted: see the draw path in vulkan_command_processor.cc.
+DEFINE_bool(
+    async_shader_translate_on_draw, true,
+    "With asynchronous shader compilation and no placeholder pipelines: "
+    "translate a draw's shaders on the draw thread when they are not "
+    "translated yet, so the draw can be recorded and wait for its pipeline "
+    "at the end of the submission instead of being dropped. A shader that "
+    "is first seen costs the draw thread its translation once (the pipeline "
+    "still compiles in the background); with this off such draws are lost "
+    "until both shaders have been translated in the background, which shows "
+    "as missing geometry and flicker the first time a scene is drawn.",
+    "GPU");
+
 DEFINE_bool(
     async_shader_skip_draws, true,
     "Skip draws whose shaders can't render immediately via a placeholder "

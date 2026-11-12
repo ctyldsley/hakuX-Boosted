@@ -4035,8 +4035,22 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                           !vertex_shader_translation->is_translated();
     // The draw thread translates only for a no-placeholder draw that isn't
     // being skipped (so it can render via a real-VS placeholder).
+    // hakuX-Boosted: in the deferred-bind model (no placeholder pipelines,
+    // the default) a draw can only be recorded once the bindings of both its
+    // shaders are known: its texture sets are allocated from the pipeline
+    // layout, and the layout needs both stages' counts. Left to the
+    // background thread, a draw that arrived before either translation was
+    // skipped by UpdateBindings ("pipeline layout counts ... do not match",
+    // 400 to 2,250 draws in each cold-cache run of Fable II on a phone, none
+    // with a warm cache), whatever vulkan_async_skip_draws said about no
+    // draw being lost. Translating here costs the draw thread the SPIR-V
+    // translation the first time a shader is seen; the pipeline itself still
+    // compiles in the background and the submission waits for it.
     bool translate_here =
-        !async_available || (no_placeholder && !cvars::async_shader_skip_draws);
+        !async_available ||
+        (no_placeholder && !cvars::async_shader_skip_draws) ||
+        (!cvars::vulkan_placeholder_pipelines &&
+         cvars::async_shader_translate_on_draw);
     if (translate_here) {
       if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
                                                     pixel_shader_translation)) {

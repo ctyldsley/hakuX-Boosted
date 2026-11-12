@@ -9,6 +9,30 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
 
 ## Right now
 
+- **The dropped draws: cause found by reading, fix pushed, not built or
+  run.** With placeholder pipelines off (the default, the "deferred-bind"
+  model) the draw thread does not translate shaders: the background thread
+  does. A draw whose pixel shader is not translated yet has no pixel
+  bindings, so `GetGuestGraphicsPipelineLayout` cannot complete the layout
+  (`counts_complete` false), `RefreshPipelineLayoutIfStale` leaves the
+  slot's minimal layout, and `UpdateBindings` refuses the draw because the
+  vertex stage wants textures the layout has no room for. That is the
+  logged state exactly: `layout stale flag true, pipeline handle null,
+  translated true`, `PS 0t/0s`. So `vulkan_async_skip_draws = false` ("no
+  draw is ever lost") only held once both shaders were translated. New
+  setting `async_shader_translate_on_draw` (GPU, default true): such a
+  draw's shaders are translated on the draw thread, the draw is recorded
+  and the submission waits for the pipeline as designed. Cost: the SPIR-V
+  translation once per new shader on the draw thread. **Check on a cold
+  cache** (delete `compose/cache/shaders` and the pipeline cache over adb):
+  `skipping the draw` should stay at 0, and say how the hitching feels.
+- **For the owner, standing instruction (2026-11-12):** changes should
+  raise every game, not polish one. Fable II is the test title. Look for
+  the architectural step the way hakuX's own was (QEMU replaced by a FEX
+  based translator and a native kernel): weigh the JIT, the guest
+  scheduler and the memory model as candidates for a rewrite whenever the
+  profiles point at them, and say so when one is found.
+
 - **The merged build on the phone (run 35, `daee679`, 2026-11-12 16:21).**
   The owner's first look at the UI work: the library "looks right" (Fable
   II in hakuX's list), the in-game menu's five options, Settings with the

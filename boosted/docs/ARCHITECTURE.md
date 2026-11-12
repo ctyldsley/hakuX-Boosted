@@ -114,6 +114,7 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `app/.../data/GameLibraryRepository.kt` | `scanRoots`: several folders, and a test for which disc images are the 360's |
 | `app/.../updater/updater.kt`, `ui/library/GameLibraryScreen.kt` | XenDroid's updater off when embedded |
 | `xenia/kernel/xthread.cc`, `guest_scheduler.cc`, `cpu/thread.cc`, `thread_state.cc`, `base/threading*.cc` | The readers of per-thread variables are never inlined: a fiber resumes on another host thread, and an inlined reader keeps the old thread's TLS base (the optimised build's crash in `XObject::Wait`) |
+| `xenia/gpu/gpu_flags.cc`, `gpu/vulkan/vulkan_command_processor.cc` | `async_shader_translate_on_draw`: a draw's untranslated shaders are translated on the draw thread so the draw is not dropped |
 | `xenia/memory.cc` | Physical memory that is committed invalidates the GPU caches' copy of it (pages a draw saw decommitted were left marked valid for ever) |
 | `xenia/kernel/xboxkrnl/xboxkrnl_rtl.cc` | A critical section's owner comes from the caller's control region, with a mismatch against the thread-local logged |
 | `app/.../settings/TouchOverlayDefault.kt` | hakuX's test of a real controller, so a phone's built-in pseudo-gamepad doesn't hide the touch controls |
