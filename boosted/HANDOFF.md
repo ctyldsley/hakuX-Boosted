@@ -9,6 +9,23 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
 
 ## Right now
 
+- **The 60 FPS patch, measured (run 32, 2026-11-12 13:36).** With Canary's
+  "60 FPS" patch on, the same early scenes run at 34, 42 and 43 frames a
+  second (emulator frame counter over 10 s windows) against 21 to 27
+  without it. So the title was waiting on its presentation interval, not
+  out of CPU: at 30 it just misses 33 ms and falls to every third refresh.
+  Uncapped, the profile changes: `GameThread`'s host thread is the busiest
+  (24% of samples, about a core), the 3D Engine thread spins in one small
+  guest function waiting for it (`sub_82B9BF90`, 10% of all CPU: a poll
+  loop, `lr=82B9BF98` in earlier dumps), the GPU command thread 18%,
+  Turnip 8%, and pipeline compilation threads 5% (stutter while new
+  shaders compile). Guest code 60%, `libe.so` 17%, libc 11%. For 60: the
+  game thread needs about a third more throughput, and its share of
+  thunk, TLS resolver and scheduler calls is where to take it first.
+  Whether the game plays at the right speed with the patch is the
+  owner's to say.
+
+
 - **The stall, read out of the stalled process (run 32, 2026-11-12 12:34;
   `device-logs/watch/20261112-123444`).** The new dump: the worker
   `XThread001B` is parked in `RtlEnterCriticalSection` (guest `lr=822006CC`,
