@@ -61,15 +61,21 @@ def start(args):
     loop = (
         f"while [ -e {PHONE_DIR}/.on ]; do "
         f"screenrecord --time-limit {SEGMENT_SECONDS} --bit-rate 8000000 --size 1304x600 "
-        f"{PHONE_DIR}/seg-$(date +%s).mp4; "
+        f"{PHONE_DIR}/seg-$(date +%s).mp4 || sleep 3; "
+        # a piece of nothing: the screen was off, screenrecord cannot start
+        f"find {PHONE_DIR} -name seg-*.mp4 -size 0 -delete; "
         f"ls -t {PHONE_DIR}/seg-*.mp4 | tail -n +{KEEP + 1} | xargs -r rm -f; "
         f"done"
     )
     shell(f"touch {PHONE_DIR}/.on; nohup sh -c '{loop}' >/dev/null 2>&1 &")
     shell("logcat -G 64M")
     time.sleep(1)
+    awake = "Awake" in shell("dumpsys power | grep mWakefulness=")
     running = shell("pidof screenrecord").strip()
-    print("recording" if running else "screenrecord did not start (is the screen on?)")
+    if not awake:
+        print("the phone's screen is off: recording begins by itself once it is on")
+    else:
+        print("recording" if running else "screenrecord did not start")
 
 
 def stop(args, quiet=False):
@@ -81,11 +87,12 @@ def stop(args, quiet=False):
 def surface_layer(package):
     """The game's SurfaceView layer, as SurfaceFlinger names it."""
     layers = shell("dumpsys SurfaceFlinger --list").splitlines()
-    for wanted in ("SurfaceView[", ""):
-        for name in layers:
-            if package in name and "EmulatorHostActivity" in name and wanted in name \
-                    and "Background for" not in name and "Bounds for" not in name:
-                return name.strip()
+    for name in layers:
+        # the game draws into a SurfaceView; the activity's own window layers
+        # carry the same names and no game frames
+        if package in name and "EmulatorHostActivity" in name and "SurfaceView[" in name \
+                and "Background for" not in name and "Bounds for" not in name:
+            return name.strip()
     return None
 
 
@@ -181,7 +188,7 @@ def grab(args):
         f.write(adb("logcat", "-d", "-t", "4000", binary=True))
 
     if recording:
-        pieces = sorted(shell(f"ls {PHONE_DIR}/seg-*.mp4 2>/dev/null").split())
+        pieces = sorted(shell(f"find {PHONE_DIR} -name 'seg-*.mp4' -size +0 2>/dev/null").split())
         wanted, need = [], args.seconds
         for piece in reversed(pieces):
             wanted.insert(0, piece)
