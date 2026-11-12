@@ -47,9 +47,9 @@ Performance (after stability; nothing here is started):
 - The game's audio mixing thread (about 28% of a core): HLE candidate.
 - Re-test the 60 FPS patch as the yardstick after each of these.
 
-UI (independent of the core work). All three are written on the branch
-`claude/ui-settings-tabs`, not merged and not on the phone: see "The UI
-refinement" below for whether its build is green yet.
+UI (independent of the core work). All three are written and built on the
+branch `claude/ui-settings-tabs` (run 41), not merged and not on the phone:
+see "The UI refinement" below.
 - Settings as tabs: Global / Xbox / Xbox 360.
 - The frame rate counter inside the display's safe inset.
 - Xbox-inspired look with the polish of the Cocoon launcher, no branded
@@ -797,7 +797,7 @@ What to check on the phone:
 - Strings added by this work are English only (hakuX's own are in its
   resources).
 
-## The UI refinement (branch `claude/ui-settings-tabs`): not run on a device
+## The UI refinement (branch `claude/ui-settings-tabs`): built, not run on a device
 
 A cloud session's work on 2026-11-12, on its own branch cut from
 `claude/xbox360-emulator-architecture-eac8l7` at `6c4d710`. Nothing was
@@ -805,10 +805,10 @@ pushed to the core branch and no file under `x360/emulator-core` is
 changed. To take it in when the owner is ready to test both together: on
 the core branch, `git merge origin/claude/ui-settings-tabs`.
 
-- **The build: not confirmed green when this was written.** The branch's
-  first run (40) was replaced by the push that carries this text. Check the
-  newest run of the branch on Actions before installing; its artifact is
-  `hakuX-Boosted-debug-apk` and it has the core as of `6c4d710`.
+- **The APK: run 41, commit `07a48c9`**
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43308622305),
+  artifact `hakuX-Boosted-debug-apk`. It has the core as of `6c4d710`.
+  (Run 40 was replaced by the next push before it compiled anything.)
 
 **What changed**
 
@@ -835,8 +835,8 @@ the core branch, `git merge origin/claude/ui-settings-tabs`.
 
 **What was verified**
 
-- Built: not yet. Nothing here had been compiled when this was written
-  (see the build line above).
+- Built: run 41 is green on the first compile, including its checks that
+  the 360 core is -O3 with ThinLTO and of what the APK holds.
 - Unit tests: `SettingsSchemaTest` (12), `SettingsModifiedTest` (4) and
   `ConfigValueShapeTest` (5) pass, run on a plain JVM in the cloud session
   (Actions does not run them). Two of `SettingsSchemaTest`'s were already
@@ -1094,8 +1094,8 @@ Newest first. One or two lines each: what changed, what was verified.
 
 - **2026-11-12 (cloud, UI branch `claude/ui-settings-tabs`).** Settings as
   three tabs with the 360's settings as rows, the frame rate counter inside
-  the screen's safe area on both consoles, one look for both sides. Not
-  confirmed built when written; the settings unit tests run and pass on a
+  the screen's safe area on both consoles, one look for both sides. Built
+  green (run 41, `07a48c9`); the settings unit tests run and pass on a
   plain JVM after their stale counts were corrected. Not merged, not run
   on a device.
 
