@@ -137,9 +137,10 @@ fun HostSettingsPane(
     header: LazyListScope.() -> Unit = {},
     footer: LazyListScope.() -> Unit = {},
 ) {
-    // which sections are open: kept across a rotation, and across the host's tabs where the
-    // host keeps a tab's saved state (hakuX's SettingsTabsFrame does)
-    var open by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    // Which sections are open: kept across a rotation, and across the host's tabs where the
+    // host keeps a tab's saved state (hakuX's SettingsTabsFrame does). The first one starts
+    // open, so the tab opens on settings and not on a list of headings.
+    var open by rememberSaveable { mutableStateOf(listOf(SECTION_ORDER.first())) }
     val listState = rememberLazyListState()
     if (vm == null) {
         LazyColumn(modifier.fillMaxSize(), state = listState) {

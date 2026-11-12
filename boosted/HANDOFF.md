@@ -47,7 +47,9 @@ Performance (after stability; nothing here is started):
 - The game's audio mixing thread (about 28% of a core): HLE candidate.
 - Re-test the 60 FPS patch as the yardstick after each of these.
 
-UI (independent of the core work; proposed as its own session):
+UI (independent of the core work). All three are written on the branch
+`claude/ui-settings-tabs`, not merged and not on the phone: see "The UI
+refinement" below for whether its build is green yet.
 - Settings as tabs: Global / Xbox / Xbox 360.
 - The frame rate counter inside the display's safe inset.
 - Xbox-inspired look with the polish of the Cocoon launcher, no branded
@@ -758,6 +760,9 @@ What to check on the phone:
 
 ### Step 3: one settings screen, one look
 
+(Superseded on the branch `claude/ui-settings-tabs`: the Xbox 360 section is
+a tab there, and the palette is no longer a copy. See "The UI refinement".)
+
 - hakuX's Settings has an **Xbox 360** section, after Games: the 360
   core's settings (graphics, emulation, audio), touch controls, controller
   buttons, profiles, install content, the "All files access" state, about.
@@ -791,6 +796,96 @@ What to check on the phone:
 - The in-game settings rows only step forward through their values.
 - Strings added by this work are English only (hakuX's own are in its
   resources).
+
+## The UI refinement (branch `claude/ui-settings-tabs`): not run on a device
+
+A cloud session's work on 2026-11-12, on its own branch cut from
+`claude/xbox360-emulator-architecture-eac8l7` at `6c4d710`. Nothing was
+pushed to the core branch and no file under `x360/emulator-core` is
+changed. To take it in when the owner is ready to test both together: on
+the core branch, `git merge origin/claude/ui-settings-tabs`.
+
+- **The build: not confirmed green when this was written.** The branch's
+  first run (40) was replaced by the push that carries this text. Check the
+  newest run of the branch on Actions before installing; its artifact is
+  `hakuX-Boosted-debug-apk` and it has the core as of `6c4d710`.
+
+**What changed**
+
+1. **Settings are three tabs.** Global: games folders and "All files
+   access", the controls of each console, the app's theme, the GPU driver
+   of each console, updates, logs. Xbox: hakuX's emulation settings. Xbox
+   360: the 360 core's 139 settings as rows in hakuX's style, in 16
+   sections that open in place (the first, Display, starts open), with
+   Profiles and Install content above
+   and About below (those three still open a screen, as hakuX's hard disk
+   row does). Storage is unchanged: hakuX's rows write the same
+   preferences, the 360's rows go through XenDroid's own view model and
+   repository to the same config file.
+2. **The frame rate counter** of both consoles sits inside the display
+   cutout, the rounded corners and the system bars, whichever way round
+   the phone is held in landscape. The 360's can still be dragged.
+3. **One look**, defined once (`x360/app/.../ui/theme/HostTheme.kt`,
+   `SharedLook`) and worn by both sides: near-black surfaces in steps, one
+   green accent, rounder shapes, heavier titles, and a green ring around
+   whatever a controller has focused (rows, cards, tabs). The app is now
+   dark until a theme is chosen. No image, icon, font or logo was added;
+   the only console names on screen are the plain words "Xbox" and
+   "Xbox 360".
+
+**What was verified**
+
+- Built: not yet. Nothing here had been compiled when this was written
+  (see the build line above).
+- Unit tests: `SettingsSchemaTest` (12), `SettingsModifiedTest` (4) and
+  `ConfigValueShapeTest` (5) pass, run on a plain JVM in the cloud session
+  (Actions does not run them). Two of `SettingsSchemaTest`'s were already
+  failing on the core branch: its counts still said 136 settings after
+  three were added (`38a60ed`, `9916218`). The counts are corrected in
+  `b43c503`; the schema is untouched.
+- **Not verified: anything on a device.** A cloud session cannot run the
+  app. How the tabs, the rows, the counter and the colours look and behave
+  is what the code is meant to do, nothing more.
+
+**What to look at on the phone**
+
+1. Settings shows three tabs. Every row that was there before is in one of
+   them and does what it did. L1 and R1 on a controller step through the
+   tabs.
+2. Xbox 360 tab: "Reading the Xbox 360 core's settings" for a moment, then
+   16 sections, "Display" open. Turn "Show debug overlay" on, leave the
+   settings, start Fable II: the counter shows. Then the game's long-press
+   menu, Game settings: still XenDroid's own screen, and it shows the same
+   global values.
+3. Global tab, GPU drivers, Xbox 360 games: says "Turnip, bundled with the
+   app". Leave it as it is unless testing drivers.
+4. The counter in Fable II: whole, top left, clear of the corner. Turn
+   the phone the other way up: still whole. If it had been dragged
+   somewhere before, it stays there unless that place is now cut off.
+5. The look: dark with a brighter green. With a controller, the focused
+   row has a green ring. If the phone was in light mode and the app is now
+   dark, that is the new default (Settings, Global, App theme).
+
+**Choices made that are the owner's to reverse**
+
+- Dark as the default theme: one line in hakuX's `data/AppPrefs.kt` and
+  one in `HostTheme.kt` (`HostLook.isDark`).
+- The 360's sections start closed but for the first, in an order meant
+  for a player (Display first, Logging last), under plainer names ("Audio"
+  for APU).
+  Order and names are in `HostSettingsPane.kt`; the schema is as it was.
+- Rows show the ring and a wash instead of a ripple when pressed.
+
+**Known gaps**
+
+- Opening the settings now loads the 360 core's library into the app's
+  main process (Android 10 and later), for the 360's GPU driver row.
+- "Large tiles" was not done: it means restructuring the library screen,
+  which this pass was told not to do.
+- The 360 side's other screens (per-game settings, patches, content,
+  profiles, key map, about) keep XenDroid's layout; they get the colours
+  and the focus ring only.
+- New strings are English only, as before.
 
 ## First device run (2026-11-11): what the logs say
 
@@ -996,6 +1091,13 @@ Newest first. One or two lines each: what changed, what was verified.
   deadlock; read from the process, it is a critical section's set taken
   back by the thread that made it. Fix pushed (contender queued before
   its increment), not built or run.
+
+- **2026-11-12 (cloud, UI branch `claude/ui-settings-tabs`).** Settings as
+  three tabs with the 360's settings as rows, the frame rate counter inside
+  the screen's safe area on both consoles, one look for both sides. Not
+  confirmed built when written; the settings unit tests run and pass on a
+  plain JVM after their stale counts were corrected. Not merged, not run
+  on a device.
 
 - **2026-11-12 (desktop, night).** Run 37 on a cold shader cache: the
   attract video is fixed (verified by eye), the `UpdateBindings` drops are

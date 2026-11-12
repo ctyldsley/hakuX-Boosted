@@ -18,7 +18,10 @@ in, repeatedly, so:
 ```
 android/                      hakuX's Gradle project (upstream)
   app/                        the hakuX app: library, settings, NativeCoreActivity (:native process)
-    .../boosted/X360.kt       the one bridge to the 360 side (this fork)
+    .../boosted/X360.kt       the bridge to the 360 side: library, launch, the settings' 360 rows (this fork)
+    .../boosted/SettingsTabs.kt  the settings' three tabs (this fork)
+    .../boosted/Look.kt       the app's one look, handed to hakuX's theme (this fork)
+    .../boosted/SafeArea.kt   the screen's safe area, for hakuX's frame rate counter (this fork)
 x360/app/.../core/HostApp.kt  what the 360 side offers the app it is embedded in (this fork)
 boosted/android/
   x360-core/build.gradle.kts  library module over x360/emulator-core (CMake -> libe.so, JNI classes)
@@ -51,7 +54,10 @@ them from the same patched revision, `app/build.gradle.kts` picks the first).
 hakuX's library is the app's only library. hakuX's code reaches the 360 side
 through `android/app/src/main/java/com/rfandango/haku_x/boosted/X360.kt`, and
 that file reaches it through one object of the 360 side's,
-`xendroid.compose.core.HostApp`:
+`xendroid.compose.core.HostApp`. The one other place hakuX's package names
+the 360 side is the look: `boosted/Look.kt` and `boosted/SettingsTabs.kt`
+take the theme and the focus ring from `xendroid.compose.ui.theme`
+(below, "One settings screen, one look").
 
 - `LibraryViewModel.refresh` calls `X360.scanLibrary` after its own scan.
   The 360 titles in hakuX's games folders are found by the 360 side's own
@@ -99,7 +105,11 @@ shows exactly these):
 | `android/app/.../LauncherActivity.kt` | One call to `X360.launchIfXbox360` in `startCore` |
 | `android/app/.../ui/library/LibraryScreen.kt` | Three places: `X360AccessBanner()` above the list, `X360Badge` in a card, `X360GameMenu` for a 360 title's long press |
 | `android/app/.../ui/library/LibraryViewModel.kt` | `refresh` merges `X360.scanLibrary`'s titles, names and icons into its list; `onResume` also lists again when `X360.accessChanged()` |
-| `android/app/.../ui/settings/SettingsScreen.kt` | One call to `X360Settings()`: the Xbox 360 section |
+| `android/app/.../ui/settings/SettingsScreen.kt` | The three tabs: inserted lines marked `tab:` group upstream's sections by tab and call the 360's rows (`SettingsTabsFrame`, `X360FilesAccess`, `X360Controls`, `X360GpuDriver`, `X360SettingsTab`). No line of upstream's is changed or re-indented |
+| `android/app/.../ui/theme/Theme.kt` | `HakuXTheme`'s body is one call to `BoostedTheme` (the shared look); upstream's colours are left in place, unused |
+| `android/app/.../data/AppPrefs.kt` | `theme` is dark until one is chosen (upstream: the phone's) |
+| `android/app/.../NativeCoreActivity.kt` | Two calls to `keepInSafeArea`: the frame rate counter and the hitch monitor clear of the cutout and rounded corner |
+| `android/app/src/main/res/values/themes.xml`, `colors.xml` | `Theme.HakuX`'s window background dark (upstream: white); the two greens of the framework's widgets are the shared look's accent |
 
 XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 
@@ -123,8 +133,9 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `app/.../core/EmulatorSession.kt` | Their Kotlin wrappers |
 | `app/.../ui/pause/PauseMenuPanel.kt`, `EmulatorHostActivity.kt` | The in-game menu gains "Edit controls" and "Settings": pages of the menu (`MenuPage`), each with its own `PanelNav` |
 | `app/.../gamepad/GamepadEditorScreen.kt` | An `inGame` mode: leaves the game window's orientation and system bars alone, shows the game behind |
-| `app/.../core/Embedded.kt`, `core/TitleDefaults.kt`, `core/BundledDriver.kt`, `core/HostApp.kt`, `ui/pause/InGameSettings.kt`, `ui/theme/HostTheme.kt` | New files |
-| `app/.../ui/theme/Theme.kt` | `xendroidTheme` hands over to `HostTheme` when embedded: hakuX's palette (a copy of hakuX's `ui/theme/Theme.kt`, to be kept in step by hand) and hakuX's light or dark setting |
+| `app/.../core/Embedded.kt`, `core/TitleDefaults.kt`, `core/BundledDriver.kt`, `core/HostApp.kt`, `ui/pause/InGameSettings.kt`, `ui/theme/HostTheme.kt`, `ui/settings/HostSettingsPane.kt`, `ui/SafeArea.kt` | New files |
+| `app/.../ui/theme/Theme.kt` | `xendroidTheme` hands over to `HostTheme` when embedded: the app's one look (`SharedLook`, defined in `HostTheme.kt` and worn by hakuX's screens too) and hakuX's light or dark setting |
+| `app/.../FpsOverlay.kt` | The frame rate counter's area is the window less the display cutout, the rounded corners and the system bars (`ui/SafeArea.kt`); a stored place outside it is brought back in |
 
 ## Taking a newer hakuX
 
@@ -134,7 +145,8 @@ git fetch hakux master
 git merge hakux/master
 ```
 
-Conflicts can only come from the nine hakuX files above. If hakuX's native
+Conflicts can only come from the hakuX files above (fourteen with the
+settings' tabs and the look). If hakuX's native
 dependencies changed (`android/README.md`'s table), update
 `boosted/tools/fetch-native-deps.sh` to match.
 
@@ -156,11 +168,35 @@ added to `boosted/android/x360-ui/src/main/AndroidManifest.xml`.
 If upstream adopts hakuX's adrenotools patch itself, the subtree pull will
 conflict in `third_party/libadrenotools`: take upstream's.
 
+## One settings screen, one look
+
+hakuX's settings screen has three tabs (`boosted/SettingsTabs.kt`):
+
+- **Global**: what both consoles share or both have one of. Games folders
+  and "All files access", each console's controls, the app's theme, each
+  console's GPU driver, updates, logs.
+- **Xbox**: hakuX's emulation settings.
+- **Xbox 360**: every setting of the 360 core's schema, drawn in hakuX's
+  rows by `x360/app/.../ui/settings/HostSettingsPane.kt` through
+  `HostApp.Settings`. The rows read and write through XenDroid's own
+  `SettingsViewModel` and `SettingsRepository`: the same config file, the
+  same flush on pause. XenDroid's `SettingsScreen.kt`, `SettingRows.kt` and
+  `SettingsSchema.kt` are as upstream has them; the per-game editor and
+  the other screens of the 360 side (patches, content, profiles, key map,
+  touch controls, about) are still XenDroid's files, shown one at a time
+  (`HostApp.show`).
+
+The look is defined once, in `x360/app/.../ui/theme/HostTheme.kt`
+(`SharedLook`: colours, shapes, type, the focus ring). It lives on the 360
+side because the 360's screens and its in-game menu run without hakuX's
+classes (the game is in its own process); hakuX's `HakuXTheme` calls it
+through `boosted/Look.kt`. Change the look there and both sides change.
+
 ## What is still two
 
-The library is one (above). Each core keeps its own settings store, per-game
-settings format, data directory and driver choice: the two cores share no
-code, and a setting of one means nothing to the other. hakuX's settings
-screen has an Xbox 360 section (`X360Settings`) whose rows open the 360
-side's screens; those are XenDroid's own files, shown one at a time
-(`HostApp.show`) in hakuX's colours (`ui/theme/HostTheme.kt`).
+The library is one and the settings screen is one (above). Each core keeps
+its own settings store, per-game settings format, data directory, controls
+and driver choice: the two cores share no code, and a setting of one means
+nothing to the other. The settings' Global tab therefore shows two rows
+where each console has its own of a thing (controls, GPU driver), under the
+console's name.
