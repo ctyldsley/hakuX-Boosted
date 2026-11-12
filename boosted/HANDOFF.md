@@ -15,7 +15,9 @@ a build with it has been on the phone. Order within a group is the order
 to do it in.
 
 Stability (first):
-- Critical section hand-off (the guest deadlock). In run 38, untested.
+- The guest stall: Fable II joins its worker while holding a lock the
+  worker needs (see Right now). Run 39 still stalls. Measure wake
+  latency and lock hand-off cost next; nothing fixed yet.
 - The glitches that survive waiting for pipelines: cause not seen, needs
   a capture (`device-watch.py`), ideally in an area already visited.
 - Scrambled frames at scene cuts: may be the same thing, unconfirmed.
@@ -55,6 +57,54 @@ UI (independent of the core work; proposed as its own session):
 
 ## Right now
 
+- **Run 39 stalled the same way (2026-11-12 22:04, frame 5518), so the
+  hand-off reading below was WRONG, and the game's own code now says what
+  the stall is.** Evidence in `device-logs/run39-stuck`: the log, the
+  title's code (`text_82000000.bin`, 16 MB from the stalled process) and
+  its globals; `ppcdis.py`, `frames.py` and `xrefs.py` in the session's
+  scratchpad did the disassembly (capstone, PPC big-endian).
+  - What Fable II does, from the disassembly. Frame update `82275F00`
+    takes a scoped lock on the global section `83499138` (`8227611C`) and,
+    still holding it, calls `822BA4F0`, which (1) waits for ever on the
+    global "done" event (handle at `83496AF0`) if there is one, (2) runs
+    the world update `822CE280`, (3) sets the global "start" event
+    (handle at `83496AEC`). The worker thread (`8262DDD0`) loops: wait
+    "start", enter a second section `83499154`, run the task list
+    (`83496AF8`, 13 tasks at the stall, virtual `+0x94` on each), set
+    "done", leave. Its tasks take `83499138` in small getters
+    (`8263B960`).
+  - So the main thread JOINS the last frame's job while HOLDING a lock
+    that job needs. It only works if the job, started at the end of one
+    frame's locked update, has always finished before the next frame's
+    locked update begins. On the console it has a whole frame for a job
+    of a few milliseconds. Here it sometimes has not finished: the worker
+    is found parked on `83499138`, GameThread on "done", every time
+    (runs 26, 32, 37, 39). Not a lock bug: a race the console's timing
+    always wins.
+  - Why the job is late here is NOT known yet. Suspects, in order: (1) a
+    late wake of the worker on "start": the scheduler's backstop re-poll
+    is 64 ms (`kRepollBackstopMs`), two frames, and it only warns at 50
+    rescues in 5 s, so one missed wake is silent and is enough; (2) slow
+    hand-offs of `83499138` between the two threads (spin count 0, every
+    contention is a park and a wake); (3) the worker's host thread
+    descheduled under load (it stalled with the recorder, the KGSL hook,
+    pipelines compiling); (4) frames shorter than the console's when the
+    title catches up after a hitch.
+  - Next, in this order. No build: `guest_scheduler_stats = true` is set
+    on the phone, the log then has "backstop rescues N" each second.
+    Next build: a wake-latency histogram (signal or wait start, whichever
+    is later, to the waiter running) in the scheduler's counters and the
+    thread dump, with each wake over 16 ms logged by thread and handle,
+    and contended critical section counts and wait time per thread. Then
+    fix what the numbers name. The contender-queued-first change stays:
+    it closes a real gap, it was not this.
+  - Run 39's full-screen waits (`vulkan_async_wait_fullscreen_draws`, cold
+    cache, about 5 minutes): 37 waits, 3.0 s in all, three long ones (539,
+    853, 890 ms), the rest 141 ms or less, none gave up; 184 pipelines,
+    20.1 s. The owner: glitches "a bit less but still there", worst at
+    the first corner towards the town square. So object pop-in, or the
+    second cause, is what still offends: the stand-in is the answer, the
+    heuristic only removed part.
 - **The guest deadlock came back on run 37 (2026-11-12 20:06, 34 minutes
   in, a different place from before) and its cause is now read: a
   critical section's hand-off. Fix pushed, not built or run.** Evidence in
@@ -988,6 +1038,14 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-12 (desktop, 22:30).** Runs 38 and 39 built; run 39 (hand-off
+  change plus full-screen waits) on the phone stalled after 5518 frames.
+  The title's code read from the stalled process: the main thread joins
+  its worker's per-frame job while holding a lock the job needs, so the
+  stall is the worker being late, not a lock fault. Cause of the lateness
+  not measured yet. Full-screen waits: 37, 3.0 s, glitches reduced, not
+  gone.
 
 - **2026-11-12 (desktop, late).** Second cold run with the setting false:
   the owner saw fewer glitches and 1 to 2 second freezes on entering new
