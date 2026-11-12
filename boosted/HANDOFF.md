@@ -9,6 +9,46 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
 
 ## Right now
 
+- **The stall is a guest deadlock, caught in the act (fifth run, run 26,
+  2026-11-12; `device-logs/watch/20261112-104003` on the desktop).** Four
+  thread dumps on request, frames 2,384 to 3,169, all the same:
+  `GameThread` blocked in `WaitForMultipleObjects` (`lr=822D75AC`,
+  wait-all on one handle, `F80001DC`, epoch 14, no deadline), and
+  `XThread001B` (created by GameThread at frame 1,283, entry `8262DDD0`)
+  blocked on an event (`F8000240`, epoch 40) at `lr=822006CC`, which is
+  inside the title's own lock routine `sub_82200688` (the one run 24's
+  spinning thread was in: `RtlEnterCriticalSection`/`Leave` and a yield).
+  Neither epoch moves, so neither object is ever signalled again; the
+  64 ms backstop re-polls both and finds nothing. Everything else runs:
+  27 frames a second of a still camera. Run 13's last dump shows the same
+  pair in the same shape. So it is one intermittent fault, anywhere in the
+  game: the worker waits for a lock that is never handed over, or a wake
+  that is never sent. Read and found sound: the gate and its backstop
+  (`RereadyBlocked`), `lwarx`/`stwcx.` (one CASAL against the captured
+  value), `GetNativeObject` (under the global lock). Not found.
+  - **Next on this:** in the dump, for each blocked thread, the waited
+    object's type and whether it is signalled now, and the guest call
+    chain (walk the PPC back chain from `r1`): that names the lock and its
+    holder. `RtlEnterCriticalSection` is the first place to look
+    (`xboxkrnl_rtl.cc`: it spins on the host without yielding, then waits
+    on the section's own event).
+  - **`guest_scheduler = false` cannot be tried from the config as it
+    stands.** `kernel_flags.cc` has `UPDATE_from_bool(guest_scheduler,
+    2026, 8, 1, 13, false)`: a config whose `defaults_date` is older
+    (the phone's is `2026072714`) has `false` turned back into `true` at
+    load. The "scheduler off" run of 2026-11-12 was therefore a normal
+    run, and its getting past the intro was chance. To test it for real,
+    set `defaults_date = 2026080114` in `[Config]` as well.
+- **Run 26 measured:** 26.6 and 22.4 frames a second in the intro (the
+  emulator's frame counter between two dumps; SurfaceFlinger's `--latency`
+  returns no rows on this phone, so no percentiles yet). Profile:
+  `getpagesize` and `clock_getres` are gone from it. The largest single
+  cost outside guest code is now `tlsdesc_resolver_dynamic`, 3.6% of all
+  CPU time (it rose with the never-inlined readers): the per-thread state
+  wants one cheap home, the PPC context the shims already receive being
+  the obvious one. Guest code 49%, `libe.so` 20%, libc 15%, Turnip 3.4%.
+
+
 - **Fourth device run (23:00, run 24: the optimised core with the
   per-thread reader fix, Turnip).** Loads and plays: the `XObject::Wait`
   crash is gone. Then the scene at the trader (Murgo) never moved on: the
@@ -477,6 +517,12 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-12 (desktop, morning).** Run 26 on the phone with
+  `device-watch.py` (works: frames, dumps; not SurfaceFlinger's pacing).
+  The stall caught as a deadlock of GameThread and a worker (top of "Right
+  now"). The build's signing key was never used: now injected and checked
+  (`28b9806`, not built when written). No core change.
 
 - **2026-11-11 (desktop, 23:40).** `device-watch.py` (rolling screen
   capture, grab, frame pacing, thread dump) and the performance order
