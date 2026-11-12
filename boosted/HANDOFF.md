@@ -9,6 +9,56 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
 
 ## Right now
 
+- **The stall, read out of the stalled process (run 32, 2026-11-12 12:34;
+  `device-logs/watch/20261112-123444`).** The new dump: the worker
+  `XThread001B` is parked in `RtlEnterCriticalSection` (guest `lr=822006CC`,
+  called from `8263B988 82EA9C78 82EAB0A8 8262D96C 8262DED0 8262DE18`) on
+  the section's event `F800023C`, auto-reset, not signalled, the worker
+  first in its queue, last set by GameThread's `RtlLeaveCriticalSection`
+  (`lr=82195B10`) 112 s earlier. GameThread waits for the worker's "job
+  done" event (`F8000234`, last set by the worker 111.9 s earlier; called
+  from `822BA584 8229E400 8227613C 821D478C 82176298 821C9088 82277134
+  822F48CC`). Then, with `run-as` and `/proc/<pid>/mem` on the frozen
+  process (guest memory is the `xenia_memory` mapping at `0x800000000`):
+  the section is at guest `83499138`, `lock_count` 1 (held, one waiter),
+  `recursion_count` 1, `owning_thread` `30029020`, and that KTHREAD's
+  thread id is 7: **GameThread**. So by the section's own record
+  GameThread holds it while it waits for the worker, and the worker waits
+  for the section.
+  - **Reading of it (not proven): the owner field is wrong.** If the
+    worker took the section while the emulator took it for GameThread,
+    its next (nested) enter does not see itself as the owner and waits for
+    itself. The owner came from `XThread::GetCurrentThread()`, a host
+    thread-local; the fiber's own identity is in its control region
+    (`r13`, `prcb_data.current_thread`).
+  - **Change pushed to test it** (see the log's newest line for the
+    build): the three critical section exports take the caller from the
+    control region, and log `thread identity mismatch on critical section`
+    (64 times at most) when the thread-local disagrees. If the stall is
+    gone and the line appears, find who leaves the thread-local stale (a
+    fiber resumed outside `GuestScheduler::SwitchTo`?) since every other
+    `GetCurrentThread()` caller is exposed too. If the line never appears
+    and it still stalls, the game really does hold the section across the
+    wait and the question becomes why the worker needs it here and not on
+    a console (the worker's wake latency under the cooperative scheduler).
+- **The flash at scene cuts** (`device-logs/watch/full-1113/flick_a.jpg`):
+  about five frames where the game's picture is sheared into horizontal
+  bands with a green strip at the bottom, the touch overlay intact over
+  it, then one half-wrong frame. At the cut from the intro flight to the
+  first ground scene, every run. Looks like the front buffer shown with
+  the previous one's layout (size, pitch or tiling) for a few frames after
+  the title changes it: look at the swap path's front buffer texture.
+- **Run 32 measured:** 21 frames a second ten minutes in. The busiest host
+  thread (`Guest CPU 3`) is not doing a frame's work: 12.7% of it is
+  `NtYieldExecution` (export 257) and 20% the guest/host thunk
+  (`a64_host_code`), 9% `tlsdesc_resolver_dynamic`: a fiber spinning on
+  the title's lock routine while it waits. 21 is also what a title locked
+  to vertical sync gives when a frame just misses 33 ms (60/3). The
+  bundled "60 FPS" patch (`be8 0x82B9C8EB = 1`, the presentation interval)
+  is the cheap experiment that tells waiting from working: try it once the
+  stall is out of the way.
+
+
 - **The stall is a guest deadlock, caught in the act (fifth run, run 26,
   2026-11-12; `device-logs/watch/20261112-104003` on the desktop).** Four
   thread dumps on request, frames 2,384 to 3,169, all the same:
@@ -517,6 +567,11 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-12 (desktop, midday).** Run 32 on the phone: the dump's new
+  detail and the frozen process's memory give the stall's mechanism (top
+  of "Right now"). The critical section exports now take the caller from
+  the control region and report a mismatch. Not built or run yet.
 
 - **2026-11-12 (desktop, morning).** Run 26 on the phone with
   `device-watch.py` (works: frames, dumps; not SurfaceFlinger's pacing).
