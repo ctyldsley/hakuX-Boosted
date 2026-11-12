@@ -58,6 +58,34 @@ UI (independent of the core work; proposed as its own session):
 - Xbox-inspired look with the polish of the Cocoon launcher, no branded
   assets.
 
+## Cloud sessions started 2026-11-12 23:30, to merge after review
+
+Each is on its own branch cut from this branch at `7648e9c` (or `04cbb62`
+if that build failed), adds settings that default to today's behaviour,
+and leaves its notes in `boosted/notes/<name>.md` instead of editing this
+file or `ARCHITECTURE.md`. None can run anything on a device. Merge one
+at a time, each followed by a device run with its setting on, and copy
+its list of changed upstream files into `ARCHITECTURE.md` at the merge.
+
+- `claude/pixel-stand-in`: a pixel-shader stand-in for the placeholder
+  pipeline model (`gpu/vulkan/vulkan_pipeline_cache.*`,
+  `vulkan_command_processor.*`, `vulkan_shader.*`, `gpu/shaders/**`).
+- `claude/spirv-slimming`: no debug names, an optional SPIRV-Tools pass,
+  and a written analysis of the translator's bulk
+  (`gpu/spirv_shader_translator*`, `gpu/spirv_builder.*`).
+- `claude/thread-placement`: a sourced survey of how other emulators
+  and Android handle priority, core placement and pacing; ADPF hint
+  session, core placement policy and a per-second core and run-queue
+  log, in new files under `xenia/base`.
+- `claude/ui-settings-tabs` (started earlier): settings tabs, the frame
+  rate counter's inset, the look.
+
+Kept on this branch, because they are in files this session is still
+changing: the guest scheduler (yield storm, timed sleeps), the missed
+pokes, `TLS_SLOT_APP`, and the test of `guest_threads_above_helpers`.
+Until those branches are merged, this session keeps out of the files
+they own.
+
 ## Right now
 
 - **Why Fable II's worker is late: its host thread queues for a core.
