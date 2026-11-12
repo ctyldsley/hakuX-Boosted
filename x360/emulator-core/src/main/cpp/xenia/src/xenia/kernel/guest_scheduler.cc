@@ -18,6 +18,7 @@
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
 #include "xenia/base/platform.h"
 #include "xenia/cpu/backend/backend.h"
@@ -1690,9 +1691,7 @@ void GuestScheduler::ReportNoProgress(bool on_request) {
                 : -1,
             ev->creator_thread(), ev->creator_lr());
       } else {
-        XThread* front = object->CooperativeWakeTarget();
-        XELOGW("    {:08X} {} first_in_queue={:08X}", handle,
-               WaitObjectKind(object.get()), front ? front->handle() : 0);
+        XELOGW("    {:08X} {}", handle, WaitObjectKind(object.get()));
       }
     }
   }
