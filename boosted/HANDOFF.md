@@ -53,6 +53,46 @@ Last updated: 2026-11-12 (run 37 tested on a cold shader cache; the build on the
     independent). Totals so far for Fable II's first 90 minutes: 190
     shaders, 222 pipelines; all 189 stored shaders translate in 122 ms
     at a warm boot.
+  - **Second cold run, `vulkan_async_skip_draws = false`**
+    (`device-logs/run37b`: log, `perf.data`, `shader-dump/`). 194
+    pipelines, 29.5 s, median 74 ms, max 976 ms; 56 frames waited, 35 of
+    them over 100 ms, 26 over 250 ms. What the owner saw is not recorded
+    yet: ask (glitches gone and hitches instead would prove the cause).
+    The compile threads' profile is 84% inside `libvulkan_freedreno.so`
+    and 16% in the allocator; the bundled driver has no symbols, so the
+    passes cannot be named from the phone.
+  - **What the SPIR-V is made of** (169 dumped modules, 9.6 MB; set
+    `dump_shaders` to a folder under `compose/` to repeat). By words:
+    AccessChain 9.7%, ExtInst 9.7%, Load 7.7%, Decorate 7.0% (a
+    NoContraction on each arithmetic result), VectorShuffle 6.7%, Select
+    6.5%, names 4.8%. Guest registers live in memory, so every operand is
+    an AccessChain and a Load and the driver has to rebuild SSA. The
+    largest pixel shader (44 `tfetch`, 636 lines of ucode) has 88 sample
+    instructions, 60 switches and 813 selects: each texture fetch samples
+    twice and switches on state at run time
+    (`spirv_shader_translator_fetch.cc` spends 1,860 lines on one fetch).
+    The largest vertex shader has no fetch at all and is still 281 KB
+    for 822 lines: about 340 words an instruction.
+  - **A stand-in already exists for vertex shaders and is unused here.**
+    `vulkan_placeholder_pipelines` (off on the phone and by default)
+    selects upstream's hot-swap model: a placeholder pipeline is made at
+    once from the ucode interpreter vertex shader
+    (`shaders/ucode_interpreter.vs.glsl`, `async_shader_vs_interpreter`)
+    and a no-op pixel shader, and swapped for the real one when it is
+    ready. The fork's author preferred dropping draws to that
+    placeholder's artefacts. A pixel-shader stand-in is the missing half.
+  - **Plan agreed in outline with the owner's standing instruction
+    (every title, no hitch and no glitch on a first run):** (a) soon: do
+    not treat every draw alike while its pipeline compiles: wait for
+    full-screen passes (their absence is the whole-screen flash), let
+    object draws pop in, and give the compile threads priority over the
+    guest's spinning threads (they waited 28% of the time); keep a
+    title's stored shader list across reinstalls; (b) then: a stand-in
+    pixel shader so the placeholder model draws something sensible at
+    once, first a cheap one (first bound texture by the first
+    interpolator), then an interpreter like the vertex one; (c) in
+    parallel: slim the translator's output, measured by the same
+    `shader_profiling` numbers.
   - The warm cache from before this run is kept in
     `device-logs/warm-shader-cache` on the desktop.
 - **The dropped draws at `UpdateBindings`: fixed in run 37 (0 logged on a
