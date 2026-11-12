@@ -442,6 +442,20 @@ simpleperf as in run 4) and kept only if the number moves.
 Order, by what the run 4 profile showed (CPU-bound: guest code 52%, the
 emulator 24%, libc 15%, the driver under 5%):
 
+0. **How to take the thread-local cost out (worked out 2026-11-12, not
+   written).** `libe.so` is dlopen'ed, so each `thread_local` read is a
+   call to the linker's `tlsdesc_resolver_dynamic` (3 to 9% of the busy
+   threads), and bionic refuses the initial-exec model in a dlopen'ed
+   library. Bionic keeps one thread-pointer slot free for applications from
+   API 29: `TLS_SLOT_APP`, slot 2, at `tpidr_el0 + 16` on arm64 (bionic's
+   `tls_defines.h`; the app's minimum is 29). Plan: one small
+   `HostThreadState` per host thread (current XThread, cpu::Thread,
+   ThreadState, fiber, scheduler CPU, logging thread id), its pointer in
+   that slot, read through an always-inline accessor whose `mrs` is a
+   volatile inline asm so that it is re-read after a fiber switch (the
+   hoisting that made run 22 crash cannot happen again). Then the
+   XE_NOINLINE readers of 9e2d69d and f7ee729 become two instructions.
+   Keep the plain `thread_local` path for other platforms.
 1. **The scheduler's yield and wait path** (a fifth of the busiest game
    thread). Done so far: `page_size()` and the clock resolution cached.
    Next: the `thread_local` reads through `tlsdesc_resolver_dynamic` (6.8%
