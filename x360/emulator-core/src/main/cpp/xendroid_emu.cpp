@@ -852,6 +852,12 @@ namespace ae{
         if(g_windowed_app_ref && g_windowed_app_ref->emu)
             g_windowed_app_ref->emu->Resume();
     }
+    // hakuX-Boosted: the running title's ID, 0 until a title is open (it is set on the
+    // detached boot thread). The in-game menu names the title's config file with it.
+    uint32_t current_title_id(){
+        if(!g_windowed_app_ref || !g_windowed_app_ref->emu) return 0;
+        return g_windowed_app_ref->emu->title_id();
+    }
     void quit(){
     }
 

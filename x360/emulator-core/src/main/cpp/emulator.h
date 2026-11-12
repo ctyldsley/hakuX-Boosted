@@ -4,6 +4,7 @@
 #define APS3E_EMULATOR_H
 
 #include <android/native_window_jni.h>
+#include <cstdint>
 #include <mutex>
 #include <string>
 
@@ -38,5 +39,7 @@ namespace ae{
     extern void resume();
     extern void quit();
     extern void flush_gpu_caches();
+    // hakuX-Boosted: 0 until a title is open.
+    extern uint32_t current_title_id();
 }
 #endif //APS3E_EMULATOR_H

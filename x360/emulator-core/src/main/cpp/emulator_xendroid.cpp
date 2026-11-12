@@ -37,6 +37,9 @@
 #include "xenia/kernel/xam/profile_standalone.h"       // CreateStandaloneProfile / ListStandaloneProfiles / RenameStandaloneProfile
 
 #include <cstdio>
+#include <cstdlib>
+
+#include "emulator.h"  // hakuX-Boosted: ae::current_title_id
 
 #include "cpuinfo.h"
 #include "vkapi.h"
@@ -1181,6 +1184,93 @@ static void j_set_show_touch_overlay(JNIEnv* env, jobject thiz, jboolean value) 
     cvars::show_touch_overlay = value == JNI_TRUE;
 }
 
+// hakuX-Boosted: the settings the in-game menu changes while the game runs.
+// Only cvars the core reads again on every frame, draw or vblank, and only
+// plain bools and integers (a string cvar can't be swapped under a reader):
+//   Display|show_debug_overlay         the overlay's poll and the presenter
+//   Display|present_letterbox          Presenter's output rectangle, each paint
+//   GPU|framerate_limit                CommandProcessor::ThrottlePresentation
+//   GPU|guest_display_refresh_cap      the vblank thread, each tick
+//   Vulkan|vulkan_async_skip_draws     the pipeline cache, each submission
+//   HID|show_touch_overlay             the host activity's poll
+// Everything else is read at start-up and has to wait for the next start; the
+// Kotlin side (ui/pause/InGameSettings.kt) keeps the same list.
+DECLARE_bool(present_letterbox);
+DECLARE_uint32(framerate_limit);
+DECLARE_bool(guest_display_refresh_cap);
+DECLARE_bool(vulkan_async_skip_draws);
+
+// The live value as the config file would spell it, or null for a setting
+// that is not in the list above.
+static jstring j_live_setting(JNIEnv* env, jobject thiz, jstring jname) {
+    const char* chars = env->GetStringUTFChars(jname, NULL);
+    std::string name = chars ? chars : "";
+    if (chars) env->ReleaseStringUTFChars(jname, chars);
+    std::string value;
+    if (name == "show_debug_overlay") {
+        value = cvars::show_debug_overlay ? "true" : "false";
+    } else if (name == "present_letterbox") {
+        value = cvars::present_letterbox ? "true" : "false";
+    } else if (name == "framerate_limit") {
+        value = std::to_string(cvars::framerate_limit);
+    } else if (name == "guest_display_refresh_cap") {
+        value = cvars::guest_display_refresh_cap ? "true" : "false";
+    } else if (name == "vulkan_async_skip_draws") {
+        value = cvars::vulkan_async_skip_draws ? "true" : "false";
+    } else if (name == "show_touch_overlay") {
+        value = cvars::show_touch_overlay ? "true" : "false";
+    } else {
+        return nullptr;
+    }
+    return env->NewStringUTF(value.c_str());
+}
+
+// Sets one of the settings above on the running core. False: not a live
+// setting, or a value that does not parse; nothing is changed then. The
+// caller writes the value to the config file itself.
+static jboolean j_set_live_setting(JNIEnv* env, jobject thiz, jstring jname, jstring jvalue) {
+    const char* chars = env->GetStringUTFChars(jname, NULL);
+    std::string name = chars ? chars : "";
+    if (chars) env->ReleaseStringUTFChars(jname, chars);
+    chars = env->GetStringUTFChars(jvalue, NULL);
+    std::string value = chars ? chars : "";
+    if (chars) env->ReleaseStringUTFChars(jvalue, chars);
+
+    if (name == "framerate_limit") {
+        char* end = nullptr;
+        unsigned long limit = std::strtoul(value.c_str(), &end, 10);
+        if (value.empty() || !end || *end != 0 || limit > 1000) return JNI_FALSE;
+        cvars::framerate_limit = uint32_t(limit);
+        return JNI_TRUE;
+    }
+    if (value != "true" && value != "false") return JNI_FALSE;
+    const bool on = value == "true";
+    if (name == "show_debug_overlay") {
+        cvars::show_debug_overlay = on;
+    } else if (name == "present_letterbox") {
+        cvars::present_letterbox = on;
+    } else if (name == "guest_display_refresh_cap") {
+        cvars::guest_display_refresh_cap = on;
+    } else if (name == "vulkan_async_skip_draws") {
+        cvars::vulkan_async_skip_draws = on;
+    } else if (name == "show_touch_overlay") {
+        cvars::show_touch_overlay = on;
+    } else {
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+// hakuX-Boosted: the running title's ID as the 8 hex digits of its config
+// file's name, or null until a title is open.
+static jstring j_current_title_id(JNIEnv* env, jobject thiz) {
+    const uint32_t title_id = ae::current_title_id();
+    if (!title_id) return nullptr;
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%08X", title_id);
+    return env->NewStringUTF(buf);
+}
+
 //public native int compressIsoToZar(String isoPath,String outZarPath);
 // Mount the ISO at isoPath (a real host path == game.launchUri), walk its
 // filesystem and pack it into a VERIFIED .zar at outZarPath (a real host path,
@@ -1797,6 +1887,10 @@ int register_xendroid_Emulator(JNIEnv* env){
             ,{"show_debug_overlay_enabled", "()Z", (void *) j_show_debug_overlay_enabled}
             ,{"show_touch_overlay_enabled", "()Z", (void *) j_show_touch_overlay_enabled}
             ,{"set_show_touch_overlay", "(Z)V", (void *) j_set_show_touch_overlay}
+            // hakuX-Boosted: the in-game menu's settings
+            ,{"live_setting", "(Ljava/lang/String;)Ljava/lang/String;", (void *) j_live_setting}
+            ,{"set_live_setting", "(Ljava/lang/String;Ljava/lang/String;)Z", (void *) j_set_live_setting}
+            ,{"current_title_id", "()Ljava/lang/String;", (void *) j_current_title_id}
             ,{"compressIsoToZar", "(Ljava/lang/String;Ljava/lang/String;)I", (void *) j_compressIsoToZar}
             ,{"compressProgress", "()F", (void *) j_compressProgress}
             ,{"install_content", "(Ljava/lang/String;Ljava/lang/String;)I", (void *) j_install_content}

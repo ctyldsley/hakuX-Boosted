@@ -66,7 +66,14 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun GamepadEditorScreen(controller: GamepadController, onDone: () -> Unit) {
+fun GamepadEditorScreen(
+    controller: GamepadController,
+    onDone: () -> Unit,
+    // hakuX-Boosted: opened from the in-game menu, over the paused game. The window is the
+    // game's (landscape, immersive): its orientation and system bars are left alone, only the
+    // landscape layout is edited, and the game stays visible behind the controls.
+    inGame: Boolean = false,
+) {
     val scope = rememberCoroutineScope()
     val persisted by controller.config.collectAsState(initial = GamepadConfigDto())
     var working by remember(persisted) { mutableStateOf(persisted) }
@@ -106,6 +113,7 @@ fun GamepadEditorScreen(controller: GamepadController, onDone: () -> Unit) {
     // layout could only be edited stretched across a landscape screen.) MainActivity declares
     // orientation in configChanges, so this rotates WITHOUT recreating the activity (no lost edits).
     LaunchedEffect(landscape, activity) {
+        if (inGame) return@LaunchedEffect   // hakuX-Boosted
         activity?.requestedOrientation = if (landscape)
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -115,7 +123,9 @@ fun GamepadEditorScreen(controller: GamepadController, onDone: () -> Unit) {
     // (true WYSIWYG) and a control can be placed at the very top/bottom edge. Orientation + bars
     // restored on exit.
     DisposableEffect(Unit) {
-        val insets = activity?.window?.let { WindowCompat.getInsetsController(it, view) }
+        // hakuX-Boosted: null in the game's window, which is immersive already and stays so.
+        val insets = if (inGame) null
+            else activity?.window?.let { WindowCompat.getInsetsController(it, view) }
         val prevBehavior = insets?.systemBarsBehavior
         insets?.let {
             it.systemBarsBehavior =
@@ -123,7 +133,7 @@ fun GamepadEditorScreen(controller: GamepadController, onDone: () -> Unit) {
             it.hide(WindowInsetsCompat.Type.systemBars())
         }
         onDispose {
-            activity?.requestedOrientation = enterOrientation
+            if (!inGame) activity?.requestedOrientation = enterOrientation
             insets?.let {
                 it.show(WindowInsetsCompat.Type.systemBars())
                 if (prevBehavior != null) it.systemBarsBehavior = prevBehavior
@@ -142,7 +152,9 @@ fun GamepadEditorScreen(controller: GamepadController, onDone: () -> Unit) {
     // Dark backdrop: there's no game behind the overlay in the editor, so the white-outlined
     // controls would be invisible on the light app surface. A solid dark fill makes them visible
     // and previews how they read over a (dark) game frame.
-    Box(Modifier.fillMaxSize().background(Color(0xFF15171C)).onSizeChanged { editorSize = it }) {
+    // hakuX-Boosted: in a game the frame itself is the backdrop, dimmed.
+    val backdrop = if (inGame) Color.Black.copy(alpha = 0.45f) else Color(0xFF15171C)
+    Box(Modifier.fillMaxSize().background(backdrop).onSizeChanged { editorSize = it }) {
         // Full-screen, edge-to-edge WYSIWYG overlay: controls can be dragged ANYWHERE on the
         // screen (no top-bar inset). Pass the square-grid cell counts only while Snap is on.
         GamepadOverlay(
@@ -216,6 +228,7 @@ fun GamepadEditorScreen(controller: GamepadController, onDone: () -> Unit) {
             globals = working.globals, onMutateGlobals = ::mutateGlobals,
             onCancel = onDone,
             onSave = { scope.launch { controller.save(working); onDone() } },
+            inGame = inGame,
         )
     }
 }
@@ -241,6 +254,7 @@ private fun EditorChrome(
     onMutateGlobals: ((GamepadGlobalsDto) -> GamepadGlobalsDto) -> Unit,
     onCancel: () -> Unit,
     onSave: () -> Unit,
+    inGame: Boolean = false,   // hakuX-Boosted: no orientation choice, "Save" returns to the menu
 ) {
     if (collapsed) {
         // Small re-open pill; leaves the whole screen free for placing controls.
@@ -270,10 +284,12 @@ private fun EditorChrome(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                FilterChip(selected = landscape, onClick = { onSetLandscape(true) },
-                    label = { Text("Landscape") })
-                FilterChip(selected = !landscape, onClick = { onSetLandscape(false) },
-                    label = { Text("Portrait") })
+                if (!inGame) {
+                    FilterChip(selected = landscape, onClick = { onSetLandscape(true) },
+                        label = { Text("Landscape") })
+                    FilterChip(selected = !landscape, onClick = { onSetLandscape(false) },
+                        label = { Text("Portrait") })
+                }
                 FilterChip(selected = snap, onClick = onToggleSnap, label = { Text("Snap") })
                 TextButton(onClick = onReset) { Text("Reset") }
                 TextButton(onClick = onHideShow, enabled = hasSelection) { Text("Hide / Show") }
@@ -295,7 +311,9 @@ private fun EditorChrome(
                 horizontalArrangement = Arrangement.End,
                 modifier = Modifier.fillMaxWidth()) {
                 TextButton(onClick = onCancel) { Text("Cancel") }
-                Button(onClick = onSave, modifier = Modifier.padding(start = 8.dp)) { Text("Save & Quit") }
+                Button(onClick = onSave, modifier = Modifier.padding(start = 8.dp)) {
+                    Text(if (inGame) "Save" else "Save & Quit")
+                }
             }
         }
     }

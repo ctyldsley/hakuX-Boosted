@@ -47,6 +47,11 @@ fun xendroidTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit,
 ) {
+    // hakuX-Boosted: inside hakuX's app the screens wear hakuX's look (HostTheme.kt)
+    if (xendroid.compose.core.Embedded.isEmbedded(androidx.compose.ui.platform.LocalContext.current)) {
+        HostTheme(content)
+        return
+    }
     MaterialTheme(
         colorScheme = if (darkTheme) DarkColors else LightColors,
         content = content,
