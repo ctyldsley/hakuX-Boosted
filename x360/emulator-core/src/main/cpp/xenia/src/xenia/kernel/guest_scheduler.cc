@@ -26,6 +26,7 @@
 #include "xenia/cpu/stack_walker.h"
 #include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
 
@@ -1566,7 +1567,10 @@ void GuestScheduler::ReportNoProgress(bool on_request) {
         no_progress_ticks_);
   }
   uint64_t now_ms = Clock::QueryHostUptimeMillis();
-  std::lock_guard<std::mutex> lock(lock_);
+  // hakuX-Boosted: the handles the parked fibers wait on, described once
+  // lock_ is released (looking an object up takes the kernel's own locks).
+  std::vector<uint32_t> waited_handles;
+  std::unique_lock<std::mutex> lock(lock_);
   for (int i = 0; i < kMaxCpus; ++i) {
     Cpu& cpu = cpus_[i];
     if (XThread* running = cpu.current_thread) {
@@ -1604,6 +1608,36 @@ void GuestScheduler::ReportNoProgress(bool on_request) {
           WaitObjectKind(obj), static_cast<const void*>(obj),
           FormatWaitShape(links), links.wait_gated ? 1 : 0,
           links.wait_alertable ? 1 : 0, links.wait_epoch, due_in);
+      // hakuX-Boosted: the guest call chain of the parked fiber, from the PPC
+      // back chain (0(r1) is the caller's frame, its saved LR 8 below that):
+      // the wait's lr is a library routine, the callers say which lock or
+      // job the game is waiting in.
+      {
+        std::string chain;
+        uint32_t sp = uint32_t(context->r[1]);
+        for (int depth = 0; depth < 8; ++depth) {
+          if (sp < 0x40000000u || sp >= 0x80000000u || (sp & 3)) {
+            break;
+          }
+          uint32_t next = xe::load_and_swap<uint32_t>(
+              context->TranslateVirtual<const uint8_t*>(sp));
+          if (next <= sp || next >= 0x80000000u || (next & 3)) {
+            break;
+          }
+          uint32_t ret = xe::load_and_swap<uint32_t>(
+              context->TranslateVirtual<const uint8_t*>(next - 8));
+          chain += fmt::format(" {:08X}", ret);
+          sp = next;
+        }
+        if (!chain.empty()) {
+          XELOGW("      called from:{}", chain);
+        }
+      }
+      for (uint32_t h = 0; h < links.wait_handle_count && h < 8; ++h) {
+        if (links.wait_handles[h]) {
+          waited_handles.push_back(links.wait_handles[h]);
+        }
+      }
     }
     // Ready-but-not-running fibers matter too: a queue that never drains
     // means the CPU is rotating between the same few spinners.
@@ -1616,6 +1650,49 @@ void GuestScheduler::ReportNoProgress(bool on_request) {
                t->thread_id(), t->thread_name(),
                uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
                prio);
+      }
+    }
+  }
+  lock.unlock();
+  // hakuX-Boosted: what each waited object is and whether it is signalled
+  // now. A waiter parked on an event that IS signalled is the scheduler's
+  // fault (the wake or the turn in the queue was lost); one that is not
+  // signalled was never set by the game, and its last setter and creator say
+  // where to look in the guest.
+  if (!waited_handles.empty()) {
+    std::sort(waited_handles.begin(), waited_handles.end());
+    waited_handles.erase(
+        std::unique(waited_handles.begin(), waited_handles.end()),
+        waited_handles.end());
+    XELOGW("  waited objects:");
+    uint32_t guest_now_ms = Clock::QueryGuestUptimeMillis();
+    for (uint32_t handle : waited_handles) {
+      auto object =
+          kernel_state()->object_table()->LookupObject<XObject>(handle);
+      if (!object) {
+        XELOGW("    {:08X} no such object any more", handle);
+        continue;
+      }
+      if (object->type() == XObject::Type::Event) {
+        auto* ev = static_cast<XEvent*>(object.get());
+        uint32_t ev_type = 0;
+        uint32_t ev_state = 0;
+        ev->Query(&ev_type, &ev_state);
+        XThread* front = ev->CooperativeFrontWaiter();
+        XELOGW(
+            "    {:08X} event {} signalled={} first_in_queue={:08X} last_set "
+            "by={:08X} lr={:08X} {} ms ago, created by={:08X} lr={:08X}",
+            handle, ev->manual_reset() ? "manual-reset" : "auto-reset",
+            ev_state, front ? front->handle() : 0, ev->last_set_thread(),
+            ev->last_set_lr(),
+            ev->last_set_uptime_ms()
+                ? int64_t(guest_now_ms) - int64_t(ev->last_set_uptime_ms())
+                : -1,
+            ev->creator_thread(), ev->creator_lr());
+      } else {
+        XThread* front = object->CooperativeWakeTarget();
+        XELOGW("    {:08X} {} first_in_queue={:08X}", handle,
+               WaitObjectKind(object.get()), front ? front->handle() : 0);
       }
     }
   }

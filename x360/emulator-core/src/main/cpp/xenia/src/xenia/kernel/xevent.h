@@ -46,6 +46,10 @@ class XEvent : public XObject {
   // Public so XObject::SignalAndWait (which signals the host handle directly,
   // bypassing Set()) can keep the setter bookkeeping accurate.
   void RecordSetter();
+  // hakuX-Boosted: for the scheduler's thread dump (who is first in line
+  // for an auto-reset set, and whether the event is manual-reset).
+  XThread* CooperativeFrontWaiter() { return waiters_.Front(); }
+  bool manual_reset() const { return manual_reset_; }
   int32_t Pulse(uint32_t priority_increment, bool wait);
   int32_t Reset();
   void Query(uint32_t* out_type, uint32_t* out_state);
