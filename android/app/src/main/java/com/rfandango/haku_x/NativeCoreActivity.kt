@@ -575,6 +575,8 @@ class NativeCoreActivity : SDLActivity(), InputManager.InputDeviceListener {
     }
     mLayout?.addView(fps, params)
     fpsView = fps
+    // hakuX-Boosted: inside the screen's cutout and rounded corner (boosted/SafeArea.kt)
+    com.rfandango.haku_x.boosted.keepInSafeArea(fps)
 
     if (!BuildConfig.DEBUG) {
       return
@@ -601,6 +603,7 @@ class NativeCoreActivity : SDLActivity(), InputManager.InputDeviceListener {
     }
     mLayout?.addView(hitch, hitchParams)
     hitchView = hitch
+    com.rfandango.haku_x.boosted.keepInSafeArea(hitch, under = fps)   // hakuX-Boosted, as above
   }
 
   /** The run's cheats in the manifest's order (nativeSetCheat's index), and the game's key; empty: none. */
