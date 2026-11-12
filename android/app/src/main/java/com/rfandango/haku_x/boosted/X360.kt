@@ -92,8 +92,9 @@ class X360Library(
  *   (X360Badge) and gives them the 360 side's menu (X360GameMenu);
  * - a game image that is a 360 one goes to the 360 core instead of hakuX's
  *   (launchIfXbox360, from LauncherActivity.startCore);
- * - the settings have an Xbox 360 section that opens the 360 side's own
- *   settings screens (X360Settings, from SettingsScreen).
+ * - the settings have an Xbox 360 tab with the 360 core's settings in hakuX's
+ *   rows (X360SettingsTab), and the Global tab has the 360's share of what both
+ *   consoles need: file access, controls, GPU driver (from SettingsScreen).
  *
  * The 360 side keeps its own settings, data directory and process (":emu");
  * nothing of hakuX's core is shared with it. It reads games by their real
@@ -544,44 +545,101 @@ fun X360AccessBanner() {
 }
 
 /**
- * The settings' Xbox 360 section: the 360 core has its own settings (it is
- * another emulator, with its own configuration file), profiles, key mapping
- * and touch controls. Each row opens that screen of the 360 side's, in
- * hakuX's look, back returning to the settings.
+ * In the settings' Global tab a section holds each console's rows under the console's
+ * name. Where the 360 core isn't offered (Android 9) the section is hakuX's alone and
+ * needs no such label.
  */
 @Composable
-fun X360Settings() {
-  if (!X360.available) return
-  val context = LocalContext.current
-  Section("Xbox 360")
-  X360SettingsRow("Graphics, emulation and audio", "The Xbox 360 core's settings, for every game", HostApp.SCREEN_SETTINGS)
-  X360SettingsRow("Touch controls", "Place and size the on-screen controls of Xbox 360 games", HostApp.SCREEN_TOUCH_CONTROLS)
-  X360SettingsRow("Controller buttons", "Which button of a controller is which on the Xbox 360's", HostApp.SCREEN_KEYMAP)
-  X360SettingsRow("Profiles", "The gamer profiles Xbox 360 games sign in with", HostApp.SCREEN_PROFILES)
-  X360SettingsRow("Install content", "Add-ons, title updates and packaged games from a file", HostApp.SCREEN_INSTALL_CONTENT)
-  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-    // read again when back from the system's page for it
-    var granted by remember { mutableStateOf(HostApp.allFilesAccessGranted) }
-    LifecycleResumeEffect(Unit) {
-      granted = HostApp.allFilesAccessGranted
-      onPauseOrDispose {}
-    }
-    ListItem(
-      headlineContent = { Text("All files access") },
-      supportingContent = {
-        Text(
-          if (granted) "Allowed. Xbox 360 games are read by their file paths."
-          else "Not allowed. Xbox 360 games need it to be listed and to start: tap to allow."
-        )
-      },
-      modifier = Modifier.clickable { X360.requestAccess(context) },
-    )
-  }
-  X360SettingsRow("About the Xbox 360 core", "XenDroid, a Xenia fork, and its licences", HostApp.SCREEN_ABOUT)
+fun ConsoleRows(console: String) {
+  if (X360.available) SettingsSubSection(console)
 }
 
+/**
+ * Global, Games: "All files access", which the folders' Xbox 360 games need to be listed
+ * with their names and to start (the 360 core reads files by path).
+ */
 @Composable
-private fun X360SettingsRow(title: String, summary: String, screen: String) {
+fun X360FilesAccess() {
+  if (!X360.available || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+  val context = LocalContext.current
+  // read again when back from the system's page for it
+  var granted by remember { mutableStateOf(HostApp.allFilesAccessGranted) }
+  LifecycleResumeEffect(Unit) {
+    granted = HostApp.allFilesAccessGranted
+    onPauseOrDispose {}
+  }
+  ListItem(
+    headlineContent = { Text("All files access") },
+    supportingContent = {
+      Text(
+        if (granted) "Allowed. Xbox 360 games are read by their file paths."
+        else "Not allowed. Xbox 360 games need it to be listed and to start: tap to allow."
+      )
+    },
+    modifier = Modifier.clickable { X360.requestAccess(context) },
+  )
+}
+
+/**
+ * Global, Controls: the Xbox 360's. The two cores keep their own touch layout and
+ * controller mapping (they share no code), so each console has its rows.
+ */
+@Composable
+fun X360Controls() {
+  if (!X360.available) return
+  SettingsSubSection("Xbox 360 games")
+  X360ScreenRow(
+    "On-screen controls", "Move and resize each control of the on-screen controller.", HostApp.SCREEN_TOUCH_CONTROLS,
+  )
+  X360ScreenRow(
+    "Controller buttons", "Which button of a controller is which on the Xbox 360's.", HostApp.SCREEN_KEYMAP,
+  )
+}
+
+/**
+ * Global, GPU drivers: the driver Xbox 360 games run on (the 360 core's own setting, in
+ * the same row style; the bundled Turnip unless another was chosen).
+ */
+@Composable
+fun X360GpuDriver() {
+  if (!X360.available) return
+  HostApp.GpuDriverSetting("GPU driver") { SettingsSubSection("Xbox 360 games") }
+}
+
+/**
+ * The settings' Xbox 360 tab: every setting of the 360 core's, in hakuX's rows, read
+ * from and written to the 360 core's own configuration file as its own settings screen
+ * does (HostApp.Settings). Above them, what belongs to the console rather than to the
+ * emulation: its profiles and its content installer, each a screen of the 360 side's
+ * (as hakuX's hard disk and Insignia rows open theirs); below, its About.
+ */
+@Composable
+fun X360SettingsTab(modifier: Modifier = Modifier) {
+  HostApp.Settings(
+    modifier = modifier,
+    header = {
+      item { Section("Console") }
+      item {
+        X360ScreenRow("Profiles", "The gamer profiles Xbox 360 games sign in with.", HostApp.SCREEN_PROFILES)
+      }
+      item {
+        X360ScreenRow(
+          "Install content", "Add-ons, title updates and packaged games from a file.", HostApp.SCREEN_INSTALL_CONTENT,
+        )
+      }
+    },
+    footer = {
+      item { Section("About") }
+      item {
+        X360ScreenRow("About the Xbox 360 core", "XenDroid, a Xenia fork, and its licences.", HostApp.SCREEN_ABOUT)
+      }
+    },
+  )
+}
+
+/** A row that opens one of the 360 side's screens (HostApp.SCREEN_ names), back returning here. */
+@Composable
+private fun X360ScreenRow(title: String, summary: String, screen: String) {
   val context = LocalContext.current
   ListItem(
     headlineContent = { Text(title) },

@@ -8,14 +8,21 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import xendroid.compose.AppContainer
 import xendroid.compose.Application
 import xendroid.compose.data.Game
@@ -25,6 +32,8 @@ import xendroid.compose.gamepad.GamepadEditorScreen
 import xendroid.compose.patches.GamePatchesViewModel
 import xendroid.compose.settings.ConfigStore
 import xendroid.compose.settings.GameSettingsViewModel
+import xendroid.compose.settings.Setting
+import xendroid.compose.settings.SettingsSchema
 import xendroid.compose.settings.SettingsViewModel
 import xendroid.compose.settings.seedTouchOverlayDefault
 import xendroid.compose.ui.about.AboutScreen
@@ -37,6 +46,9 @@ import xendroid.compose.ui.keymap.KeymapViewModel
 import xendroid.compose.ui.patches.GamePatchesScreen
 import xendroid.compose.ui.profile.ProfileManagerViewModel
 import xendroid.compose.ui.profile.ProfilesScreen
+import xendroid.compose.ui.settings.HostDriverRow
+import xendroid.compose.ui.settings.HostSettingsLifecycle
+import xendroid.compose.ui.settings.HostSettingsPane
 import xendroid.compose.ui.settings.PerGameSettingsScreen
 import xendroid.compose.ui.settings.SettingsScreen
 import xendroid.compose.ui.theme.HostLook
@@ -51,7 +63,9 @@ import xendroid.compose.ui.theme.xendroidTheme
  * - [scan]: the Xbox 360 titles under some folders, with their names, icons and title
  *   IDs (GameLibraryRepository, which also knows XEX folders, ZArchives, GOD and STFS);
  * - [launchIntent]: the intent that starts a title, with the discs of its set;
- * - [show]: one of this side's screens on its own in MainActivity, back closing it.
+ * - [show]: one of this side's screens on its own in MainActivity, back closing it;
+ * - [Settings], [GpuDriverSetting]: this side's settings as content of the host's own
+ *   settings screen, in the host's look (ui/settings/HostSettingsPane.kt).
  *
  * The host reaches this file through one bridge of its own (hakuX's boosted/X360.kt).
  */
@@ -160,6 +174,84 @@ object HostApp {
     const val EXTRA_GAME_URI = "game_uri"
     private const val EXTRA_DISC_LABELS = "disc_labels"
     private const val EXTRA_DISC_PATHS = "disc_paths"
+
+    // ---- This side's settings, inside the host's settings screen ----
+
+    /** What [Settings] and [GpuDriverSetting] need has been done in this process. */
+    @Volatile private var settingsPrepared = false
+
+    /**
+     * What MainActivity did before it showed the settings: this side's process start, the
+     * core's library (the config files are read and written by it) and the bundled Turnip
+     * driver, so that the settings show it in use. Blocking, once a process; the driver's
+     * own write to the config happens here, before a settings screen holds the file open.
+     */
+    private fun prepareSettings(context: Context) {
+        if (settingsPrepared) return
+        synchronized(this) {
+            if (settingsPrepared) return
+            Application.ensure_init(context)
+            EmulatorRuntime.ensureLoaded()
+            BundledDriver.install(context)
+            settingsPrepared = true
+        }
+    }
+
+    /** The settings' view model, or null with whether reading them failed (false: not yet). */
+    private class HostSettings(val vm: SettingsViewModel?, val failed: Boolean)
+
+    /**
+     * One SettingsViewModel for the host's settings screen, whichever of its parts show
+     * (the same key under the same owner is the same instance): the settings are edited
+     * through one handle on the config file, as on XenDroid's own screen.
+     */
+    @Composable
+    private fun rememberHostSettings(): HostSettings {
+        val appContext = LocalContext.current.applicationContext
+        val ready by produceState<Boolean?>(if (settingsPrepared) true else null) {
+            if (value != true) {
+                value = withContext(Dispatchers.IO) { runCatching { prepareSettings(appContext) }.isSuccess }
+            }
+        }
+        if (ready != true) return HostSettings(null, failed = ready == false)
+        val vm: SettingsViewModel = viewModel(
+            key = "x360.host_settings",
+            factory = containerOf(appContext).settingsViewModelFactory(),
+        )
+        return HostSettings(vm, failed = false)
+    }
+
+    /**
+     * Every setting of this side's, as a list for the host's settings screen (its Xbox 360
+     * tab), with the host's own rows above and below. Stored exactly as SettingsScreen
+     * stores them. The core's library is loaded into the host's process as this shows.
+     */
+    @Composable
+    fun Settings(
+        modifier: Modifier = Modifier,
+        header: LazyListScope.() -> Unit = {},
+        footer: LazyListScope.() -> Unit = {},
+    ) {
+        val settings = rememberHostSettings()
+        HostSettingsPane(settings.vm, settings.failed, modifier, header, footer)
+    }
+
+    /**
+     * The one setting of this side's that the host shows with its own of the kind: the
+     * Vulkan driver Xbox 360 games run on (Vulkan|vulkan_lib_path), as a row titled [title]
+     * under the host's [heading]. Neither shows where another driver can't be loaded, or
+     * while the settings are being read.
+     */
+    @Composable
+    fun GpuDriverSetting(title: String, heading: @Composable () -> Unit = {}) {
+        val vm = rememberHostSettings().vm ?: return
+        val setting = remember { SettingsSchema.byKey["Vulkan|vulkan_lib_path"] as? Setting.Action } ?: return
+        HostSettingsLifecycle(vm)
+        if (!vm.isCustomDriverSupported) return
+        val values by vm.values.collectAsStateWithLifecycle()
+        heading()
+        HostDriverRow(vm, setting, values[setting.key], title)
+    }
 
     // ---- This side's screens, one at a time, for the host's menus ----
 

@@ -35,6 +35,14 @@ import com.rfandango.haku_x.BuildConfig
 import com.rfandango.haku_x.GpuDriverHelper
 import com.rfandango.haku_x.NativeCoreActivity
 import com.rfandango.haku_x.R
+import com.rfandango.haku_x.boosted.ConsoleRows
+import com.rfandango.haku_x.boosted.SettingsTab
+import com.rfandango.haku_x.boosted.SettingsTabsFrame
+import com.rfandango.haku_x.boosted.X360Controls
+import com.rfandango.haku_x.boosted.X360FilesAccess
+import com.rfandango.haku_x.boosted.X360GpuDriver
+import com.rfandango.haku_x.boosted.X360SettingsTab
+import com.rfandango.haku_x.boosted.rememberSettingsTab
 import com.rfandango.haku_x.data.AppPrefs
 import com.rfandango.haku_x.data.Logs
 import com.rfandango.haku_x.data.PreviousVersion
@@ -139,8 +147,16 @@ fun SettingsScreen(
       }
     }
   }
+  // hakuX-Boosted: the settings are three tabs, Global (what both consoles share), Xbox (this
+  // core's) and Xbox 360 (boosted/SettingsTabs.kt, boosted/X360.kt). The sections below are grouped
+  // by tab with the lines marked "tab:", and are not re-indented: upstream's own lines stay
+  // as they are, so that taking a newer hakuX merges without conflicts here.
+  var tab by rememberSettingsTab()
   SubScreen(title = stringResource(R.string.settings_title), onBack = onBack, snackbar = snackbar) { padding ->
+    SettingsTabsFrame(tab, { tab = it }, padding) { padding ->   // tab: the row of tabs; the list's padding is the frame's
+    if (tab == SettingsTab.XBOX_360) X360SettingsTab() else   // tab: the 360 core's settings, a list of their own
     Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState())) {
+      if (tab == SettingsTab.GLOBAL) {   // tab: Global: games folders, controls
       Section(stringResource(R.string.settings_section_games))
       for (f in folders) {
         ListItem(
@@ -166,10 +182,10 @@ fun SettingsScreen(
         pickFolder.launch(folders.lastOrNull())
       }
 
-      // hakuX-Boosted: the Xbox 360 core's own settings screens (boosted/X360.kt)
-      com.rfandango.haku_x.boosted.X360Settings()
+      X360FilesAccess()   // tab: what the folders' Xbox 360 games need to be listed
 
       Section(stringResource(R.string.settings_section_controls))
+      ConsoleRows("Xbox games")   // tab: each console keeps its own controls
       ListItem(
         headlineContent = { Text(stringResource(R.string.settings_overlay)) },
         supportingContent = { Text(stringResource(R.string.settings_overlay_desc)) },
@@ -180,13 +196,18 @@ fun SettingsScreen(
         supportingContent = { Text(stringResource(R.string.controllers_settings_desc)) },
         modifier = Modifier.clickable(onClick = onControllers),
       )
+      X360Controls()   // tab: the Xbox 360's touch controls and controller buttons
+      }   // tab: Global, to be continued
 
+      if (tab == SettingsTab.GLOBAL) Section("Appearance") else   // tab: the theme is the app's, the rest of Display the Xbox core's
       Section(stringResource(R.string.settings_section_display))
+      if (tab == SettingsTab.GLOBAL) {   // tab: Global: the theme
       ListItem(
         headlineContent = { Text(stringResource(R.string.settings_theme)) },
         supportingContent = { Text(stringResource(themeLabel(theme))) },
         modifier = Modifier.clickable { themeDialog = true },
       )
+      } else {   // tab: Xbox: display, console, network, console video, graphics
       SwitchItem(
         title = stringResource(R.string.settings_uncap),
         summary = stringResource(R.string.settings_uncap_desc) + " " +
@@ -334,6 +355,10 @@ fun SettingsScreen(
         checked = prebuildShaders,
         onChange = { prebuildShaders = it; prefs.prebuildShaders = it },
       )
+      }   // tab: Xbox ends
+      if (tab == SettingsTab.GLOBAL) {   // tab: Global: GPU drivers, updates, logs
+      Section("GPU drivers")
+      ConsoleRows("Xbox games")
       // other drivers load on Qualcomm's GPU driver interface only (adrenotools): said, not offered, elsewhere
       val customDrivers = remember { GpuDriverHelper.supportsCustomDriverLoading() }
       ListItem(
@@ -341,6 +366,7 @@ fun SettingsScreen(
         supportingContent = { Text(driver) },
         modifier = Modifier.clickable(enabled = customDrivers, onClick = onGpuDriver),
       )
+      X360GpuDriver()   // tab: the driver Xbox 360 games run on
 
       Section(stringResource(R.string.settings_section_updates))
       ListItem(
@@ -377,7 +403,9 @@ fun SettingsScreen(
         supportingContent = { Text(stringResource(R.string.settings_export_logs_desc)) },
         modifier = Modifier.clickable { pickLogsFolder.launch(null) },
       )
+      }   // tab: Global ends
     }
+    }   // tab: the frame ends
   }
 
   if (languageDialog) {

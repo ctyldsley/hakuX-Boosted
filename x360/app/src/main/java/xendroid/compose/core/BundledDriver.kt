@@ -52,6 +52,23 @@ object BundledDriver {
     /** The bundled driver's library when it is the one unpacked, for the settings' label. */
     fun bundledDir(): File = File(Application.get_custom_driver_dir(), DIR)
 
+    /**
+     * The bundled driver's library, unpacked, for the settings' way back to it after
+     * another driver was chosen. Null: the app has no package for this phone's GPU, or
+     * install() has not run yet. Never throws.
+     */
+    fun bundledLibrary(context: Context): File? {
+        return runCatching {
+            val generation = adrenoGeneration()
+            val lock = JSONObject(
+                context.assets.open("$ASSET_DIR/$LOCK").use { it.readBytes().toString(Charsets.UTF_8) })
+            val packages = lock.getJSONArray("packages")
+            val pkg = (0 until packages.length()).map { packages.getJSONObject(it) }
+                .firstOrNull { it.getString("adreno") == generation }
+            pkg?.let { File(bundledDir(), it.getString("library")) }?.takeIf { it.exists() }
+        }.getOrNull()
+    }
+
     private fun installOrThrow(context: Context) {
         // adrenotools loads a driver over KGSL only
         if (!File("/dev/kgsl-3d0").exists()) return
