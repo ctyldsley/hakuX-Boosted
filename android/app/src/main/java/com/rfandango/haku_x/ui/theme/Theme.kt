@@ -126,7 +126,9 @@ private val FocusRipple = RippleDefaults.RippleAlpha.let {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HakuXTheme(dark: Boolean = appInDarkTheme(), content: @Composable () -> Unit) {
-  MaterialTheme(colorScheme = if (dark) HakuXDarkColors else HakuXColors) {
-    CompositionLocalProvider(LocalRippleConfiguration provides FocusRipple, content = content)
-  }
+  // hakuX-Boosted: both consoles' screens wear one look (boosted/Look.kt). The colours and
+  // the focus highlight above are upstream's, left in place and no longer used; upstream's
+  // body was: MaterialTheme(colorScheme = if (dark) HakuXDarkColors else HakuXColors) {
+  //   CompositionLocalProvider(LocalRippleConfiguration provides FocusRipple, content = content) }
+  com.rfandango.haku_x.boosted.BoostedTheme(dark, content)
 }

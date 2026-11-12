@@ -20,6 +20,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
+import xendroid.compose.ui.theme.focusRing
 
 /*
  * hakuX-Boosted: the settings screen's three tabs. hakuX's ui/settings/SettingsScreen.kt
@@ -92,6 +93,7 @@ fun SettingsTabsFrame(
           text = { Text(t.title, style = MaterialTheme.typography.titleSmall) },
           selectedContentColor = MaterialTheme.colorScheme.primary,
           unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+          modifier = Modifier.focusRing(),
         )
       }
     }

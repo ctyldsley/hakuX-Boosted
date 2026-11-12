@@ -1,8 +1,11 @@
 <resources>
   <!-- The window behind Compose and the core's SDL surface; Compose draws
        its own Material 3 theme (ui/theme/Theme.kt). -->
+  <!-- hakuX-Boosted: the app is dark until a theme is chosen (AppPrefs.theme), so the
+       window before Compose draws is dark too (upstream: @android:color/white).
+       LauncherActivity sets the window's own background from the setting as it starts. -->
   <style name="Theme.HakuX" parent="android:Theme.Material.Light.NoActionBar">
-    <item name="android:windowBackground">@android:color/white</item>
+    <item name="android:windowBackground">#FF121212</item>
   </style>
 
   <!-- The game's windows (NativeCoreActivity, RelaunchActivity): black and
