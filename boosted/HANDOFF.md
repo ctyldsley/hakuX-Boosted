@@ -7,6 +7,46 @@ and a line in the log at the bottom), and commit it with the work.
 
 Last updated: 2026-11-12 (run 37 tested on a cold shader cache; the build on the phone is run 37, `42f03a8`).
 
+## The backlog: promised to the owner, not yet in a build
+
+The owner asked (2026-11-12) that nothing discussed gets lost while the
+core problems are chased. Keep this list honest: strike an item only when
+a build with it has been on the phone. Order within a group is the order
+to do it in.
+
+Stability (first):
+- Critical section hand-off (the guest deadlock). In run 38, untested.
+- The glitches that survive waiting for pipelines: cause not seen, needs
+  a capture (`device-watch.py`), ideally in an area already visited.
+- Scrambled frames at scene cuts: may be the same thing, unconfirmed.
+
+First-run shader hitches and glitches (every title):
+- Wait only for full-screen passes, let object draws pop in. Not written.
+- The compile threads above the guest's spinning threads. Not written.
+- Try `vulkan_placeholder_pipelines = true` on the phone (config only) to
+  see the vertex interpreter stand-in; then the pixel stand-in (cheap
+  approximation first, interpreter after). Largest item; a cloud session
+  once the phone has shown what it must fix.
+- Slimmer SPIR-V from the translator (registers in memory, two samples
+  and run-time switches per texture fetch, debug names).
+- Keep a title's stored shader list across reinstalls.
+
+Performance (after stability; nothing here is started):
+- Step 0, `HostThreadState` in bionic's `TLS_SLOT_APP` (the TLS resolver
+  is about 9% of the busiest thread).
+- The yield and wait path (`NtYieldExecution` about 13% of that thread).
+- Host thunks (about 20%): inline fast paths for the hottest exports,
+  critical sections first.
+- The JIT's hot functions; then weigh a JIT redesign.
+- The game's audio mixing thread (about 28% of a core): HLE candidate.
+- Re-test the 60 FPS patch as the yardstick after each of these.
+
+UI (independent of the core work; proposed as its own session):
+- Settings as tabs: Global / Xbox / Xbox 360.
+- The frame rate counter inside the display's safe inset.
+- Xbox-inspired look with the polish of the Cocoon launcher, no branded
+  assets.
+
 ## Right now
 
 - **The guest deadlock came back on run 37 (2026-11-12 20:06, 34 minutes
