@@ -234,55 +234,147 @@ emulator 24%, libc 15%, the driver under 5%):
 The stall at the trader (frames presented, script waiting, music only, no
 speech starting) is separate: next occurrence, `device-watch.py dump`.
 
-## The UI work the owner asked for (for a cloud session; not started)
+## The UI work (branch `claude/xbox-ui`): built, not run on a device
 
 The owner's words: the Xbox 360 being a separate section with separate
 ROMs is wrong; one "Xbox" emulator for both consoles, polished, with
 on-screen controls and in-emulation settings (graphics, emulation,
-controls). It can be built and checked on Actions without a device; say
-plainly what was not seen running.
+controls). All three steps below are written and built on Actions.
+**None of it has been seen running**: a cloud session cannot run the app.
+Every "should" below is what the code is meant to do, to be checked on the
+phone.
 
-What exists, so nothing is rebuilt:
+- **The APK to install: run 29, commit `351ccc9`**
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43121829736), artifact `hakuX-Boosted-debug-apk`.
+  Same debug key as before, so it installs over the last build
+  (`adb install -r`).
+- **Branch:** `claude/xbox-ui`, cut from
+  `claude/xbox360-emulator-architecture-eac8l7` and merged with it before
+  each push (last merged: `47d02b7`). Nothing was pushed to the core
+  branch. To take the UI work in once the phone agrees: on the core branch,
+  `git merge origin/claude/xbox-ui`.
+- **Builds, one per step:** step 1 run 25 (`8fb071a`), step 2 run 28
+  (`3869b98`), step 3 run 29 (`351ccc9`). All green, including the check
+  that the 360 core is -O3 with ThinLTO and the check of what the APK
+  holds. Run 29's APK has all three steps and the core up to `f7ee729`
+  (the thread dump and the last never-inlined readers).
 
-- Both sides are Jetpack Compose. hakuX: `android/app/.../ui/` (library,
-  settings, per-game settings, controls editor, driver screen), its game
-  activity `NativeCoreActivity` with `OnScreenController`. 360:
-  `x360/app/.../ui/` (library, settings, per-game settings, patches,
-  content, profiles), `gamepad/GamepadOverlay.kt` and
-  `GamepadEditorScreen.kt` (touch controls and their editor),
-  `ui/pause/PauseMenuPanel.kt` (in-game menu: show or hide controls,
-  resume, quit; nothing else).
-- A 360 image in one of hakuX's game folders is already listed by hakuX's
-  library and starts in the 360 core (`boosted/X360.kt`,
-  `LauncherActivity.startCore`). What is separate is the "Xbox 360" button
-  that opens XenDroid's own library with its own folder setting.
+### Step 1: the in-game menu of Xbox 360 games
 
-Order, smallest useful step first:
+Back (or a swipe back) pauses the game and opens the menu. It now has:
+Show or hide controls, **Edit controls**, **Settings**, Resume, Quit.
 
-1. **The in-game menu for 360 games** (`PauseMenuPanel`, wired in
-   `EmulatorHostActivity`): add "Edit controls" (the gamepad editor), and a
-   settings panel for what can change while the game runs. Find which cvars
-   the core applies live before offering them (`show_touch_overlay` is set
-   live through `session.setShowTouchOverlay`; most of `SettingsSchema` is
-   read at boot): live ones change at once, the rest are shown as "applies
-   on the next start" and written to the title's per-game config. The menu
-   is driven by a controller too (`PanelNav`): keep the option order in
-   step with it.
-2. **One library.** hakuX's `LibraryScreen` is the app's library: list 360
-   titles in it with the console marked, their real names and icons (the
-   360 side's `GameMetadataSource`, `IconCache`; hakuX's `DiscInfo` reads
-   only Xbox discs), and the formats hakuX's scanner does not know (XEX
-   folders, ZAR, GOD: `GameLibraryRepository.classifyFile`). A 360 title's
-   long-press menu opens the 360 side's per-game settings, patches and
-   content screens. Then the "Xbox 360" button goes, and the 360 side's
-   folder setting with it.
-3. **One settings screen and one look.** hakuX's settings gains an Xbox 360
-   section that opens the 360 settings; the 360 screens take hakuX's theme
-   (`ui/theme/Theme.kt` on both sides).
+- Edit controls: the touch controls editor over the paused game (dimmed).
+  Landscape layout only in this mode; "Save" or "Cancel" returns to the
+  menu.
+- Settings: three sections, Graphics, Emulation, Controls. One row per
+  setting; a tap (or A on a controller) moves the row to its next value.
+  Under each row: "Applies now" or "Applies on the next start".
+- Applies now (the core rereads these every frame; checked in the core's
+  source, list in `emulator_xendroid.cpp` and `ui/pause/InGameSettings.kt`):
+  show frame rate, frame rate limit, the VSync cap, keep aspect ratio
+  (letterbox or stretch), skip draws while shaders compile, on-screen
+  controls shown, and the touch controls' opacity, auto-hide and vibration.
+- Applies on the next start: resolution scale, antialiasing, scaling,
+  Turnip mode, render target path, occlusion query mode, readback resolve,
+  guest scheduler, delay collapsing, game patches, title update.
+- Every change is saved to the running game's own config
+  (`config/<TITLE ID>.config.toml`), the file the per-game settings screen
+  edits. The touch controls' three are saved with the controls' layout
+  (all games).
+- With a controller: D-pad or left stick moves, A chooses, B goes back.
 
-Rules that still hold: hakuX's own files change as little as possible and
-through `boosted/X360.kt` where they can, each change marked
-`hakuX-Boosted:` and listed in `docs/ARCHITECTURE.md`.
+What to check on the phone:
+
+1. In Fable II press back: the menu shows the five options.
+2. Settings opens, lists the three sections, scrolls; the highlighted row
+   follows the D-pad if a controller is attached.
+3. "Show frame rate" On: the FPS overlay appears behind the menu at once.
+   "Frame rate limit" to 30: after Resume the game is capped at 30.
+   "Keep aspect ratio" Off: the picture stretches to the screen's edges.
+4. Change "Resolution scale, width" and "height" to 2x, quit, start the
+   game again: it renders at the higher resolution (and slower). Then the
+   game's long-press menu in the library, "Game settings": the same values
+   show as overrides.
+5. Edit controls: drag a button, Save, Resume: the button is where it was
+   put.
+6. If the settings page says "Settings are available once the game has
+   started" on a game that is running, that is a bug: the title ID did not
+   come through (`current_title_id`).
+
+### Step 2: one library
+
+hakuX's library lists both consoles' games from hakuX's games folders. The
+"Xbox 360" button is gone, and with it XenDroid's own library and its
+games folder setting (its content installer now uses hakuX's first
+folder).
+
+- An Xbox 360 game's card has an "XBOX 360" mark and its title ID, its
+  real name and its icon. Found: disc images (`.iso`), ZArchives (`.zar`),
+  folders with `default.xex`, GOD and XBLA packages.
+- Long press (or Y on a controller) on a 360 game: Game settings, Patches,
+  Add-ons and updates. These are the 360 side's screens; back returns to
+  the library.
+- **"All files access" is needed for 360 games** (the 360 core reads files
+  by path; hakuX's folders are picked through Android's folder picker).
+  When a folder holds a 360 game and the access is missing, the library
+  shows a line with an "Allow" button; after allowing, coming back to the
+  app lists again. The phone already gave this access for the old 360
+  library, so the line should not appear there.
+- A games folder on a provider other than the phone's own storage or an SD
+  card (a cloud provider, say) cannot be mapped to a path: its 360 images
+  are still marked and start, but without names, icons or the menu.
+
+What to check on the phone:
+
+1. The library shows Fable II with its name, icon and the "XBOX 360" mark,
+   once, in the same list as any Xbox games. No "Xbox 360" button at the
+   top.
+2. Tap it: the game starts (as before, in the 360 core).
+3. Long press it: the three entries open the right screens for Fable II
+   (the Disable MSAA patch is listed under Patches), back returns.
+4. If Fable II is missing: is its folder one of hakuX's games folders
+   (Settings, Games)? The old 360 library had its own folder setting,
+   which is no longer read. Add that folder in hakuX's settings.
+5. The first listing after the update takes longer (each 360 image is
+   opened once for its name and icon); later ones are quick.
+6. Original Xbox games list, start and show their menus exactly as before.
+
+### Step 3: one settings screen, one look
+
+- hakuX's Settings has an **Xbox 360** section, after Games: the 360
+  core's settings (graphics, emulation, audio), touch controls, controller
+  buttons, profiles, install content, the "All files access" state, about.
+  Each opens the 360 side's screen; back returns to the settings.
+- The 360 side's screens, and the in-game menu and prompts of 360 games,
+  use hakuX's colours and follow hakuX's theme setting (Settings, Display,
+  Theme: the phone's, light or dark). The palette is a copy
+  (`x360/app/.../ui/theme/HostTheme.kt`): if hakuX's changes, change it
+  there.
+
+What to check on the phone:
+
+1. Settings shows the Xbox 360 section; each row opens a screen and back
+   returns to the settings.
+2. Those screens are white with hakuX's green in the light theme and
+   near-black in the dark theme, like hakuX's own. Switch hakuX's theme
+   and open one again.
+3. A 360 game's in-game menu follows the same theme.
+
+### Known gaps, deliberately left
+
+- The two cores keep separate settings, per-game settings and controller
+  mapping: they share no code. The Xbox 360 section links to the 360's.
+- The 360 side's screens keep their own layout (XenDroid's files), only the
+  colours are hakuX's.
+- XenDroid's library screen (`ui/library/GameLibraryScreen.kt`) is still in
+  the tree, unreachable. Its extras are not in hakuX's library yet: ISO to
+  ZArchive compression, the launcher shortcut, "install from disc" for
+  discs that carry content (GTA V). The last one is reachable by hand:
+  Settings, Xbox 360, Install content.
+- The in-game settings rows only step forward through their values.
+- Strings added by this work are English only (hakuX's own are in its
+  resources).
 
 ## First device run (2026-11-11): what the logs say
 
@@ -477,6 +569,13 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-12 (cloud, UI).** The UI work on `claude/xbox-ui`: the
+  in-game menu's controls editor and settings, one library for both
+  consoles, an Xbox 360 section in hakuX's settings and hakuX's colours on
+  the 360 screens (section above). Verified: runs 25, 28 and 29 green, the
+  APK artifact of run 29 exists. Not verified: anything on a device; no
+  screen of this work has been seen.
 
 - **2026-11-11 (desktop, 23:40).** `device-watch.py` (rolling screen
   capture, grab, frame pacing, thread dump) and the performance order
