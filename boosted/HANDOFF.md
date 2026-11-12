@@ -36,6 +36,24 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
     `AllocFixed` and `AllocRange` now invalidate what they commit
     (`memory.cc`). If the video is still wrong on the next build, check
     whether its buffers are at those addresses at all.
+    The owner adds: the video is clean the second time it plays in the
+    same boot. That fits: the pages are left wrongly valid only when a
+    draw touches them in the moment they are freed (the log has the skip
+    exactly twice a boot, at the first hand-over between videos); at the
+    end of the first play Release invalidates them and nothing re-marks
+    them.
+  - **Next, agreed with the owner (stability before performance):**
+    1. Run 36 (the video fix) on the phone: the first play of the attract
+       video after a boot, and the scene-cut flash, which may be the same
+       stale-page fault.
+    2. Draws dropped while their pipeline compiles: stop dropping them,
+       then compile the stored pipeline list ahead at start. Test on a
+       cold cache by deleting `compose/cache/shaders` over adb, not by
+       reinstalling.
+    3. Performance: the game thread's thunk, TLS resolver and scheduler
+       costs; then the JIT's hot functions.
+    4. The UI pass (tabs Global / Xbox / Xbox 360, the counter's inset,
+       the look), in a cloud session on a branch cut from this one.
   - **The 60 FPS patch off, same build: 27 minutes, frame 31,330, no
     stall** (2026-11-12 16:35 to 17:02). No identity mismatch, skipped
     draw, host-side crash or fiber warning, and a steady 30.1 frames a
