@@ -92,7 +92,10 @@ def surface_layer(package):
         # carry the same names and no game frames
         if package in name and "EmulatorHostActivity" in name and "SurfaceView[" in name \
                 and "Background for" not in name and "Bounds for" not in name:
-            return name.strip()
+            # Android 14 and later list "RequestedLayerState{id NAME parentId=..}":
+            # --latency wants the name alone
+            m = re.search(r"SurfaceView\[[^\]]+\]\(BLAST\)#\d+", name)
+            return m.group(0) if m else name.strip()
     return None
 
 
@@ -175,7 +178,7 @@ def grab(args):
     if recording:
         # closes the piece being written; the loop starts the next
         shell("pkill -2 screenrecord")
-        time.sleep(1.5)
+        time.sleep(3)
 
     thread_dump(package, times=2)
     pacing(package, 6, out)
@@ -189,6 +192,10 @@ def grab(args):
 
     if recording:
         pieces = sorted(shell(f"find {PHONE_DIR} -name 'seg-*.mp4' -size +0 2>/dev/null").split())
+        # the newest is the piece the loop has just begun: it has no index
+        # until it is closed, and what just happened is in the one before it
+        if len(pieces) > 1 and shell("pidof screenrecord").strip():
+            pieces = pieces[:-1]
         wanted, need = [], args.seconds
         for piece in reversed(pieces):
             wanted.insert(0, piece)
