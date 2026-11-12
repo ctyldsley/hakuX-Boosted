@@ -14,6 +14,7 @@
 
 #include "xenia/base/atomic.h"
 #include "xenia/base/pe_image.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -599,42 +600,16 @@ static void CriticalSectionPrefetchW(const void* vp) {
 // context the call arrived with; XThread::Create writes the thread's KTHREAD
 // into it) instead of the host thread's "current XThread" thread-local.
 //
-// The two must agree. Where they do not, the critical section is the first
-// thing to break: a thread that takes a section under another thread's name
-// is not recognised as its owner when it takes it again, and waits for itself
-// for ever. That is the shape of Fable II's stall as read from the stalled
-// process (2026-11-12): a section owned, by name, by GameThread, which was
-// not in it, and the worker that needed it parked on its event with nobody
-// left to set it. A mismatch is logged, a few times, with both names; the
-// control region's wins.
-//
-// It is also the cheaper source: no thread-local read (each one a call into
-// the dynamic linker's TLS resolver in this library) on the two exports that
-// games call most.
-static uint32_t CriticalSectionCaller(const ppc_context_t& ctx,
-                                      const char* what, uint32_t cs_address) {
-  uint32_t from_pcr = ctx->TranslateVirtualGPR<X_KPCR*>(ctx->r[13])
-                          ->prcb_data.current_thread.m_ptr;
-#if 1
-  // Diagnostic while the stall is being chased: costs the thread-local read
-  // this function exists to avoid. Remove once the log has answered.
-  XThread* tls_thread = XThread::GetCurrentThread();
-  uint32_t from_tls = tls_thread ? tls_thread->guest_object() : 0;
-  if (from_tls != from_pcr) {
-    static std::atomic<int> budget{64};
-    if (budget.fetch_sub(1) > 0) {
-      XELOGE(
-          "{}: thread identity mismatch on critical section {:08X}: the "
-          "calling fiber's control region says KTHREAD {:08X}, the host "
-          "thread's current XThread says {:08X} (tid {:08X}, '{}'); lr={:08X}",
-          what, cs_address, from_pcr, from_tls,
-          tls_thread ? tls_thread->thread_id() : 0,
-          tls_thread ? tls_thread->thread_name() : std::string("none"),
-          uint32_t(ctx->lr));
-    }
-  }
-#endif
-  return from_pcr;
+// The two were compared on every call from run 33 to run 37 and never
+// differed (no "thread identity mismatch" line in any log, Fable II's stall
+// of 2026-11-12 included), so the stall was not a wrong owner name and the
+// comparison is gone. The control region stays as the source because it is
+// the cheaper one: no thread-local read (each one a call into the dynamic
+// linker's TLS resolver in this library) on the two exports that games call
+// most.
+static uint32_t CriticalSectionCaller(const ppc_context_t& ctx) {
+  return ctx->TranslateVirtualGPR<X_KPCR*>(ctx->r[13])
+      ->prcb_data.current_thread.m_ptr;
 }
 
 void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs,
@@ -644,8 +619,7 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs,
     return;
   }
   CriticalSectionPrefetchW(&cs->lock_count);
-  uint32_t cur_thread =
-      CriticalSectionCaller(ctx, "RtlEnterCriticalSection", cs.guest_address());
+  uint32_t cur_thread = CriticalSectionCaller(ctx);
   uint32_t spin_count = cs->header.absolute * 256;
 
   if (cs->owning_thread == cur_thread) {
@@ -665,10 +639,56 @@ void RtlEnterCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs,
     }
   }
 
+  // hakuX-Boosted: a contender takes its place in the section's waiter queue
+  // BEFORE its increment of lock_count can be seen.
+  //
+  // The increment tells the owner's RtlLeaveCriticalSection to set the event,
+  // and the console's kernel gives that set to the waiter already parked on
+  // it. Here the contender was only queued inside XObject::Wait, several
+  // calls after the increment (kernel APCs, the object lookup, WaitEnter),
+  // and a host thread can be descheduled anywhere in between. An owner that
+  // left and came straight back in that gap found the queue empty, so its
+  // own wait took the set it had just made for the contender, and it held the
+  // section again with the contender parked behind it for good.
+  //
+  // That is Fable II's stall as read from the stalled process twice
+  // (2026-11-12, runs 32 and 37): section 83499138 owned by GameThread with
+  // lock_count 1, its event set last by GameThread itself and unsignalled,
+  // the worker (the only queued waiter) never given it, and GameThread
+  // waiting on the worker's "done" event. It showed whenever the phone was
+  // loaded (the recorder, the KGSL priority hook, pipelines compiling).
+  // Queued first, the contender is at the front when the set arrives and
+  // CooperativeMayAcquire refuses the returning owner. XObject::Wait's own
+  // registration is then a no-op (the queue ignores a thread already in it)
+  // and its exit removes the entry.
+  // A free section is taken here, so everything below is the contended case
+  // and the queue entry always comes before the increment.
+  if (xe::atomic_cas(-1, 0, &cs->lock_count)) {
+    cs->owning_thread = cur_thread;
+    cs->recursion_count = 1;
+    return;
+  }
+  XThread* queued_as = nullptr;
+  object_ref<XObject> section_event;
+  if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread()) {
+    queued_as = XThread::GetCurrentThread();
+    section_event = XObject::GetNativeObject<XObject>(
+        kernel_state(), reinterpret_cast<void*>(cs.host_address()));
+    if (queued_as && section_event) {
+      section_event->EnterCooperativeWait(queued_as);
+    } else {
+      queued_as = nullptr;
+    }
+  }
+
   if (xe::atomic_inc(&cs->lock_count) != 0) {
     // Create a full waiter.
     xeKeWaitForSingleObject(reinterpret_cast<void*>(cs.host_address()), 8, 0, 0,
                             nullptr);
+  } else if (queued_as) {
+    // The owner left before the increment: nothing was set, nothing to wait
+    // for.
+    section_event->LeaveCooperativeWait(queued_as);
   }
 
   assert_true(cs->owning_thread == 0);
@@ -685,8 +705,7 @@ dword_result_t RtlTryEnterCriticalSection_entry(
     return 1;  // pretend we got the critical section.
   }
   CriticalSectionPrefetchW(&cs->lock_count);
-  uint32_t thread = CriticalSectionCaller(ctx, "RtlTryEnterCriticalSection",
-                                          cs.guest_address());
+  uint32_t thread = CriticalSectionCaller(ctx);
 
   if (xe::atomic_cas(-1, 0, &cs->lock_count)) {
     // Able to steal the lock right away.
@@ -715,8 +734,7 @@ void RtlLeaveCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs,
   // Retail RtlLeaveCriticalSection does not check ownership, it just
   // decrements. A non-owner leave is a caller error but titles rely on it, so
   // log not assert.
-  uint32_t leaving_thread =
-      CriticalSectionCaller(ctx, "RtlLeaveCriticalSection", cs.guest_address());
+  uint32_t leaving_thread = CriticalSectionCaller(ctx);
   if (cs->owning_thread != leaving_thread) {
     XELOGD(
         "RtlLeaveCriticalSection {:08X} left by non-owner (owner {:08X}, "

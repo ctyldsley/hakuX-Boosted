@@ -9,6 +9,37 @@ Last updated: 2026-11-12 (run 37 tested on a cold shader cache; the build on the
 
 ## Right now
 
+- **The guest deadlock came back on run 37 (2026-11-12 20:06, 34 minutes
+  in, a different place from before) and its cause is now read: a
+  critical section's hand-off. Fix pushed, not built or run.** Evidence in
+  `device-logs/run37b-stuck` (the log with two thread dumps, the section's
+  page and its event object read from the stalled process). So the KGSL
+  hook being off did not cure it, and the owner identity was never wrong.
+  - The state, identical to run 32: section `83499138` owned by
+    GameThread (`owning_thread 30029020`, `recursion_count 1`,
+    `lock_count 1`, which is host-endian: one waiter). The worker
+    `XThread001D` is the one queued waiter on the section's event
+    `F8000240`. That event was last set by GameThread itself (`lr
+    822A8778`, its leave) and is unsignalled, yet the worker never got it.
+    GameThread waits on `F80001E4`, the worker's "done" event, last set
+    by the worker in the same millisecond. Frames still present.
+  - The reading: the worker incremented `lock_count` (so GameThread's
+    leave set the event) but was not in the event's waiter queue yet,
+    because `RtlEnterCriticalSection` only queued it inside
+    `XObject::Wait`, after the kernel APC pass and the object lookup.
+    GameThread left and re-entered in that gap, found the queue empty and
+    its own wait consumed the set meant for the worker. The console's
+    kernel hands a set to the parked waiter; here the gap is host code a
+    busy phone can deschedule (it showed with the recorder, the KGSL hook
+    and now with four threads compiling pipelines). Not proven by a trace:
+    it is the only order found that leaves this state.
+  - The fix (`xboxkrnl_rtl.cc`): a free section is taken by
+    compare-and-swap; a contender is put in the event's waiter queue
+    BEFORE it increments `lock_count`, so `CooperativeMayAcquire` refuses
+    a returning owner. The identity comparison from run 33 is removed
+    (never fired; it cost a thread-local read on the hottest exports).
+    **To verify:** long play with the phone loaded (a cold shader cache
+    is a good load); the same stall would say the reading is wrong.
 - **Run 37 on a cold shader cache (`42f03a8`, 2026-11-12 19:25): the
   attract video is fixed, the first-run glitches are not, and the reason
   is the driver's compile time.** Evidence in `device-logs/run37/xe.log`.
@@ -908,6 +939,14 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-12 (desktop, late).** Second cold run with the setting false:
+  the owner saw fewer glitches and 1 to 2 second freezes on entering new
+  areas, which is the dropped draws turned into waits; some glitches
+  remain (cause not seen yet). The game then stalled in the guest
+  deadlock; read from the process, it is a critical section's set taken
+  back by the thread that made it. Fix pushed (contender queued before
+  its increment), not built or run.
 
 - **2026-11-12 (desktop, night).** Run 37 on a cold shader cache: the
   attract video is fixed (verified by eye), the `UpdateBindings` drops are
