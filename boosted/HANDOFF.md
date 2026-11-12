@@ -9,6 +9,26 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
 
 ## Right now
 
+- **Run 33 with the 60 FPS patch: the app's own UI thread starves and
+  Android reports it not responding (2026-11-12 13:57;
+  `device-logs/run33`).** Not the guest deadlock, and no `thread identity
+  mismatch` line in 3,870 frames. The app's main thread sat in
+  `HardwareRenderer.nSyncAndDrawFrame` for 12.3 s (`Davey!`, `Skipped 1410
+  frames`): it waits for the app's render thread, which draws the touch
+  overlay on the same GPU the emulator is flooding. The touch controls are
+  that overlay, so input stops, and the 5 s input timeout raises the ANR.
+  The emulator's Turnip contexts are at KGSL priority 7 (this fork's hook,
+  `kgsl_context_priority`, the compositor's ringbuffer) and with the title
+  uncapped they never leave the GPU idle. The table at the top of this
+  file already names the suspect ("GPU hangs with the compositor active").
+  - **Being tried:** `kgsl_context_priority = 0` in the phone's config
+    (the hook off). If the ANRs stop, 7 is wrong as a default once a title
+    is uncapped: make it yield to the app's own UI (a lower priority, or a
+    host frame limiter that leaves the GPU a gap each refresh).
+  - The earlier "System isn't responding" on run 32 was the same flood
+    with the recorder and a memory shortage on top.
+
+
 - **The 60 FPS patch, measured (run 32, 2026-11-12 13:36).** With Canary's
   "60 FPS" patch on, the same early scenes run at 34, 42 and 43 frames a
   second (emulator frame counter over 10 s windows) against 21 to 27
