@@ -120,8 +120,14 @@ jobs:
       # over the last one without uninstalling it, saves and settings included.
       - name: The fork's debug signing key
         run: |
-          mkdir -p "$HOME/.android"
-          cp boosted/android/signing/debug.keystore "$HOME/.android/debug.keystore"
+          # Handed to the Android Gradle plugin by its signing properties on
+          # the build's command line. Copying it to ~/.android, as was done
+          # until run 26, did nothing: every APK came out under a different
+          # certificate. Fails here if Java cannot read the keystore, and in
+          # the job's last step if the APK is not signed with it.
+          "$JAVA_HOME_21_X64/bin/keytool" -list -v -alias androiddebugkey \
+            -keystore boosted/android/signing/debug.keystore -storepass android \
+            | grep -E 'Alias name|SHA256:'
 
       - name: Build the debug APK
         working-directory: android
@@ -132,7 +138,11 @@ jobs:
           # both sides' code
           ./gradlew assembleDebug --no-daemon --stacktrace \
             -Dorg.gradle.java.home="$JAVA_HOME_21_X64" \
-            -Dorg.gradle.jvmargs="-Xmx5g -Dfile.encoding=UTF-8"
+            -Dorg.gradle.jvmargs="-Xmx5g -Dfile.encoding=UTF-8" \
+            -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/boosted/android/signing/debug.keystore" \
+            -Pandroid.injected.signing.store.password=android \
+            -Pandroid.injected.signing.key.alias=androiddebugkey \
+            -Pandroid.injected.signing.key.password=android
 
       # The log says what was built: both cores' libraries, the hook
       # libraries once each, both sides' activities, the bundled title files.
@@ -170,6 +180,16 @@ jobs:
         run: |
           apk=$(ls android/app/build/outputs/apk/debug/*.apk | head -1)
           ls -la "$apk"
+          # signed with the fork's key, so that it installs over the last build
+          want=$("$JAVA_HOME_21_X64/bin/keytool" -list -v -alias androiddebugkey \
+            -keystore boosted/android/signing/debug.keystore -storepass android \
+            | sed -n 's/.*SHA256: //p' | tr -d ': ' | tr 'A-F' 'a-f')
+          have=$("$ANDROID_HOME/build-tools/36.1.0/apksigner" verify --print-certs "$apk" \
+            | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)
+          echo "APK certificate $have, the fork's key $want"
+          if [ -z "$have" ] || [ "$have" != "$want" ]; then
+            echo "::error::the APK is not signed with the fork's debug key"; exit 1
+          fi
           unzip -l "$apk" | grep -E ' lib/' || true
           echo "game patches: $(unzip -l "$apk" | grep -c ' assets/game-patches/')"
           unzip -l "$apk" | grep -E ' assets/(title-defaults|config)/' || true
