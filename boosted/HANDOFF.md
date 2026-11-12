@@ -60,6 +60,39 @@ UI (independent of the core work; proposed as its own session):
 
 ## Right now
 
+- **Run 43 (the 2 ms gate recheck plus the timing) stalled within
+  seconds of the first gameplay scene (2026-11-12 22:45), and the timing
+  says the worker was NOT woken late.** Evidence in
+  `device-logs/run43-stuck`. Whole run: 40,544 satisfied waits, 38,968
+  within 0.25 ms, 3 over 16 ms (all an audio thread, `XThread0009`),
+  longest 32 ms; no "missed wake made good" line and no backstop rescue
+  at all; 150 contended critical sections, 4.75 ms each on average, 13 of
+  16 ms or more, all GameThread or 3D Engine before frame 1341 (the menus
+  and loading: `8349F4FC` and `4C11F140`, mostly one frame long, worth a
+  look of their own). So the 18 rescues a quarter of an hour on run 39
+  were real but are not this stall.
+  - What the dump adds: the section's event was last set by the WORKER
+    (its leave, `lr 8263DD58`) 61.012 s before the dump, and "done" by
+    the worker 75 ms after that. So in the frame before the fatal one
+    GameThread first waited for the worker to leave the section, took
+    it, then waited 75 ms more on "done": the job was already taking
+    more than two frames, and only did not need the section again by
+    luck. Next frame it did.
+  - When: the worker thread (`8262DDD0`) is created at frame 1523; the
+    first gameplay scene starts at frame 1656 with a storm of shader
+    translation and pipeline compiles on a cold cache (1, 11, 16, 13, 21
+    frames in the next five seconds, 85 contended sections in one of
+    them); the stall is at about frame 1700 to 1720. Every stall so far
+    was at a moment when something new began (a cutscene pan, the
+    trader's speech, a first sword swing, this scene).
+  - Suspects now: (1) the worker running code for the first time, each
+    function translated on the thread that calls it (the JIT code cache
+    was at 128 MiB by frame 1401); (2) the worker's host thread losing
+    its core to the four pipeline compile threads. A profile of the six
+    guest CPU threads through the same start is being taken to split the
+    worker's time between translating, running and not running. If (1):
+    translate ahead of use on other threads, and keep the translated
+    code between runs. If (2): the compile threads below the guest's.
 - **Run 39 stalled the same way (2026-11-12 22:04, frame 5518), so the
   hand-off reading below was WRONG, and the game's own code now says what
   the stall is.** Evidence in `device-logs/run39-stuck`: the log, the
