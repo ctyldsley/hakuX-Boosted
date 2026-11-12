@@ -29,9 +29,17 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
     texture the game fills itself every frame: look at how that texture is
     read (format, tiling, the planes of a YUV frame) and at the same
     front-buffer question as the scene-cut flash.
-  - **Running now:** the same build with the 60 FPS patch off, to see
-    whether the guest deadlock comes back (it did within 2 to 20 minutes
-    on runs 13, 24, 26 and 32).
+  - **The 60 FPS patch off, same build: 27 minutes, frame 31,330, no
+    stall** (2026-11-12 16:35 to 17:02). No identity mismatch, skipped
+    draw, host-side crash or fiber warning, and a steady 30.1 frames a
+    second where runs 26 and 32 gave 21 to 27. So the patch was not what
+    kept the deadlock away. What remains different from the runs that
+    stalled: the caller's identity from the control region (which logged
+    nothing) and the KGSL hook off. The hook is now the suspect for the
+    stall as well as the ANRs: at priority 7 the emulator's GPU work and
+    the compositor's shared a ringbuffer, and every stalled run had it on.
+    One run with `kgsl_context_priority = 7` and nothing else changed
+    would settle it; not asked of the owner yet.
 
 - **`claude/xbox-ui` is merged in (2026-11-12).** The next APK from this
   branch has both: the core as tested on run 33 (the hook off by default)
