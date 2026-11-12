@@ -83,6 +83,23 @@ DEFINE_bool(
     "draw is ever lost.",
     "Vulkan");
 
+// hakuX-Boosted: see RequirePipelineForSubmission.
+DEFINE_bool(
+    vulkan_async_wait_fullscreen_draws, true,
+    "With vulkan_async_skip_draws: still wait, at the submission boundary, "
+    "for the pipelines of full-screen passes (rectangle lists and unindexed "
+    "draws of at most four vertices), because a dropped post-process or "
+    "composite pass is the whole frame wrong while a dropped object draw is "
+    "only late. Each such pipeline costs one wait, the first time it is "
+    "drawn. Off: every draw of an unready pipeline is dropped.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_async_wait_fullscreen_draws_ms, 1500,
+    "The longest one submission waits for the pipelines "
+    "vulkan_async_wait_fullscreen_draws names, in milliseconds; after it the "
+    "draws are dropped as any other.",
+    "Vulkan");
+
 DEFINE_bool(
     vulkan_placeholder_pipelines, false,
     "Asynchronous shader compilation async model (A/B). Default false: the "
@@ -989,6 +1006,51 @@ void VulkanPipelineCache::EndSubmission() {
     // (during the storage preload at startup, or always with
     // vulkan_async_skip_draws - pop-in instead of a wait).
     creation_request_cond_.notify_one();
+    // hakuX-Boosted: except the pipelines of this submission's full-screen
+    // passes, which are waited for (see RequirePipelineForSubmission).
+    if (!required_pipelines_.empty()) {
+      auto pending = [this]() {
+        for (const Pipeline* required : required_pipelines_) {
+          if (required->pipeline.load(std::memory_order_acquire) ==
+                  VK_NULL_HANDLE &&
+              !required->creation_finished.load(std::memory_order_acquire)) {
+            return true;
+          }
+        }
+        return false;
+      };
+      const auto wait_start = std::chrono::steady_clock::now();
+      bool timed_out = false;
+      {
+        std::unique_lock<std::mutex> lock(creation_request_lock_);
+        timed_out = !creation_progress_cond_.wait_for(
+            lock,
+            std::chrono::milliseconds(std::max(
+                int32_t(0), cvars::vulkan_async_wait_fullscreen_draws_ms)),
+            [&pending]() { return !pending(); });
+      }
+      if (cvars::shader_profiling) {
+        XELOGI(
+            "shader_profiling: submission waited {:.3f} ms for {} full-screen "
+            "pass pipeline(s){}",
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - wait_start)
+                .count(),
+            required_pipelines_.size(), timed_out ? ", gave up" : "");
+      }
+      if (timed_out) {
+        // Not waited for again: a slot nobody is creating (or one slower than
+        // the limit) would otherwise cost the limit in every submission that
+        // draws it. Its draws are dropped until its handle appears.
+        for (Pipeline* required : required_pipelines_) {
+          if (required->pipeline.load(std::memory_order_acquire) ==
+              VK_NULL_HANDLE) {
+            required->creation_finished.store(true, std::memory_order_release);
+          }
+        }
+      }
+      required_pipelines_.clear();
+    }
   } else {
     // Blocking: wait for all queued pipelines so every deferred pipeline bind
     // recorded in this submission resolves to a created handle - no draws are
@@ -1011,6 +1073,20 @@ void VulkanPipelineCache::EndSubmission() {
 
   // Process deferred destructions
   ProcessDeferredDestructions();
+}
+
+void VulkanPipelineCache::RequirePipelineForSubmission(Pipeline* pipeline) {
+  if (!pipeline || startup_loading_ || creation_threads_.empty() ||
+      pipeline->pipeline.load(std::memory_order_acquire) != VK_NULL_HANDLE ||
+      pipeline->creation_finished.load(std::memory_order_acquire)) {
+    return;
+  }
+  for (const Pipeline* required : required_pipelines_) {
+    if (required == pipeline) {
+      return;
+    }
+  }
+  required_pipelines_.push_back(pipeline);
 }
 
 bool VulkanPipelineCache::IsCreatingPipelines() {
@@ -1099,6 +1175,10 @@ void VulkanPipelineCache::CreationThread() {
     {
       std::unique_lock<std::mutex> lock(creation_request_lock_);
       --creation_threads_busy_;
+      // hakuX-Boosted: this slot's job is over, whichever way it went.
+      creation_arguments.pipeline->second.creation_finished.store(
+          true, std::memory_order_release);
+      creation_progress_cond_.notify_all();
       if (creation_threads_busy_ == 0 && creation_queue_.empty()) {
         // All pipelines created.
         if (creation_completion_set_event_.load(std::memory_order_acquire)) {

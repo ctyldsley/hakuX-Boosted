@@ -143,6 +143,8 @@ DEFINE_bool(
 DECLARE_bool(gpu_debug_markers);
 DECLARE_bool(submit_on_primary_buffer_end);
 DECLARE_bool(vulkan_placeholder_pipelines);
+DECLARE_bool(vulkan_async_skip_draws);
+DECLARE_bool(vulkan_async_wait_fullscreen_draws);
 
 DEFINE_bool(
     vulkan_dynamic_rendering, true,
@@ -4282,6 +4284,19 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // stable slot pointer; EndSubmission waits (or replay drops it under
   // vulkan_async_skip_draws). pipeline_layout is never null (the slot was
   // created with at least the minimal layout).
+  // hakuX-Boosted: a full-screen pass whose pipeline is still compiling is
+  // waited for at the end of the submission instead of being dropped at
+  // replay. Xenos rectangle lists are how titles draw their post-process and
+  // composite passes; unindexed draws of at most four vertices are the other
+  // usual form (a quad or one oversized triangle). Everything else keeps the
+  // pop-in vulkan_async_skip_draws chose.
+  if (!cvars::vulkan_placeholder_pipelines &&
+      current_pipeline == VK_NULL_HANDLE && cvars::vulkan_async_skip_draws &&
+      cvars::vulkan_async_wait_fullscreen_draws &&
+      (prim_type == xenos::PrimitiveType::kRectangleList ||
+       (!index_buffer_info && index_count <= 4))) {
+    pipeline_cache_->RequirePipelineForSubmission(pipeline);
+  }
   // The interpreter reads the guest ucode from shared memory by its program
   // address. A cached interpreter placeholder reused for an inline
   // (IM_LOAD_IMMEDIATE, address 0) shader can't be fed, so skip until the real

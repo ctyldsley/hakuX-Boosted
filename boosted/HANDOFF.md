@@ -21,7 +21,13 @@ Stability (first):
 - Scrambled frames at scene cuts: may be the same thing, unconfirmed.
 
 First-run shader hitches and glitches (every title):
-- Wait only for full-screen passes, let object draws pop in. Not written.
+- Wait only for full-screen passes, let object draws pop in. Written
+  (`vulkan_async_wait_fullscreen_draws`), committed, not built or run.
+  To check on a cold cache with `shader_profiling = true`: the log's
+  "submission waited ... for N full-screen pass pipeline(s)" lines say
+  how many waits and how long; the owner says whether the whole-screen
+  flashes are gone. If object pop-in is what still offends, the heuristic
+  is not the answer and the stand-in is.
 - The compile threads above the guest's spinning threads. Not written.
 - Try `vulkan_placeholder_pipelines = true` on the phone (config only) to
   see the vertex interpreter stand-in; then the pixel stand-in (cheap
@@ -953,6 +959,9 @@ build locally and use adb; the device etiquette in upstream's own
 | Setting | Section | Default | What |
 |---|---|---|---|
 | `kgsl_context_priority` | Vulkan | 0 (was 7) | Turnip's KGSL contexts on the compositor's ringbuffer (hakuX's hook) when 1 to 15; off by default since it starved the app's own UI with a title uncapped |
+| `async_shader_translate_on_draw` | GPU | true | A draw's untranslated shaders are translated on the draw thread, so the draw is recorded instead of refused |
+| `vulkan_async_wait_fullscreen_draws` | Vulkan | true | With `vulkan_async_skip_draws`: full-screen passes still wait for their pipeline (written 2026-11-12, not built or run) |
+| `vulkan_async_wait_fullscreen_draws_ms` | Vulkan | 1500 | The longest one submission waits for those |
 | `tessellation_debug` | GPU | 0 | Logs tessellated draws and their vertex shader; 1 no culling, 2 no depth test, 3 both |
 | (log line) | | | "This title creates multisampled render targets", a warning when tiled mode is on |
 

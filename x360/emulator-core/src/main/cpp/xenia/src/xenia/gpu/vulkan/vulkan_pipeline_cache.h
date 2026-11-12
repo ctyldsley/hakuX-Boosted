@@ -109,6 +109,11 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     // upgrade on the draw thread - otherwise a draw in that window allocates
     // texture descriptors from a zero-binding layout.
     std::atomic<bool> pipeline_layout_stale{false};
+    // hakuX-Boosted: set by the creation thread once its job for this slot is
+    // over, created or failed, so a wait on this one pipeline
+    // (RequirePipelineForSubmission) can tell a failed slot, whose handle stays
+    // null for good, from one still compiling.
+    std::atomic<bool> creation_finished{false};
     // Pre-mapped dynamic-state values for this pipeline (see DynamicState).
     DynamicState dynamic_state;
 
@@ -216,6 +221,14 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // enabled or the startup storage preload is running, in which case it
   // doesn't block and unready pipelines have their draws dropped at replay.
   void EndSubmission();
+  // hakuX-Boosted: with vulkan_async_skip_draws, the draws of a pipeline that
+  // is still compiling are dropped at replay. For most draws that is an
+  // object appearing a few frames late; for a full-screen pass (a
+  // post-process step, the final composite) it is the whole picture wrong for
+  // those frames. The command processor names such a pipeline here and
+  // EndSubmission waits for it, and only for it, before the replay. GPU
+  // thread only.
+  void RequirePipelineForSubmission(Pipeline* pipeline);
   // Throttled persist of the VkPipelineCache blob. Cheap no-op unless new
   // pipelines were created and the save interval elapsed. Called from
   // EndSubmission().
@@ -675,6 +688,11 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
       creation_queue_;
   std::mutex creation_request_lock_;
   std::condition_variable creation_request_cond_;
+  // hakuX-Boosted: notified, under creation_request_lock_, each time a
+  // creation thread finishes a slot; EndSubmission's wait for the required
+  // pipelines sleeps on it. required_pipelines_ is the GPU thread's alone.
+  std::condition_variable creation_progress_cond_;
+  std::vector<Pipeline*> required_pipelines_;
   std::unique_ptr<xe::threading::Event> creation_completion_event_ = nullptr;
   std::atomic<bool> creation_completion_set_event_{false};
   std::function<void()> creation_completion_callback_;
