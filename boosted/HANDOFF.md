@@ -5,12 +5,58 @@ where the work stands, what is waiting on whom, and how to work in this
 repository. **Update it before a session ends** (the "Right now" section
 and a line in the log at the bottom), and commit it with the work.
 
-Last updated: 2026-11-11 (after the first device run and the review pass; run 22 is the build to test).
+Last updated: 2026-11-12 (run 37 tested on a cold shader cache; the build on the phone is run 37, `42f03a8`).
 
 ## Right now
 
-- **The dropped draws: cause found by reading, fix pushed, not built or
-  run.** With placeholder pipelines off (the default, the "deferred-bind"
+- **Run 37 on a cold shader cache (`42f03a8`, 2026-11-12 19:25): the
+  attract video is fixed, the first-run glitches are not, and the reason
+  is the driver's compile time.** Evidence in `device-logs/run37/xe.log`.
+  - The video: no green bar or flicker on the first play after boot (the
+    owner's eyes). The physical-commit invalidation in `memory.cc` did it.
+  - The glitches are still there, in the same places. `skipping the draw`,
+    `Draw skipped` and `do not match` are all 0, so
+    `async_shader_translate_on_draw` closed that path. What is left logs
+    nothing: **the app ships `vulkan_async_skip_draws = true`**
+    (`SettingsSchema.kt`, `default_config.toml`; the cvar's own default is
+    false, and the bullet below wrongly assumed false). With it,
+    `VulkanPipelineCache::EndSubmission` does not wait, and a deferred bind
+    that is still null when the command buffer replays drops its draw.
+    Not proven on device yet: the next run sets it false on a cold cache,
+    the glitches should turn into waits.
+  - **How long a pipeline takes on Turnip v39 (Adreno 840)**, from
+    `shader_profiling = true`: 198 pipelines in the first ten minutes,
+    24.8 s in all, median 56 ms, p90 408 ms, max 754 ms, 75 over 100 ms.
+    Alone in their frame (no other compile running): median 194 ms. It is
+    CPU work, not starvation: the four `Vulkan Pipelines` threads had
+    22.3 s of CPU against 8.6 s waiting to run. So a new material is
+    missing for 2 to 20 frames (skip on), or the frame stalls that long
+    (skip off). Neither is acceptable.
+  - **It follows the size of the SPIR-V the translator emits.** Quartiles
+    of VS+PS bytes against the median compile: 8-30 KB 5 ms, 30-76 KB
+    39 ms, 78-152 KB 100 ms, 152-353 KB 371 ms. One shader is 282 KB of
+    SPIR-V, the median 39 KB, for guest shaders of a few hundred
+    instructions at most. The translation itself is cheap (174 shaders,
+    562 ms in all, median 1.6 ms). No optimiser runs on the output
+    (SPIRV-Tools is in `third_party`, not hooked up).
+  - **So the lever for every title is the shader translator's output**,
+    in this order: (1) profile the compile threads on a cold run to see
+    which driver passes the time goes to (`simpleperf --app -t <tids>
+    --call-graph fp` works, tested); (2) make the SPIR-V small: emit only
+    what a shader uses (texture fetch variants, swizzle and write-mask
+    code, the pixel shader's tail), or run SPIRV-Tools' dead-code and
+    CFG passes on the translation thread, whichever measures better;
+    (3) for what still costs more than a frame, a stand-in that draws
+    at once (an interpreter shader, as Dolphin and RPCS3 have) and
+    compiling a title's stored list at boot, including a list brought
+    from another install (`shareable/*.xsh` and `.xpso` are GPU
+    independent). Totals so far for Fable II's first 90 minutes: 190
+    shaders, 222 pipelines; all 189 stored shaders translate in 122 ms
+    at a warm boot.
+  - The warm cache from before this run is kept in
+    `device-logs/warm-shader-cache` on the desktop.
+- **The dropped draws at `UpdateBindings`: fixed in run 37 (0 logged on a
+  cold cache), see above for what remains.** With placeholder pipelines off (the default, the "deferred-bind"
   model) the draw thread does not translate shaders: the background thread
   does. A draw whose pixel shader is not translated yet has no pixel
   bindings, so `GetGuestGraphicsPipelineLayout` cannot complete the layout
@@ -822,6 +868,15 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-12 (desktop, night).** Run 37 on a cold shader cache: the
+  attract video is fixed (verified by eye), the `UpdateBindings` drops are
+  gone (0 logged), the first-run glitches remain. Traced to the app's
+  `vulkan_async_skip_draws = true` dropping draws at replay while Turnip
+  takes a median 56 ms and up to 754 ms per pipeline, in step with the
+  size of the SPIR-V the translator emits (up to 282 KB a shader). Not
+  verified: the A/B with the setting false, and where the driver spends
+  the time (both set up for the next run).
 
 - **2026-11-12 (desktop, evening).** Run 35 (core and UI merged) on the
   phone: the UI's first look, 27 minutes without a stall with the 60 FPS
