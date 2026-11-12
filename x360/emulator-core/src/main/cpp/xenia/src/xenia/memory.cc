@@ -1935,6 +1935,20 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
     return false;
   }
   *out_address = address;
+  // hakuX-Boosted: newly committed physical memory is announced to the GPU
+  // caches as changed. Release and Decommit invalidate what they free, but a
+  // draw that still points at the freed pages has the Vulkan shared memory
+  // mark them valid again without copying them ("skipped upload of N
+  // decommitted page(s)", vulkan_shared_memory.cc), and nothing took that
+  // back when the guest allocated the same pages for something else: with no
+  // watch on them its writes were never seen and the old contents were drawn
+  // for ever. Fable II's attract video showed it (2026-11-12): the chroma of
+  // every other frame came from the Lionhead logo video that had used those
+  // pages first, with green where that was empty.
+  if (allocation_type & kMemoryAllocationCommit) {
+    TriggerCallbacks(std::move(global_lock), address, size, true, true, false,
+                     true);
+  }
   return true;
 }
 
@@ -1981,6 +1995,11 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size,
     return false;
   }
 
+  // hakuX-Boosted: as in Alloc above.
+  if (allocation_type & kMemoryAllocationCommit) {
+    TriggerCallbacks(std::move(global_lock), address, size, true, true, false,
+                     true);
+  }
   return true;
 }
 
@@ -2033,6 +2052,11 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address,
     return false;
   }
   *out_address = address;
+  // hakuX-Boosted: as in Alloc above.
+  if (allocation_type & kMemoryAllocationCommit) {
+    TriggerCallbacks(std::move(global_lock), address, size, true, true, false,
+                     true);
+  }
   return true;
 }
 

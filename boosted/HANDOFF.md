@@ -21,14 +21,21 @@ Last updated: 2026-11-11 (after the first device run and the review pass; run 22
     cut off at the top left of this phone (rounded corner or cutout: it
     needs the display's safe inset); the look overall is to move towards
     the Xbox-inspired, Cocoon-launcher polish noted below.
-  - **The attract video is wrong (new, seen by the owner on run 35).**
-    Leave Fable II's title screen alone and its video plays washed out to
-    white and yellow, with a striped band across the top, a cyan line and
-    a cyan block, flickering constantly (screenshots kept by the owner).
-    The title screen itself and gameplay are right. A video frame is a
-    texture the game fills itself every frame: look at how that texture is
-    read (format, tiling, the planes of a YUV frame) and at the same
-    front-buffer question as the scene-cut flash.
+  - **The attract video: cause found in a capture, fix pushed, not built
+    or run** (`device-logs/attract/sheet_video.jpg`). Every other frame of
+    the video is right; the one between has a green cast, a green line at
+    about 72% of the height and a solid green block below it, and the
+    owner's stills show the Lionhead logo ghosted over it. That is a YUV
+    frame whose chroma is partly stale and partly empty. `xe.log` has, at
+    frame 476 while the logo video played, `Vulkan shared memory: skipped
+    upload of 68 decommitted page(s)` twice, at `1F32E000` and `1F372000`
+    (two adjacent 272 KB buffers). The shared memory marks such pages
+    valid without copying, and nothing invalidated them again when the
+    guest allocated the same physical pages for the next video's buffers:
+    no watch, so its writes were never seen. `PhysicalHeap::Alloc`,
+    `AllocFixed` and `AllocRange` now invalidate what they commit
+    (`memory.cc`). If the video is still wrong on the next build, check
+    whether its buffers are at those addresses at all.
   - **The 60 FPS patch off, same build: 27 minutes, frame 31,330, no
     stall** (2026-11-12 16:35 to 17:02). No identity mismatch, skipped
     draw, host-side crash or fiber warning, and a steady 30.1 frames a
@@ -759,6 +766,12 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-12 (desktop, evening).** Run 35 (core and UI merged) on the
+  phone: the UI's first look, 27 minutes without a stall with the 60 FPS
+  patch off at a steady 30, the attract video fault captured and traced to
+  stale pages after a decommit (physical allocations now invalidate; not
+  built). The KGSL hook is off by default.
 
 - **2026-11-12 (desktop, afternoon).** Merged `claude/xbox-ui` into this
   branch at the owner's request, so one APK carries the core work and the

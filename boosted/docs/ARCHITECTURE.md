@@ -114,6 +114,8 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `app/.../data/GameLibraryRepository.kt` | `scanRoots`: several folders, and a test for which disc images are the 360's |
 | `app/.../updater/updater.kt`, `ui/library/GameLibraryScreen.kt` | XenDroid's updater off when embedded |
 | `xenia/kernel/xthread.cc`, `guest_scheduler.cc`, `cpu/thread.cc`, `thread_state.cc`, `base/threading*.cc` | The readers of per-thread variables are never inlined: a fiber resumes on another host thread, and an inlined reader keeps the old thread's TLS base (the optimised build's crash in `XObject::Wait`) |
+| `xenia/memory.cc` | Physical memory that is committed invalidates the GPU caches' copy of it (pages a draw saw decommitted were left marked valid for ever) |
+| `xenia/kernel/xboxkrnl/xboxkrnl_rtl.cc` | A critical section's owner comes from the caller's control region, with a mismatch against the thread-local logged |
 | `app/.../settings/TouchOverlayDefault.kt` | hakuX's test of a real controller, so a phone's built-in pseudo-gamepad doesn't hide the touch controls |
 | `emulator-core/.../cpp/emulator_xendroid.cpp`, `xendroid_emu.cpp`, `emulator.h`, `java/xendroid/compose/Emulator.java` | Three JNI calls for the in-game menu: `live_setting`, `set_live_setting` (the cvars the core rereads every frame, a fixed list) and `current_title_id` |
 | `app/.../core/EmulatorSession.kt` | Their Kotlin wrappers |
