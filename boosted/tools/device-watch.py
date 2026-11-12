@@ -30,9 +30,13 @@ import subprocess
 import sys
 import time
 
-PHONE_DIR = "/sdcard/Movies/hakux-watch"
+# Not under /sdcard: every piece written there is picked up by the phone's
+# media scanner, which with the hardware encoder cost enough on a phone
+# already short of memory to help stall it (2026-11-12: kswapd at 84%, load
+# 24, "System isn't responding" while a 60 fps test was recorded).
+PHONE_DIR = "/data/local/tmp/hakux-watch"
 SEGMENT_SECONDS = 60
-KEEP = 8
+KEEP = 6
 
 # Git Bash rewrites arguments that look like Unix paths; adb's are the phone's.
 ENV = dict(os.environ, MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*")
@@ -60,7 +64,7 @@ def start(args):
     # still being written has no index and cannot be read), the oldest removed.
     loop = (
         f"while [ -e {PHONE_DIR}/.on ]; do "
-        f"screenrecord --time-limit {SEGMENT_SECONDS} --bit-rate 8000000 --size 1304x600 "
+        f"screenrecord --time-limit {SEGMENT_SECONDS} --bit-rate 2500000 --size 1044x480 "
         f"{PHONE_DIR}/seg-$(date +%s).mp4 || sleep 3; "
         # a piece of nothing: the screen was off, screenrecord cannot start
         f"find {PHONE_DIR} -name seg-*.mp4 -size 0 -delete; "
