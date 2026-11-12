@@ -93,6 +93,23 @@ UI (independent of the core work; proposed as its own session):
     descheduled under load (it stalled with the recorder, the KGSL hook,
     pipelines compiling); (4) frames shorter than the console's when the
     title catches up after a hitch.
+  - **Measured on run 39 with `guest_scheduler_stats = true` (2026-11-12
+    22:10, four minutes of play):** "backstop rescues" 6, one each in six
+    different seconds (frames 289, 978, 2150, 2983, 3758, 5566). So wakes
+    ARE missed, about one every 40 seconds, and each waited for the 64 ms
+    backstop. Also in those lines: 370,000 fiber switches a second at the
+    median, 1.4 million at the peak (a cost of its own: threads that
+    yield in a loop), and a steady 30 frames a second.
+  - **Pushed, not built or run: `kGateRecheckMs = 2`.** A parked waiter
+    gated on an object or a set has its gate's epoch looked at again
+    within 2 ms without a poke (a compare under the lock; nothing is
+    re-polled unless the epoch moved). Each catch is logged: "missed
+    wake made good by the timed look: tid ... handle ... signalled N ms
+    earlier". If Fable II's worker (the thread with entry `8262DDD0`)
+    shows there on its "start" handle and the stall stops, that was it.
+    Why the poke is missed in the first place is still not found:
+    `WakeForSignal`, the park in `BlockCurrentThread` and the CPU's
+    park-and-recheck were read and look right.
   - Next, in this order. No build: `guest_scheduler_stats = true` is set
     on the phone, the log then has "backstop rescues N" each second.
     Next build: a wake-latency histogram (signal or wait start, whichever

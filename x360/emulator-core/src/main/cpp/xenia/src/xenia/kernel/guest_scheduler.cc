@@ -1215,6 +1215,17 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
   uint32_t wake_mask = 0;
   stats_.repolls.fetch_add(1, std::memory_order_relaxed);
   // Missed-wake tripwire, logged after the lock is released.
+  // hakuX-Boosted: who was rescued, for the log.
+  static constexpr size_t kRescueNotes = 4;
+  struct RescueNote {
+    uint32_t tid;
+    uint32_t handle;
+    uint64_t signal_us;
+    bool forced;
+  };
+  RescueNote rescue_notes[kRescueNotes] = {};
+  size_t rescue_note_count = 0;
+  const uint64_t rescue_now_us = NowMicros();
   uint64_t rescued = 0;
   bool warn = false;
   uint64_t warn_count = 0;
@@ -1268,27 +1279,49 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
             // APCs inserted without a WakeAll are only found by polling.
             next_due = now_ms + kPollBackoffMs;
           }
+          // hakuX-Boosted: see kGateRecheckMs.
+          if ((obj || links.wait_gate_count) &&
+              now_ms + kGateRecheckMs < next_due) {
+            next_due = now_ms + kGateRecheckMs;
+          }
           t = next;
           continue;
         }
       }
       // Only the backstop reached this waiter, on a pass no wake poked, yet
       // its gate's epoch moved: the signal's own wake never re-readied it.
-      if (force_all && !poked && links.wait_gated) {
+      // hakuX-Boosted: counted on any pass no wake poked (the timed look of
+      // kGateRecheckMs as well as the backstop), and the first few of a pass
+      // are named in the log with how old the signal was.
+      if (!poked && links.wait_gated) {
         XObject* obj = t->cooperative_wait_object();
         bool epoch_moved = false;
+        uint64_t signal_us = 0;
         if (obj) {
           epoch_moved = obj->cooperative_signal_epoch() != links.wait_epoch;
+          signal_us = obj->cooperative_signal_time_us();
         } else if (links.wait_gate_count) {
           epoch_moved =
               t->cooperative_wait_set_epoch() != links.wait_epoch;
+          signal_us = t->cooperative_wait_set_signal_time_us();
         }
-        if (epoch_moved &&
+        // A signal under half a millisecond old is one whose own poke is
+        // still on its way (the signaller takes this lock next), not a miss.
+        const bool poke_in_flight =
+            signal_us && rescue_now_us < signal_us + 500;
+        if (epoch_moved && !poke_in_flight &&
             !(links.wait_deadline_ms && now_ms >= links.wait_deadline_ms)) {
           ++rescued;
           backstop_rescue_tid_ = t->thread_id();
           backstop_rescue_handle_ =
               links.wait_handle_count ? links.wait_handles[0] : 0;
+          if (rescue_note_count < kRescueNotes) {
+            rescue_notes[rescue_note_count].tid = t->thread_id();
+            rescue_notes[rescue_note_count].handle = backstop_rescue_handle_;
+            rescue_notes[rescue_note_count].signal_us = signal_us;
+            rescue_notes[rescue_note_count].forced = force_all;
+            ++rescue_note_count;
+          }
         }
       }
       links.blocked = false;
@@ -1335,6 +1368,26 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
         "backstop in the last 5s despite a signal having arrived - wakes are "
         "being lost (last: tid={:08X} handle={:08X})",
         warn_count, kRepollBackstopMs, warn_tid, warn_handle);
+  }
+  if (rescue_note_count) {
+    static std::atomic<int> budget{400};
+    const uint64_t now_us = NowMicros();
+    for (size_t i = 0; i < rescue_note_count; ++i) {
+      if (budget.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+        break;
+      }
+      const RescueNote& note = rescue_notes[i];
+      XELOGW(
+          "GuestScheduler: missed wake made good by the {}: tid={:08X} "
+          "waiting on handle {:08X}, signalled {:.1f} ms earlier (cpu {}, "
+          "frame {})",
+          note.forced ? "64 ms backstop" : "timed look", note.tid,
+          note.handle,
+          note.signal_us && now_us > note.signal_us
+              ? double(now_us - note.signal_us) / 1000.0
+              : -1.0,
+          cpu_index, xe::logging::GetFrameNumber());
+    }
   }
   // Wake any other dispatch thread that received a ready fiber (this one runs).
   for (int i = 0; i < kMaxCpus; ++i) {

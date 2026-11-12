@@ -188,6 +188,15 @@ class GuestScheduler {
   // At least this often every blocked fiber re-polls regardless of the epoch
   // gate, so a missed epoch bump costs a latency blip, not a hang.
   static constexpr uint64_t kRepollBackstopMs = 64;
+  // hakuX-Boosted: how long a parked waiter gated on an object (or a set of
+  // them) can go before its gate's epoch is looked at again without a poke.
+  // A signal's poke that does not reach the waiter's CPU was only made good
+  // by the 64 ms backstop above: two frames of a 30 fps title, and long
+  // enough for Fable II's worker to miss its frame and deadlock the title
+  // (boosted/HANDOFF.md, 2026-11-12; the scheduler's own counter showed six
+  // such rescues in four minutes of play). The look is a compare per parked
+  // waiter under the lock, nothing is re-polled unless an epoch moved.
+  static constexpr uint64_t kGateRecheckMs = 2;
   // Backstop rescues per 5s window before the missed-wake tripwire warns.
   // Above the benign signal/park race rate, far below a real regression.
   static constexpr uint64_t kBackstopRescueWarnThreshold = 50;
