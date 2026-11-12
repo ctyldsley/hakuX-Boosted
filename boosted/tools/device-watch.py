@@ -8,7 +8,10 @@ everything at once: the last seconds of the screen as still frames, the
 emulator's log, the state of every guest thread, how evenly frames arrived.
 
   device-watch.py start          begin recording the screen in 60 s pieces
-                                 (the last 8 are kept on the phone)
+                                 (the last 6 are kept on the phone), only
+                                 while the game is in front and the phone is
+                                 plugged in, for 45 minutes at most; it then
+                                 stops and deletes its pieces by itself
   device-watch.py grab [secs]    something just happened: the last `secs`
                                  seconds (default 20) as frames, a screenshot,
                                  xe.log, a thread dump, frame pacing
@@ -37,6 +40,9 @@ import time
 PHONE_DIR = "/data/local/tmp/hakux-watch"
 SEGMENT_SECONDS = 60
 KEEP = 6
+# The recorder gives up by itself after this long (and when the phone is
+# unplugged, or the game is not what is on screen): see start().
+MAX_MINUTES = 45
 
 # Git Bash rewrites arguments that look like Unix paths; adb's are the phone's.
 ENV = dict(os.environ, MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*")
@@ -62,24 +68,49 @@ def start(args):
     shell(f"mkdir -p {PHONE_DIR}")
     # One screenrecord after another, each closed properly (a piece that is
     # still being written has no index and cannot be read), the oldest removed.
+    #
+    # It records the phone's whole screen, so it is kept to the game:
+    # - only while the emulator's own activity has the focus (checked every
+    #   two seconds; a piece is closed the moment something else is in front);
+    # - only while the phone has a USB data connection, as it has when plugged into
+    #   the computer: unplugged, it stops and deletes its pieces;
+    # - for MAX_MINUTES at most, then the same.
+    # Nothing leaves the phone unless `grab` pulls it.
+    focus = 'dumpsys window | grep mCurrentFocus | grep -q EmulatorHostActivity'
+    # a USB data connection to a computer (a wall charger is not "configured";
+    # the battery service calls this phone's computer port "AC", so that is
+    # no guide)
+    usb = 'dumpsys usb | grep -q "configured=true"'
     loop = (
+        f"end=$(( $(date +%s) + {MAX_MINUTES * 60} )); "
         f"while [ -e {PHONE_DIR}/.on ]; do "
+        f"if [ $(date +%s) -gt $end ] || ! {usb}; then break; fi; "
+        f"if {focus}; then "
         f"screenrecord --time-limit {SEGMENT_SECONDS} --bit-rate 2500000 --size 1044x480 "
-        f"{PHONE_DIR}/seg-$(date +%s).mp4 || sleep 3; "
+        f"{PHONE_DIR}/seg-$(date +%s).mp4 & pid=$!; "
+        f"while kill -0 $pid 2>/dev/null; do sleep 2; "
+        f"if ! {focus} || ! {usb} || [ ! -e {PHONE_DIR}/.on ]; then kill -2 $pid; wait $pid; fi; "
+        f"done; "
+        f"else sleep 3; fi; "
         # a piece of nothing: the screen was off, screenrecord cannot start
         f"find {PHONE_DIR} -name seg-*.mp4 -size 0 -delete; "
         f"ls -t {PHONE_DIR}/seg-*.mp4 | tail -n +{KEEP + 1} | xargs -r rm -f; "
-        f"done"
+        f"done; "
+        # stopped by itself (unplugged, out of time) or by `stop`: nothing stays
+        f"rm -rf {PHONE_DIR}"
     )
     shell(f"touch {PHONE_DIR}/.on; nohup sh -c '{loop}' >/dev/null 2>&1 &")
     shell("logcat -G 64M")
     time.sleep(1)
-    awake = "Awake" in shell("dumpsys power | grep mWakefulness=")
+    time.sleep(2)
+    armed = bool(shell(f"ls {PHONE_DIR}/.on 2>/dev/null").strip())
     running = shell("pidof screenrecord").strip()
-    if not awake:
-        print("the phone's screen is off: recording begins by itself once it is on")
+    if not armed:
+        print("the recorder stopped at once: is the phone plugged into the computer?")
+    elif running:
+        print("recording the game")
     else:
-        print("recording" if running else "screenrecord did not start")
+        print("armed: records while the game is in front, nothing else")
 
 
 def stop(args, quiet=False):
