@@ -60,6 +60,41 @@ UI (independent of the core work; proposed as its own session):
 
 ## Right now
 
+- **Why Fable II's worker is late: its host thread queues for a core.
+  Measured, fix pushed, not built or run.** A second start of run 43 on a
+  cold cache, profiled (`device-logs/run43-profile`: log, `perf-guest.data`
+  with the six dispatch threads at 1 kHz for 200 s, `stat-all.txt`). It
+  did not stall this time; the owner saw glitches, stutter and warped
+  sound early on.
+  - `/proc/<pid>/task/<tid>/schedstat` (on a core, waiting for a core,
+    timeslices): Guest CPU 0 219 s / 11 s; CPU 3 190 s / 4 s; CPU 5 119 s
+    / 9 s; CPU 4 19 s / 13 s; **CPU 1 6.3 s / 15.1 s** in 249,000 slices.
+    The worker lives on guest CPU 1. Its dispatch thread sleeps most of
+    the time and, each time it wakes, waits for a core longer than it
+    then runs.
+  - The new timing in the same run: `XThread001B` (the worker) ran 16 ms
+    or more after its signal 11 times, longest 137 ms, frames 2849 to
+    3165, the first gameplay scene while pipelines compiled; it waited
+    up to 45 ms for section `83499138` nine times and GameThread up to
+    48 ms twice. No "missed wake made good" line: the poke arrived, the
+    host thread was not run. Also late: the audio thread `XThread0009`
+    18 times up to 51 ms (the warped sound), the VFS threads up to
+    179 ms.
+  - Not first-time translation: the profile of the worker's dispatch
+    thread has no translator in it (44% title code, 25% in the timed
+    sleep's syscall, which is the price of the 1 ms and 2 ms looks).
+  - Why: every thread in the process, the six dispatch threads, the GPU
+    command thread and the four pipeline compile threads alike, was at
+    nice 0 (the audio threads alone at -12). Eleven or more runnable
+    threads on eight cores, and a thread that has slept gets no
+    preference over ones that spin.
+  - The fix: `guest_threads_above_helpers` (Kernel, default true). The
+    dispatch threads and the GPU command thread at nice -8, the pipeline
+    compile threads at nice 8. **To verify:** `cat /proc/<pid>/task/*/stat`
+    for the nice values; the worker's "late wake" lines and CPU 1's
+    schedstat wait should all but go; then long play for the stall. If
+    queueing remains, the next step is one core per dispatch thread
+    (affinity), as the console has.
 - **Run 43 (the 2 ms gate recheck plus the timing) stalled within
   seconds of the first gameplay scene (2026-11-12 22:45), and the timing
   says the worker was NOT woken late.** Evidence in
@@ -1062,6 +1097,7 @@ build locally and use adb; the device etiquette in upstream's own
 | Setting | Section | Default | What |
 |---|---|---|---|
 | `kgsl_context_priority` | Vulkan | 0 (was 7) | Turnip's KGSL contexts on the compositor's ringbuffer (hakuX's hook) when 1 to 15; off by default since it starved the app's own UI with a title uncapped |
+| `guest_threads_above_helpers` | Kernel | true | Dispatch threads and the GPU command thread at nice -8, pipeline compile threads at nice 8 (written 2026-11-12, not built or run) |
 | `async_shader_translate_on_draw` | GPU | true | A draw's untranslated shaders are translated on the draw thread, so the draw is recorded instead of refused |
 | `vulkan_async_wait_fullscreen_draws` | Vulkan | true | With `vulkan_async_skip_draws`: full-screen passes still wait for their pipeline (written 2026-11-12, not built or run) |
 | `vulkan_async_wait_fullscreen_draws_ms` | Vulkan | 1500 | The longest one submission waits for those |

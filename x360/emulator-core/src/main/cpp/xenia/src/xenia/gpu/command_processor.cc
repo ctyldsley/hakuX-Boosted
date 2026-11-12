@@ -53,6 +53,9 @@ DEFINE_uint32(
     "UpdateWritePointer, so no wake-up is missed either way.",
     "GPU");
 
+// hakuX-Boosted: defined in kernel/guest_scheduler.cc.
+DECLARE_bool(guest_threads_above_helpers);
+
 DEFINE_bool(disassemble_pm4, false,
             "Only does anything in debug builds, if set will disassemble and "
             "log all PM4 packets sent to the CP.",
@@ -650,6 +653,13 @@ void CommandProcessor::ThrottlePresentation() {
 }
 
 void CommandProcessor::WorkerThreadMain() {
+  // hakuX-Boosted: with the guest's threads, above the helpers; see
+  // guest_threads_above_helpers in kernel/guest_scheduler.cc.
+  if (cvars::guest_threads_above_helpers) {
+    if (auto* self = xe::threading::Thread::GetCurrentThread()) {
+      self->set_priority(xe::threading::ThreadPriority::kAboveNormal);
+    }
+  }
   if (!SetupContext()) {
     xe::FatalError("Unable to setup command processor internal state");
     return;

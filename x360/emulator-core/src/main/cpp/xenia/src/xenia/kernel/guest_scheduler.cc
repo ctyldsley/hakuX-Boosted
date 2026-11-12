@@ -40,6 +40,28 @@ DEFINE_bool(
     "queue behind the single I/O worker.",
     "Kernel");
 
+// hakuX-Boosted: the console gives each of its six hardware threads a core of
+// its own; a title's threads keep pace with each other because nothing else
+// runs there. Here the six dispatch threads and the GPU command thread ran at
+// the same nice value as every helper in the process, the pipeline compile
+// threads included, so a dispatch thread that woke up queued behind them for
+// a core. Measured on the SM8850 (2026-11-12, run 43, 200 s): the dispatch
+// thread of guest CPU 1 ran for 6.3 s and waited 15.1 s to be given a core,
+// and the Fable II worker on it ran up to 137 ms after its signal, eleven
+// times, all while pipelines compiled. That title joins that worker every
+// frame while holding a lock the worker needs, and stalls for good when the
+// worker is late (boosted/HANDOFF.md). With this on, the dispatch threads and
+// the GPU command thread run above normal (nice -8, below the audio threads'
+// -12) and the pipeline compile threads below (nice 8), so compiling takes
+// what the title leaves.
+DEFINE_bool(
+    guest_threads_above_helpers, true,
+    "Run the guest CPU dispatch threads and the GPU command thread above "
+    "normal priority and the pipeline compile threads below it, so a guest "
+    "thread that wakes up is given a core at once instead of queueing behind "
+    "background work.",
+    "Kernel");
+
 namespace xe {
 namespace kernel {
 
@@ -242,6 +264,10 @@ void GuestScheduler::EnsureStarted() {
         xe::threading::Thread::Create(params, [this, i]() { RunLoop(i); });
     cpus_[i].host_thread->set_name(std::string("Guest CPU ") +
                                    std::to_string(i));
+    if (cvars::guest_threads_above_helpers) {
+      cpus_[i].host_thread->set_priority(
+          xe::threading::ThreadPriority::kAboveNormal);
+    }
   }
 }
 

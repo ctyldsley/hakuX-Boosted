@@ -59,6 +59,8 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_interpreter_vs.h"
 }  // namespace shaders
 
+DECLARE_bool(guest_threads_above_helpers);
+
 DEFINE_bool(
     pipeline_storage_precreate, true,
     "Create the pipelines described by previous runs when a title starts, so "
@@ -382,6 +384,12 @@ bool VulkanPipelineCache::Initialize() {
           xe::threading::Thread::Create({}, [this]() { CreationThread(); });
       assert_not_null(creation_thread);
       creation_thread->set_name("Vulkan Pipelines");
+      // hakuX-Boosted: below the guest's threads, see
+      // guest_threads_above_helpers in kernel/guest_scheduler.cc.
+      if (cvars::guest_threads_above_helpers) {
+        creation_thread->set_priority(
+            xe::threading::ThreadPriority::kBelowNormal);
+      }
       creation_threads_.push_back(std::move(creation_thread));
     }
   }
