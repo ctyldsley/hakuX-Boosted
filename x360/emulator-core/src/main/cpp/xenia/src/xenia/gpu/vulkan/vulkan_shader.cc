@@ -80,6 +80,16 @@ VulkanShader::VulkanShader(const ui::vulkan::VulkanDevice* const vulkan_device,
 }
 
 // hakuX-Boosted: see the declaration.
+const ucode_program::Program& VulkanShader::GetUcodeProgram() {
+  if (!ucode_program_valid_) {
+    ucode_program_valid_ = true;
+    ucode_program::Build(type(), ucode_dwords(), uint32_t(ucode_dword_count()),
+                         ucode_program_);
+  }
+  return ucode_program_;
+}
+
+// hakuX-Boosted: see the declaration.
 const VulkanShader::StandInInfo& VulkanShader::GetStandInInfo() {
   if (stand_in_info_valid_ || !is_ucode_analyzed()) {
     return stand_in_info_;

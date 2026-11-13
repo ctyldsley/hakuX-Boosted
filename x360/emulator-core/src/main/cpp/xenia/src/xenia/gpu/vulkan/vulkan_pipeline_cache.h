@@ -202,6 +202,13 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     // A placeholder for this slot is being created on a creation thread
     // (vulkan_placeholder_async).
     std::atomic<bool> placeholder_pending{false};
+    // hakuX-Boosted: the placeholder's vertex stage is the guest shader
+    // interpreter, version 2 (vulkan_placeholder_interpreter_v2,
+    // boosted/notes/shader-first-run.md): a draw that binds it uploads the
+    // shaders' prepared microcode instead of telling the interpreter where
+    // it is in guest memory. Written with uses_interpreter, before the
+    // placeholder is published.
+    std::atomic<bool> placeholder_program{false};
     // The rest is the GPU command thread's alone.
     // A placeholder was asked for once, made or not: not asked for again.
     bool placeholder_attempted = false;
@@ -394,7 +401,10 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     kSkipMemoryExport = 1u << 10,
     kSkipLoops = 1u << 11,
     kSkipVertexShaderTranslated = 1u << 12,
-    kSkipInterpreterMask = (1u << 13) - 1,
+    // hakuX-Boosted: the two the interpreter's version 2 adds.
+    kSkipProgramTooLarge = 1u << 13,
+    kSkipProgramMalformed = 1u << 14,
+    kSkipInterpreterMask = (1u << 15) - 1,
 
     // The vertex shader was not translated yet, so there was nothing to make
     // a placeholder from ("no interpreter placeholder, real pipeline not
@@ -434,6 +444,19 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   void NoteShaderPairAhead(VulkanShader* vertex_shader,
                            VulkanShader* pixel_shader,
                            xenos::PrimitiveType guest_primitive_type);
+
+  // hakuX-Boosted: the guest shader interpreter, version 2
+  // (boosted/notes/shader-first-run.md). Whether new interpreter placeholders
+  // are made with it (vulkan_placeholder_interpreter_v2, and its modules
+  // exist).
+  bool IsProgramInterpreterActive() const;
+  // Why it cannot stand in for this vertex shader in a draw of this kind, as
+  // DrawSkipReason bits of the interpreter group; 0 if it can. The shader
+  // must have its microcode analysed. GPU command thread only.
+  uint32_t GetProgramInterpreterRefusal(
+      VulkanShader& vertex_shader,
+      Shader::HostVertexShaderType host_vertex_shader_type,
+      xenos::PrimitiveType host_primitive_type);
 
   // True while this draw must be fed the ucode interpreter's inputs (full float
   // constants + ucode location). False once hot-swapped to the real VS.
@@ -816,11 +839,21 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // fragment shader interlock one, or the pixel shader writes no colour.
   // Otherwise fills what the stand-in is, its pixel shader module and the
   // pipeline layout to create the placeholder with.
+  // hakuX-Boosted: use_program for the interpreter's version 2, which
+  // writes every interpolator at the location of its index.
   bool GetStandIn(VulkanShader::VulkanTranslation* vertex_shader,
                   VulkanShader::VulkanTranslation* pixel_shader,
-                  bool use_interpreter, StandIn& stand_in_out,
+                  bool use_interpreter, bool use_program,
+                  StandIn& stand_in_out,
                   VkShaderModule& pixel_shader_module_out,
                   const PipelineLayoutProvider*& pipeline_layout_out);
+  // hakuX-Boosted: the interpreter's version 2 as the vertex stage of a draw
+  // of this host vertex shader type (a vertex shader, or a tessellation
+  // evaluation shader with equal or fractional spacing). VK_NULL_HANDLE if
+  // there is none for it. Any thread.
+  VkShaderModule GetProgramVertexShader(
+      Shader::HostVertexShaderType host_vertex_shader_type,
+      bool fractional_spacing) const;
   // The stand-in pixel shader module with its texture coordinate and colour
   // inputs at the given locations (0 and 1 are the modules as compiled, which
   // is what the interpreter vertex shader outputs). VK_NULL_HANDLE on failure.
@@ -932,6 +965,15 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // GetStandInPixelShader's key (the draw thread only).
   VkShaderModule ucode_interpreter_stand_in_vs_ = VK_NULL_HANDLE;
   VkShaderModule stand_in_pixel_shaders_[3][2] = {};
+  // hakuX-Boosted: the guest shader interpreter, version 2: a vertex shader,
+  // the vertex shader of point sprites drawn as strips, and the tessellation
+  // evaluation shaders [triangle control points, triangle patch, quad
+  // control points, quad patch][equal spacing, fractional even spacing].
+  VkShaderModule ucode_program_vs_ = VK_NULL_HANDLE;
+  VkShaderModule ucode_program_point_strip_vs_ = VK_NULL_HANDLE;
+  VkShaderModule ucode_program_ds_[4][2] = {};
+  // Interpreter placeholders made with it, for the once-a-second line.
+  uint64_t placeholders_program_ = 0;
   std::unordered_map<uint32_t, VkShaderModule> stand_in_pixel_shaders_moved_;
 
   // Tessellation shaders.

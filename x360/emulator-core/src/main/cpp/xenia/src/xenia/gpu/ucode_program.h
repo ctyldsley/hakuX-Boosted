@@ -40,8 +40,7 @@ constexpr uint32_t kAluVectorOperandsShift = 24;
 
 // The fourth word of a fetch instruction's element. Bits 0:2 the kind; for a
 // vertex fetch bits 8:15 the vertex fetch constant; for a texture fetch bits
-// 4:7 the texture slot (Program::textures), bits 8:11 the interpolator whose
-// screen-space derivatives stand for the coordinates' (15: none known).
+// 4:7 the texture slot (Program::textures).
 enum class FetchKind : uint32_t {
   kVertex = 0,
   kTexture = 1,
@@ -54,8 +53,6 @@ enum class FetchKind : uint32_t {
 constexpr uint32_t kFetchKindMask = 7;
 constexpr uint32_t kFetchVertexConstantShift = 8;
 constexpr uint32_t kFetchTextureSlotShift = 4;
-constexpr uint32_t kFetchTextureGradientShift = 8;
-constexpr uint32_t kFetchTextureNoGradient = 15;
 
 // What a shader does that the interpreter does not do as the translated
 // shader would. Which of these keep a shader from the interpreter is the
@@ -86,9 +83,6 @@ enum Feature : uint32_t {
   kFeatureDepthOutput = UINT32_C(1) << 12,
   // The pixel shader can kill pixels.
   kFeatureKill = UINT32_C(1) << 13,
-  // A texture fetch whose coordinates come from no interpolator the walk
-  // could name: it is sampled at the base level.
-  kFeatureDependentFetch = UINT32_C(1) << 14,
   // Vertex shader: writes the point size, or the kill flag.
   kFeaturePointSize = UINT32_C(1) << 15,
   kFeatureVertexKill = UINT32_C(1) << 16,

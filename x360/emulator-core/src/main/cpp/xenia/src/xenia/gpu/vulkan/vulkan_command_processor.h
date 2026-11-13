@@ -571,6 +571,15 @@ class VulkanCommandProcessor final : public CommandProcessor {
       uint32_t used_texture_mask, reg::RB_DEPTHCONTROL normalized_depth_control,
       uint32_t normalized_color_mask,
       const draw_util::HostDepthPolygonOffset* host_depth_polygon_offset);
+  // hakuX-Boosted: a draw through the guest shader interpreter, version 2
+  // (vulkan_placeholder_interpreter_v2): the shaders' prepared microcode and
+  // the words in front of it (shaders/ucode_program.glsli), which are
+  // uploaded behind the bool and loop constants, in the same buffer.
+  struct InterpreterProgramDraw {
+    const ucode_program::Program* vertex = nullptr;
+    const ucode_program::Program* pixel = nullptr;
+    uint32_t head[ucode_program::kHeadElements * 4] = {};
+  };
   // *_bindings_ready is IssueDraw's per-draw readiness snapshot, the same one
   // the sampler collection used - re-reading bindings_ready() here would race
   // translation finishing mid-draw.
@@ -582,6 +591,10 @@ class VulkanCommandProcessor final : public CommandProcessor {
                       // hakuX-Boosted: the one texture of a stand-in pixel
                       // shader (its sampler is in current_samplers_pixel_).
                       const VulkanShader::TextureBinding* stand_in_texture =
+                          nullptr,
+                      // hakuX-Boosted: what the guest shader interpreter,
+                      // version 2, is given for this draw, if it draws it.
+                      const InterpreterProgramDraw* interpreter_program =
                           nullptr);
   // Allocates a descriptor set and fills one or two VkWriteDescriptorSet
   // structure instances (for images and samplers).
@@ -1265,6 +1278,11 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // constants for the ucode interpreter rather than a shader's packed subset.
   // Used to invalidate the binding when switching interpreter <-> normal.
   bool float_constants_vertex_are_full_ = false;
+  // hakuX-Boosted: what is behind the bool and loop constants in the buffer
+  // they were last uploaded to: the interpreter's programs of a draw, or
+  // nothing.
+  bool interpreter_program_uploaded_ = false;
+  InterpreterProgramDraw interpreter_program_last_;
 
   // System shader constants, including user clip planes and tessellation
   // constants.

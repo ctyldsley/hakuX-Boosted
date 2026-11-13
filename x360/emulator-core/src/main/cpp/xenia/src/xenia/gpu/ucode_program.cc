@@ -14,14 +14,6 @@ namespace ucode_program {
 
 namespace {
 
-// Which interpolator a pixel shader's register still holds a multiple or an
-// offset of, for the texture fetches that take their coordinates from it:
-// the interpreter cannot take screen-space derivatives of a value it computed
-// inside its instruction loop, so it uses the interpolator's.
-constexpr int8_t kSourceUnknown = -1;
-// A float constant: neutral when combined with a register.
-constexpr int8_t kSourceConstant = -2;
-
 struct Walk {
   xenos::ShaderType shader_type;
   Program* program;
@@ -30,22 +22,10 @@ struct Walk {
   uint32_t instruction_count;
   std::vector<bool> instruction_seen;
   ucode::VertexFetchInstruction previous_vfetch_full;
-  int8_t register_source[64];
   uint32_t register_bound = 0;
 
   void UseRegister(uint32_t index) {
     register_bound = std::max(register_bound, (index & 63) + 1);
-  }
-
-  int8_t OperandSource(const ucode::AluInstruction& op, uint32_t i) const {
-    if (!op.src_is_temp(i)) {
-      return op.src_const_is_addressed(i) ? kSourceUnknown : kSourceConstant;
-    }
-    uint32_t reg = op.src_reg(i);
-    if (ucode::AluInstruction::is_src_temp_relative(reg)) {
-      return kSourceUnknown;
-    }
-    return register_source[ucode::AluInstruction::src_temp_reg(reg)];
   }
 
   void Alu(uint32_t* words) {
@@ -136,59 +116,17 @@ struct Walk {
       return;
     }
 
-    // Register results, and which interpolator they still follow.
+    // Register results.
     if (vector_mask) {
-      uint32_t dest = op.vector_dest();
-      UseRegister(dest);
+      UseRegister(op.vector_dest());
       if (op.is_vector_dest_relative()) {
         features |= kFeatureRelativeAddressing;
-        std::fill(std::begin(register_source), std::end(register_source),
-                  kSourceUnknown);
-      } else {
-        int8_t source = kSourceUnknown;
-        switch (vector_opcode) {
-          case ucode::AluVectorOpcode::kAdd:
-          case ucode::AluVectorOpcode::kMul:
-          case ucode::AluVectorOpcode::kMax:
-          case ucode::AluVectorOpcode::kMin:
-          case ucode::AluVectorOpcode::kMad: {
-            source = kSourceConstant;
-            for (uint32_t i = 1; i <= vector_operand_count; ++i) {
-              int8_t operand_source = OperandSource(op, i);
-              if (operand_source == kSourceConstant) {
-                continue;
-              }
-              if (operand_source == kSourceUnknown ||
-                  (source != kSourceConstant && source != operand_source)) {
-                source = kSourceUnknown;
-                break;
-              }
-              source = operand_source;
-            }
-            if (source == kSourceConstant) {
-              source = kSourceUnknown;
-            }
-          } break;
-          default:
-            break;
-        }
-        // The coordinates are X and Y: a write that leaves them alone leaves
-        // what the register follows alone.
-        if (vector_mask & 0b0011) {
-          register_source[dest & 63] =
-              (vector_mask & 0b0011) == 0b0011 ? source : kSourceUnknown;
-        }
       }
     }
     if (scalar_mask) {
-      uint32_t dest = op.scalar_dest();
-      UseRegister(dest);
+      UseRegister(op.scalar_dest());
       if (op.is_scalar_dest_relative()) {
         features |= kFeatureRelativeAddressing;
-        std::fill(std::begin(register_source), std::end(register_source),
-                  kSourceUnknown);
-      } else if (scalar_mask & 0b0011) {
-        register_source[dest & 63] = kSourceUnknown;
       }
     }
   }
@@ -261,18 +199,7 @@ struct Walk {
           program->textures.push_back(texture);
         }
         kind = FetchKind::kTexture;
-        int8_t source = tfetch.is_src_relative()
-                            ? kSourceUnknown
-                            : register_source[tfetch.src() & 63];
-        if (shader_type != xenos::ShaderType::kPixel) {
-          source = kSourceUnknown;
-        }
-        if (source < 0) {
-          features |= kFeatureDependentFetch;
-        }
-        info |= (slot << kFetchTextureSlotShift) |
-                ((source < 0 ? kFetchTextureNoGradient : uint32_t(source))
-                 << kFetchTextureGradientShift);
+        info |= slot << kFetchTextureSlotShift;
       } break;
       case ucode::FetchOpcode::kSetTextureLod:
         kind = FetchKind::kSetLod;
@@ -301,10 +228,6 @@ struct Walk {
       UseRegister(op.dest());
       if (op.is_dest_relative()) {
         features |= kFeatureRelativeAddressing;
-        std::fill(std::begin(register_source), std::end(register_source),
-                  kSourceUnknown);
-      } else {
-        register_source[op.dest() & 63] = kSourceUnknown;
       }
     }
   }
@@ -422,11 +345,6 @@ void Build(xenos::ShaderType shader_type, const uint32_t* ucode_dwords,
   walk.instruction_count = instruction_count;
   walk.instruction_seen.resize(instruction_count);
   std::memset(&walk.previous_vfetch_full, 0, sizeof(walk.previous_vfetch_full));
-  for (uint32_t i = 0; i < 64; ++i) {
-    walk.register_source[i] =
-        (shader_type == xenos::ShaderType::kPixel && i < 16) ? int8_t(i)
-                                                             : kSourceUnknown;
-  }
   for (const ucode::ControlFlowInstruction& cf : cfs) {
     if (IsExec(cf.opcode())) {
       walk.Exec(cf.exec);
@@ -460,7 +378,7 @@ const char* GetFeatureName(uint32_t feature_bit_index) {
       "1D textures",
       "depth output",
       "pixel kill",
-      "dependent texture fetches",
+      "(unused)",
       "point size",
       "vertex kill",
   };
