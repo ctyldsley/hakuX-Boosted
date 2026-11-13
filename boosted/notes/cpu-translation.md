@@ -708,8 +708,13 @@ milliseconds in the HIR passes, how many times the simplify/constprop group
 ran and how many iterations that took in all, and milliseconds per pass in
 pipeline order. The pass names are the compiler's mangled type names (for
 example `N2xe3cpu8compiler6passes20ContextPromotionPassE`); the index is the
-position in the list in section 1, where the group is one entry. It adds two
-clock reads per pass per function while on.
+position in the list in section 1, where the group is one entry. A second
+`TranslationStats:` line gives the blocks and HIR instructions translated so
+far and, for r0 to r31, LR, CTR, the CR bytes, the XER bytes, the float
+registers and the vector registers, how many context loads and stores were
+left in the code after the passes (`loads/stores`). These are static counts:
+each instruction once, however often it runs. It adds two clock reads per
+pass and one walk of the finished HIR per function while on.
 
 Suggested order on the device: `log_translation_stats` alone (one run, for
 the numbers); then `a64_lean_extern_thunk`; then that plus
@@ -736,13 +741,15 @@ the numbers); then `a64_lean_extern_thunk`; then that plus
    branches).
 4. **simpleperf, 200 s, the six dispatch threads**, for off and for all on:
    compare `a64_host_code`, the guest code share, and fps.
-5. A table I could not produce without a device and that R1 needs: which
-   guest registers the hot code uses. From the same profile, take the ten
-   hottest guest functions, dump them (`dump_functions_at`), and count
-   `load_context`/`store_context` by offset in the optimised HIR. The
-   offsets map to registers by `PPCContext` (`ppc_context.h`): r0 to r31
-   are 8 bytes each from `offsetof(PPCContext, r)`. That table picks the
-   seven registers to pin.
+5. The table R1 needs: which guest registers the code reloads and re-stores
+   most. The second `TranslationStats:` line is that table over everything
+   translated (static counts). Blocks against instructions also gives the
+   mean block length, which is what bounds the per-block allocator. For the
+   dynamic picture, take the ten hottest guest functions from the profile,
+   dump them (`dump_functions_at`) and count `load_context`/`store_context`
+   by offset in the optimised HIR; r0 to r31 are 8 bytes each from
+   `offsetof(PPCContext, r)`. The two together pick the seven registers to
+   pin.
 
 ## 7. Changes needed in files this branch may not edit
 
@@ -819,8 +826,13 @@ All marked `hakuX-Boosted:` at each change.
 
 ## Build state
 
-See the end of this file's history: the last commit message on the branch
-says whether the Actions run for it was green. Local check: every changed
-file passes `clang++ -fsyntax-only` for an arm64 target against the pinned
-xbyak_aarch64, fmt and date sources (host C library headers, so pointer-size
+- `1446103` (the five settings and this file): Actions run 59, green
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43393557681).
+- The commit after it adds the register counts to `log_translation_stats`
+  (`cpu/compiler/compiler.cc` only). If the branch tip's run is not green,
+  `1446103` is the last known good commit and holds everything else.
+
+Local check before each push: every changed file passes `clang++
+-fsyntax-only` against the pinned xbyak_aarch64, fmt and date sources (arm64
+target for the back end files, with host C library headers, so pointer-size
 noise from those was ignored).
