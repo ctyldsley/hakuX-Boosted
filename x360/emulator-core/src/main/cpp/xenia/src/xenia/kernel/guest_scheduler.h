@@ -468,6 +468,13 @@ class GuestScheduler {
     std::atomic<uint64_t> blocks{0};  // parked in a wait or a sleep
     std::atomic<uint64_t> leaves[size_t(YieldCause::kCount)] = {};
     std::atomic<uint64_t> yield_parks{0};  // yield spinners parked
+    // hakuX-Boosted: why a look at a run of empty yields (every 32nd call)
+    // did not end in a park.
+    std::atomic<uint64_t> yield_park_new_thread{0};  // another yielder
+    std::atomic<uint64_t> yield_park_others_ran{0};  // a dispatch between
+    std::atomic<uint64_t> yield_park_slow{0};        // work between yields
+    std::atomic<uint64_t> yield_park_young{0};       // run under 2 ms old
+    std::atomic<uint64_t> yield_park_barred{0};      // CanParkSpinner no
     std::atomic<uint64_t> poll_parks{0};   // poll loops parked
     std::atomic<uint64_t> apc_pokes{0};
     std::atomic<uint64_t> lock_acquisitions{0};

@@ -1077,13 +1077,24 @@ bool GuestScheduler::NoteEmptyYield(Cpu& cpu, XThread* self) {
     return false;
   }
   const uint64_t seq = cpu.switch_seq.load(std::memory_order_relaxed);
-  if (cpu.streak_thread != self || cpu.streak_seq != seq) {
-    // Another thread, or something was dispatched here since: a new run.
+  if (cpu.streak_thread != self) {
+    // Another thread yielding here: a new run.
+    stats_.yield_park_new_thread.fetch_add(1, std::memory_order_relaxed);
     cpu.streak_thread = self;
     cpu.streak_seq = seq;
     cpu.streak_calls = 0;
     cpu.streak_start_tick = 0;
     cpu.streak_check_tick = 0;
+  } else if (cpu.streak_seq != seq) {
+    // hakuX-Boosted: something else was dispatched on this CPU since. That
+    // used to start the run again, and on device (run 73, Fable II) a
+    // spinner making millions of empty yields a second was parked about
+    // five times a second: other threads wake on its CPU more often than
+    // every 2 ms, so its run never grew old enough. A short visit by
+    // another thread does not make the spinner any less of a spinner; a
+    // long one still restarts the run through the cadence test below.
+    stats_.yield_park_others_ran.fetch_add(1, std::memory_order_relaxed);
+    cpu.streak_seq = seq;
   }
   // The clock is read on every 32nd call.
   if (++cpu.streak_calls & 31) {
@@ -1096,11 +1107,16 @@ bool GuestScheduler::NoteEmptyYield(Cpu& cpu, XThread* self) {
   if (!quick || !cpu.streak_start_tick) {
     // The first look, or the thread did something between its yields: the
     // run's age starts again.
+    stats_.yield_park_slow.fetch_add(1, std::memory_order_relaxed);
     cpu.streak_start_tick = now;
     return false;
   }
-  if (now - cpu.streak_start_tick < yield_park_after_ticks_ ||
-      !CanParkSpinner(self)) {
+  if (now - cpu.streak_start_tick < yield_park_after_ticks_) {
+    stats_.yield_park_young.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  if (!CanParkSpinner(self)) {
+    stats_.yield_park_barred.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
   const uint64_t start = cpu.streak_start_tick;
@@ -2112,6 +2128,15 @@ void GuestScheduler::ReportStatsIfDue() {
       take(stats_.leaves[size_t(YieldCause::kQuantumEnd)]), empty_yields,
       take(stats_.yield_parks), take(stats_.poll_parks),
       take(stats_.apc_pokes));
+  if (cvars::guest_scheduler_park_yield_spinners) {
+    XELOGI(
+        "GuestScheduler: yield spinner looks that did not park: another "
+        "yielder {}, work between yields {}, run under 2 ms {}, not "
+        "allowed here {} | dispatches during a run {}",
+        take(stats_.yield_park_new_thread), take(stats_.yield_park_slow),
+        take(stats_.yield_park_young), take(stats_.yield_park_barred),
+        take(stats_.yield_park_others_ran));
+  }
   {
     uint64_t acquisitions = take(stats_.lock_acquisitions);
     uint64_t wait_ticks = take(stats_.lock_wait_ticks);
