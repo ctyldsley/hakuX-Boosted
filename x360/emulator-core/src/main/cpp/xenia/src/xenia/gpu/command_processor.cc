@@ -720,6 +720,10 @@ void CommandProcessor::WorkerThreadMain() {
 
     // Execute. Note that we handle wraparound transparently.
     const uint64_t fs_exec_begin = FrameStatsBegin();
+    // hakuX-Boosted: see LookAheadPrimaryBuffer.
+    if (cvars::shader_ahead) {
+      LookAheadPrimaryBuffer(read_ptr_index_, write_ptr_index);
+    }
     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
     if (fs_exec_begin) {
       frame_time_stats_.exec_ns += FrameStatsNow() - fs_exec_begin;
@@ -843,6 +847,183 @@ XE_NOINLINE XE_COLD void CommandProcessor::LogKickoffInitator(uint32_t value) {
                     cpu::backend::MAX_GUEST_PSEUDO_STACKTRACE_ENTRIES);
     }
     log_initiator.submit('d');
+  }
+}
+
+// hakuX-Boosted: the look ahead of shader_ahead, see the declaration.
+void CommandProcessor::LookAheadPrimaryBuffer(uint32_t read_index,
+                                              uint32_t write_index) {
+  uint32_t capacity_words = primary_buffer_size_ / sizeof(uint32_t);
+  if (!primary_buffer_ptr_ || !capacity_words ||
+      read_index >= capacity_words || write_index >= capacity_words) {
+    return;
+  }
+  uint32_t word_count =
+      (write_index + capacity_words - read_index) % capacity_words;
+  // What the walk starts from is what the execution will start from.
+  look_ahead_vertex_shader_ = active_vertex_shader_;
+  look_ahead_pixel_shader_ = active_pixel_shader_;
+  look_ahead_told_vertex_shader_ = nullptr;
+  look_ahead_told_pixel_shader_ = nullptr;
+  // A bound on the work of one walk, far above a frame's packets.
+  look_ahead_packets_left_ = 1u << 20;
+  if (look_ahead_shaders_.size() > 16384) {
+    look_ahead_shaders_.clear();
+  }
+  LookAheadRange(memory_->TranslatePhysical(primary_buffer_ptr_),
+                 capacity_words, read_index, word_count, 0);
+}
+
+Shader* CommandProcessor::LookAheadShader(xenos::ShaderType shader_type,
+                                          uint32_t guest_address,
+                                          uint32_t dword_count) {
+  uint32_t physical_address = guest_address & 0x1FFFFFFF;
+  if (!dword_count ||
+      uint64_t(physical_address) + uint64_t(dword_count) * sizeof(uint32_t) >
+          0x20000000ull) {
+    return nullptr;
+  }
+  const uint32_t* host_address =
+      memory_->TranslatePhysical<const uint32_t*>(physical_address);
+  uint64_t key = (uint64_t(physical_address) << 20) |
+                 (uint64_t(dword_count & 0xFFFF) << 4) | uint64_t(shader_type);
+  auto it = look_ahead_shaders_.find(key);
+  if (it != look_ahead_shaders_.end() &&
+      it->second.first_dword == host_address[0] &&
+      it->second.last_dword == host_address[dword_count - 1]) {
+    return it->second.shader;
+  }
+  // The same call the execution of the packet makes: hashes the microcode
+  // and creates the shader object if this is the first time it is seen.
+  Shader* shader = LoadShader(shader_type, host_address, dword_count);
+  LookAheadShaderEntry entry;
+  entry.shader = shader;
+  entry.first_dword = host_address[0];
+  entry.last_dword = host_address[dword_count - 1];
+  look_ahead_shaders_[key] = entry;
+  return shader;
+}
+
+void CommandProcessor::LookAheadRange(const uint8_t* base,
+                                      uint32_t capacity_words,
+                                      uint32_t start_word, uint32_t word_count,
+                                      uint32_t depth) {
+  // capacity_words is 0 for an indirect buffer, which does not wrap.
+  auto word_at = [base, capacity_words, start_word](uint32_t index) {
+    uint32_t position = start_word + index;
+    if (capacity_words) {
+      position %= capacity_words;
+    }
+    return xe::load_and_swap<uint32_t>(base + size_t(position) * 4);
+  };
+  // The packet sizes are ExecutePacket's (pm4_command_processor_implement.h).
+  for (uint32_t i = 0; i < word_count;) {
+    if (!look_ahead_packets_left_) {
+      return;
+    }
+    --look_ahead_packets_left_;
+    const uint32_t packet = word_at(i++);
+    if (!packet || packet == 0x0BADF00D) {
+      continue;
+    }
+    const uint32_t packet_type = packet >> 30;
+    if (packet_type == 0) {
+      i += ((packet >> 16) & 0x3FFF) + 1;
+      continue;
+    }
+    if (packet_type == 1) {
+      i += 2;
+      continue;
+    }
+    if (packet_type == 2) {
+      continue;
+    }
+    const uint32_t opcode = (packet >> 8) & 0x7F;
+    const uint32_t count = ((packet >> 16) & 0x3FFF) + 1;
+    if (count > word_count - i) {
+      return;
+    }
+    // A predicated packet (bit 0) is walked whatever the bin mask will be
+    // when it is executed: at worst a pair is told that is not drawn.
+    switch (opcode) {
+      case PM4_INDIRECT_BUFFER:
+      case PM4_INDIRECT_BUFFER_PFD: {
+        if (count >= 2 && depth < 4) {
+          uint32_t list_address = word_at(i) & 0x1FFFFFFF;
+          uint32_t list_length = word_at(i + 1) & 0xFFFFF;
+          if (list_length &&
+              uint64_t(list_address) + uint64_t(list_length) * 4 <=
+                  0x20000000ull) {
+            LookAheadRange(memory_->TranslatePhysical(list_address), 0, 0,
+                           list_length, depth + 1);
+          }
+        }
+      } break;
+      case PM4_IM_LOAD: {
+        if (count >= 2) {
+          uint32_t address_type = word_at(i);
+          uint32_t dword_count = word_at(i + 1) & 0xFFFF;
+          auto shader_type = xenos::ShaderType(address_type & 0x3);
+          if (shader_type == xenos::ShaderType::kVertex ||
+              shader_type == xenos::ShaderType::kPixel) {
+            Shader* shader =
+                LookAheadShader(shader_type, address_type & ~0x3u, dword_count);
+            if (shader_type == xenos::ShaderType::kVertex) {
+              look_ahead_vertex_shader_ = shader;
+            } else {
+              look_ahead_pixel_shader_ = shader;
+            }
+          }
+        }
+      } break;
+      case PM4_IM_LOAD_IMMEDIATE: {
+        // The microcode is in the packet. Only followed where it does not
+        // wrap around the end of the primary buffer.
+        if (count >= 2) {
+          auto shader_type = xenos::ShaderType(word_at(i));
+          uint32_t dword_count = word_at(i + 1) & 0xFFFF;
+          uint32_t position = start_word + i + 2;
+          if (capacity_words) {
+            position %= capacity_words;
+          }
+          Shader* shader = nullptr;
+          if (dword_count && dword_count <= count - 2 &&
+              (!capacity_words || position + dword_count <= capacity_words) &&
+              (shader_type == xenos::ShaderType::kVertex ||
+               shader_type == xenos::ShaderType::kPixel)) {
+            shader = LoadShader(
+                shader_type,
+                reinterpret_cast<const uint32_t*>(base + size_t(position) * 4),
+                dword_count);
+          }
+          if (shader_type == xenos::ShaderType::kVertex) {
+            look_ahead_vertex_shader_ = shader;
+          } else if (shader_type == xenos::ShaderType::kPixel) {
+            look_ahead_pixel_shader_ = shader;
+          }
+        }
+      } break;
+      case PM4_DRAW_INDX:
+      case PM4_DRAW_INDX_2: {
+        // VGT_DRAW_INITIATOR is the second dword of DRAW_INDX (after the
+        // visibility query word) and the first of DRAW_INDX_2.
+        uint32_t initiator_index = opcode == PM4_DRAW_INDX ? 1 : 0;
+        if (count > initiator_index && look_ahead_vertex_shader_ &&
+            look_ahead_pixel_shader_ &&
+            (look_ahead_vertex_shader_ != look_ahead_told_vertex_shader_ ||
+             look_ahead_pixel_shader_ != look_ahead_told_pixel_shader_)) {
+          look_ahead_told_vertex_shader_ = look_ahead_vertex_shader_;
+          look_ahead_told_pixel_shader_ = look_ahead_pixel_shader_;
+          reg::VGT_DRAW_INITIATOR initiator;
+          initiator.value = word_at(i + initiator_index);
+          OnShaderPairAhead(look_ahead_vertex_shader_, look_ahead_pixel_shader_,
+                            initiator.prim_type);
+        }
+      } break;
+      default:
+        break;
+    }
+    i += count;
   }
 }
 

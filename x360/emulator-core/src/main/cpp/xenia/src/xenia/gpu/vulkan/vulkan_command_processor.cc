@@ -2229,6 +2229,12 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // stats (the game's real frame rate, independent of the host present path).
   xe::RecordGuestPresent();
 
+  // hakuX-Boosted: the allowance of vulkan_placeholder_async_wait_ms is for a
+  // frame.
+  if (pipeline_cache_) {
+    pipeline_cache_->NoteFrameBoundary();
+  }
+
   if (render_target_cache_) {
     render_target_cache_->LogResolveDetailsOnFrameEnd();
   }
@@ -3766,6 +3772,17 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type,
   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
 }
 
+// hakuX-Boosted: shader_ahead.
+void VulkanCommandProcessor::OnShaderPairAhead(
+    Shader* vertex_shader, Shader* pixel_shader,
+    xenos::PrimitiveType guest_primitive_type) {
+  if (pipeline_cache_) {
+    pipeline_cache_->NoteShaderPairAhead(
+        static_cast<VulkanShader*>(vertex_shader),
+        static_cast<VulkanShader*>(pixel_shader), guest_primitive_type);
+  }
+}
+
 bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                        uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
@@ -3875,6 +3892,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   VulkanShader::VulkanTranslation* pixel_shader_translation;
   bool use_interpreter = false;
   bool drop_until_ready = false;
+  // hakuX-Boosted: a full-screen pass that waits for its real pipeline instead
+  // of being drawn with a placeholder (vulkan_placeholder_wait_fullscreen_ms).
+  // The same test as vulkan_async_wait_fullscreen_draws' further down.
+  const bool wait_for_real_pipeline =
+      pipeline_cache_->IsFullscreenRealPipelineWaited() &&
+      (prim_type == xenos::PrimitiveType::kRectangleList ||
+       (!index_buffer_info && index_count <= 4));
   uint32_t normalized_color_mask;
   reg::RB_DEPTHCONTROL normalized_depth_control;
   draw_util::HostDepthPolygonOffset host_depth_polygon_offset;
@@ -4016,8 +4040,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // translated already (a new pipeline of a known vertex shader), whose
         // placeholder would otherwise be compiled from the translated shader
         // on this thread.
+        // hakuX-Boosted: shader_ahead translates vertex shaders before their
+        // first draw, which must not cost that draw the interpreter.
         (!vertex_shader_translation->is_translated() ||
-         cvars::vulkan_placeholder_interpreter_translated_vs) &&
+         cvars::vulkan_placeholder_interpreter_translated_vs ||
+         cvars::shader_ahead) &&
+        !wait_for_real_pipeline &&
         active_vertex_shader_ucode_address_ != 0 &&
         device_properties.fullDrawIndexUint32 &&
         SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
@@ -4061,11 +4089,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // draw being lost. Translating here costs the draw thread the SPIR-V
     // translation the first time a shader is seen; the pipeline itself still
     // compiles in the background and the submission waits for it.
+    // hakuX-Boosted: and a draw that is going to wait for its real pipeline
+    // translates here, so that its bindings are known when it is recorded.
     bool translate_here =
         !async_available ||
         (no_placeholder && !cvars::async_shader_skip_draws) ||
         (!cvars::vulkan_placeholder_pipelines &&
-         cvars::async_shader_translate_on_draw);
+         cvars::async_shader_translate_on_draw) ||
+        wait_for_real_pipeline;
     if (translate_here) {
       if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
                                                     pixel_shader_translation)) {
@@ -4073,7 +4104,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
     drop_until_ready = cvars::vulkan_placeholder_pipelines && no_placeholder &&
-                       cvars::async_shader_skip_draws;
+                       cvars::async_shader_skip_draws &&
+                       !wait_for_real_pipeline;
 
     // Obtain the samplers. Note that the bindings don't depend on the shader
     // modification, so if on the second iteration of this loop it becomes
@@ -4260,18 +4292,83 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           primitive_processing_result, normalized_depth_control,
           normalized_color_mask,
           render_target_cache_->last_update_render_pass_key(), use_interpreter,
-          &pipeline)) {
+          &pipeline, wait_for_real_pipeline)) {
     XELOGE("IssueDraw: ConfigurePipeline failed for VS={:016X} PS={:016X}",
            vertex_shader->ucode_data_hash(),
            pixel_shader ? pixel_shader->ucode_data_hash() : 0);
     return false;
   }
 
+  // hakuX-Boosted: for the log, which of the conditions of use_interpreter
+  // (above, in the same order) kept the interpreter from standing in for this
+  // draw's vertex shader. Only worked out for a draw that is skipped.
+  auto interpreter_refusal = [&]() -> uint32_t {
+    uint32_t reasons = 0;
+    if (!cvars::async_shader_vs_interpreter) {
+      reasons |= VulkanPipelineCache::kSkipInterpreterOff;
+    }
+    if (vertex_shader_translation->is_translated() &&
+        !cvars::vulkan_placeholder_interpreter_translated_vs &&
+        !cvars::shader_ahead) {
+      reasons |= VulkanPipelineCache::kSkipVertexShaderTranslated;
+    }
+    if (active_vertex_shader_ucode_address_ == 0) {
+      reasons |= VulkanPipelineCache::kSkipInlineShader;
+    }
+    if (!device_properties.fullDrawIndexUint32) {
+      reasons |= VulkanPipelineCache::kSkipDeviceIndices;
+    }
+    if (SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
+            device_properties.maxStorageBufferRange) != 0) {
+      reasons |= VulkanPipelineCache::kSkipDeviceSharedMemory;
+    }
+    if (Shader::IsHostVertexShaderTypeDomain(
+            primitive_processing_result.host_vertex_shader_type)) {
+      reasons |= VulkanPipelineCache::kSkipTessellated;
+    } else if (primitive_processing_result.host_vertex_shader_type !=
+               Shader::HostVertexShaderType::kVertex) {
+      reasons |= VulkanPipelineCache::kSkipHostVertexShaderType;
+    }
+    if (primitive_processing_result.host_primitive_type ==
+        xenos::PrimitiveType::kPointList) {
+      reasons |= VulkanPipelineCache::kSkipPointList;
+    }
+    if (!cvars::vulkan_placeholder_interpreter_geometry &&
+        (primitive_processing_result.host_primitive_type ==
+             xenos::PrimitiveType::kRectangleList ||
+         primitive_processing_result.host_primitive_type ==
+             xenos::PrimitiveType::kQuadList)) {
+      reasons |= VulkanPipelineCache::kSkipRectangleOrQuadList;
+    }
+    if (!vertex_shader->texture_bindings().empty()) {
+      reasons |= VulkanPipelineCache::kSkipVertexTextureFetch;
+    }
+    if (vertex_shader->uses_subroutine_calls()) {
+      reasons |= VulkanPipelineCache::kSkipSubroutineCalls;
+    }
+    if (vertex_shader->memexport_eM_written() != 0) {
+      reasons |= VulkanPipelineCache::kSkipMemoryExport;
+    }
+    if (vertex_shader->constant_register_map().loop_bitmap != 0) {
+      reasons |= VulkanPipelineCache::kSkipLoops;
+    }
+    return reasons;
+  };
+  const uint64_t skip_vertex_shader_hash = vertex_shader->ucode_data_hash();
+  const uint64_t skip_pixel_shader_hash =
+      pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+
   if (drop_until_ready) {
     // Non-interpretable draw whose shaders weren't translated yet - it has been
     // queued for background creation; skip drawing it until the real pipeline
     // is ready (a later frame renders it). Never translate/compile on the draw
     // thread for these.
+    // hakuX-Boosted: why, once for each pair of shaders.
+    pipeline_cache_->NoteDrawSkipped(
+        skip_vertex_shader_hash, skip_pixel_shader_hash,
+        interpreter_refusal() |
+            VulkanPipelineCache::kSkipVertexShaderNotTranslated,
+        pipeline);
     XELOGI(
         "Draw skipped (no interpreter placeholder, real pipeline not ready): "
         "VS {:016X}, PS {:016X}",
@@ -4287,6 +4384,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       current_pipeline == VK_NULL_HANDLE) {
     // Placeholder mode: real pipeline not created yet and no placeholder -
     // skip this draw rather than stalling the draw thread.
+    // hakuX-Boosted: why, once for each pair of shaders.
+    pipeline_cache_->NoteDrawSkipped(
+        skip_vertex_shader_hash, skip_pixel_shader_hash,
+        (use_interpreter ? 0 : interpreter_refusal()) |
+            VulkanPipelineCache::kSkipNoPipeline,
+        pipeline);
     XELOGI("Draw skipped (pipeline not ready yet): VS {:016X}, PS {:016X}",
            vertex_shader->ucode_data_hash(),
            pixel_shader ? pixel_shader->ucode_data_hash() : 0);
@@ -4318,6 +4421,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       current_pipeline ==
           pipeline->placeholder_pipeline.load(std::memory_order_acquire) &&
       pipeline->uses_interpreter.load(std::memory_order_acquire)) {
+    // hakuX-Boosted: counted and explained, it used to be silent.
+    if (cvars::vulkan_placeholder_pipelines) {
+      pipeline_cache_->NoteDrawSkipped(
+          skip_vertex_shader_hash, skip_pixel_shader_hash,
+          VulkanPipelineCache::kSkipInterpreterPlaceholderInlineShader,
+          pipeline);
+    }
     return true;
   }
 
@@ -4377,6 +4487,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (!stand_in_candidates) {
       // Should not happen (the pipeline was made for one of them): nothing
       // valid to bind to the stand-in's texture, so no draw.
+      pipeline_cache_->NoteDrawSkipped(
+          skip_vertex_shader_hash, skip_pixel_shader_hash,
+          VulkanPipelineCache::kSkipStandInNoTexture, pipeline);
       return true;
     }
   }
@@ -4387,6 +4500,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         static_cast<const PipelineLayout*>(stand_in_layout);
     if (stand_in_pipeline_layout->texture_count_vertex() ||
         stand_in_pipeline_layout->sampler_count_vertex()) {
+      pipeline_cache_->NoteDrawSkipped(
+          skip_vertex_shader_hash, skip_pixel_shader_hash,
+          VulkanPipelineCache::kSkipStandInVertexBindings, pipeline);
       return true;
     }
   }
@@ -4476,6 +4592,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       if (stand_in_sampler == VK_NULL_HANDLE) {
         // No sampler to be had in this submission: the draw waits for the
         // real pipeline, as it would without the stand-in.
+        pipeline_cache_->NoteDrawSkipped(
+            skip_vertex_shader_hash, skip_pixel_shader_hash,
+            VulkanPipelineCache::kSkipStandInNoSampler, pipeline);
         return true;
       }
       // The pixel stage's samplers of this draw are the stand-in's one. The
