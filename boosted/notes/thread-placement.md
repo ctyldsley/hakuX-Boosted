@@ -632,14 +632,12 @@ worth. None was built.
   The link is the proof that `host_perf.cc` is in the build: the call in
   `frame_stats.h` would not resolve otherwise.
 - `21673a5` (inherited masks freed, the `other threads` line): its run,
-  67, was still compiling when the commit after it was pushed, and a
-  newer push cancels the run before it. That later commit changes only
-  this file and adds the summary script, so the run of the branch's tip
-  builds the same code as `21673a5`. **Read the newest run of
-  `claude/thread-placement` in Actions before taking the branch**: it had
-  not finished when this was written. The second version of the code was
-  compiled here only with clang 18 and gcc 13 on Linux, warnings as
-  errors, like the first before run 56 passed it.
+  67, was cancelled by the push after it (a newer push replaces a run
+  that is still going). Its code is built by the next entry.
+- `8964c8f` (the same code as `21673a5`, plus the summary script and
+  notes): Actions run 69, green, both jobs.
+- The commit that records the line above changes nothing but this
+  section.
 
 ## Appendix A: RPCS3, Vita3K, Xenia (upstream)
 
