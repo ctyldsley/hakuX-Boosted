@@ -17,7 +17,7 @@ Done:
 - Stage 1, the stand-in pixel shader: `3810bd9`, built green as run 60.
 - Stage 2, placeholders for draws that had none (draws without a pixel
   shader, rectangle and quad lists) and a fuller vertex interpreter for the
-  stand-in: `a68d869` and `5041d69`. Build status: see "Builds" below.
+  stand-in: `a68d869` and `5041d69`, built green together as run 70.
 - Stage 3, design notes for a pixel ucode interpreter: in this file.
 
 In progress: nothing.
@@ -31,11 +31,10 @@ shown what stage 1 looks like.
 |---|---|---|
 | `3810bd9` | stage 1 | 60, green |
 | `a68d869` | stage 2 (depth-only and geometry placeholders) | 68, cancelled by the next push before it finished (a newer push replaces a running build) |
-| `5041d69` and this file | stage 2 (interpreter vertex formats), notes | the run of the branch's tip: check it before merging |
+| `b7cd98d` | everything: stages 1 and 2, the interpreter's vertex formats, the notes | 70, green (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43437128627) |
 
-The tip's run builds everything above together. If this table still says
-"check it", look at the newest run of `claude/pixel-stand-in` on GitHub
-Actions: the branch is only mergeable if that one is green.
+Run 70 is the build of all the code on this branch. The only commit after
+`b7cd98d` changes this file alone.
 
 ## What was built
 
