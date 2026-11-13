@@ -7,13 +7,22 @@ device. The only check is a green GitHub Actions build.
 
 Done:
 - Read the placeholder model end to end (findings below).
+- Stage 1, the stand-in pixel shader: `3810bd9`, built green as run 60
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43393570519).
+  Settings `vulkan_placeholder_ps_mode` (0 as now, 1 approximation with
+  alpha 1, 2 approximation with alpha and the guest alpha test),
+  `vulkan_placeholder_real_vs` (true as now),
+  `vulkan_placeholder_interpreter_translated_vs` (false as now).
 
 In progress:
-- Stage 1: the stand-in pixel shader (`vulkan_placeholder_ps_mode`).
+- Stage 2: placeholders for draws the interpreter does not cover today
+  (draws without a pixel shader, rectangle and quad lists), each behind its
+  own setting, and the list of what still gets none.
 
 Next:
-- Stage 2: which draws get no stand-in, and widening the interpreter.
 - Stage 3: design notes for a pixel ucode interpreter.
+- The full write-up of this file (settings to flip, what to read in
+  `xe.log`, upstream files changed, what the build cannot show).
 
 ## Findings from reading the code (before any change)
 
