@@ -209,6 +209,21 @@ class GuestScheduler {
   // A spin-wait's backoff site: answers the probe (the thread is running).
   void SkewAtBackoff(XThread* self);
 
+  // hakuX-Boosted: guest_scheduler_park_waits. Something happened that can
+  // end a guest thread's busy wait: a kernel object was signalled, a
+  // critical section was left, a thread stopped running, an APC was queued,
+  // the GPU raised an interrupt or moved on. A spinner about to park looks
+  // again instead, and parked ones are re-readied (no sooner than the
+  // shortest park). Safe from any thread; one load when nothing spins.
+  void NoteWaitEvent() {
+    if (wait_armed_until_.load(std::memory_order_relaxed)) {
+      WakeParkedWaits();
+    }
+  }
+  // A visit to a recognised pause-and-poll loop's backoff site in translated
+  // code (MemoryPollParkPass, a64_seq_memory.cc), on the fiber.
+  void PollSiteVisit(XThread* self, void* raw_context, uint32_t site);
+
   // Parks the running guest fiber on its CPU's blocked list and yields. Returns
   // once the dispatcher re-readies it so the wait can re-poll. A single-object
   // wait on an epoch-bumping type is re-readied only when the epoch moves past
@@ -310,6 +325,25 @@ class GuestScheduler {
     // anyway. RunLoop re-checks them after setting this, so a wake that only
     // saw it false is never slept through.
     std::atomic<bool> parked{false};
+    // hakuX-Boosted: guest_scheduler_park_waits. The dispatch thread's
+    // sleep while a parked spinner's deadline is under a millisecond away:
+    // the ready event only takes whole milliseconds, so it sleeps on this
+    // condition variable instead and wakers signal it (WakeDispatchThread).
+    // fine_parked is stored before parked and says which of the two this
+    // sleep is; it is never true with the setting off.
+    std::atomic<bool> fine_parked{false};
+    std::mutex fine_mutex;
+    std::condition_variable fine_cv;
+    bool fine_signal = false;  // guarded by fine_mutex
+    // Parked spinners on this CPU's blocked list. Written under lock_, read
+    // without it as a hint by WakeParkedWaits.
+    std::atomic<uint32_t> wait_parked{0};
+    // A wake for them has been asked for and not yet carried out.
+    std::atomic<bool> wait_wake_noted{false};
+    bool wake_wait_parks = false;  // guarded by lock_
+    // The earliest raw-tick deadline among them, 0 = none. Written under
+    // lock_ by this CPU's dispatch thread and the fibers on it only.
+    uint64_t next_fine_repoll_tick = 0;
     // Counts fiber dispatches on this CPU, so a yielder can tell whether
     // anything else ran before it resumed.
     std::atomic<uint64_t> switch_seq{0};
@@ -376,6 +410,18 @@ class GuestScheduler {
     // code: translation, a long kernel call) and "it was not".
     int skew_cpu_clock = 0;
     std::atomic<bool> skew_cpu_clock_valid{false};
+    // hakuX-Boosted: guest_scheduler_skew_host_progress. While a probe is
+    // outstanding the watchdog reads this thread's CPU-time clock once a
+    // tick: the share of the last tick it spent on a core, in thousandths,
+    // and when that was measured (raw tick, 0 = never). A thread that is on
+    // a core and not answering is in host code for the guest (the
+    // translator, a long kernel call), not descheduled.
+    std::atomic<uint32_t> skew_oncore_permille{0};
+    std::atomic<uint64_t> skew_oncore_sample_tick{0};
+    // The watchdog's previous reading, its own.
+    uint64_t skew_sample_prev_tick = 0;
+    uint64_t skew_sample_prev_probe = 0;
+    int64_t skew_sample_prev_ns = -1;
   };
 
   // The dispatch thread a thread is pinned to by its guest current_cpu.
@@ -425,6 +471,44 @@ class GuestScheduler {
   // Out-of-line so the yield fast path stays a single relaxed bool load.
   void ReportGlobalLockHazard();
 
+  // hakuX-Boosted: wakes |cpu|'s dispatch thread from whichever sleep it is
+  // in. Callers have tested cpu.parked.
+  void WakeDispatchThread(Cpu& cpu);
+  // The dispatch thread's sub-millisecond sleep (Cpu::fine_parked).
+  void FineSleep(Cpu& cpu, uint64_t micros);
+
+  // hakuX-Boosted: the empty yield's short way (guest_scheduler_lean_yield
+  // and the park settings): no lock, no clock read, no switch, no lookup.
+  // -1 = not taken, the caller goes the long way; 0 or 1 = the yield's
+  // answer.
+  int TryEmptyYield(XThread* self, bool quantum_end);
+
+  // hakuX-Boosted: guest_scheduler_park_waits (the comment above WaitPark in
+  // the .cc file is the design).
+  bool park_waits_ = false;
+  bool lean_yield_ = false;
+  uint64_t wait_park_after_ticks_ = 0;
+  uint64_t wait_park_first_ticks_ = 0;
+  uint64_t wait_park_min_ticks_ = 0;
+  uint64_t wait_park_max_ticks_ = 0;
+  uint64_t wait_arm_window_ticks_ = 0;
+  uint64_t poll_gap_ticks_ = 0;
+  // Raw tick until which some thread is between arming and parking; 0 until
+  // the first arming, so the hooks cost one load with the setting off.
+  std::atomic<uint64_t> wait_armed_until_{0};
+  // Moves at every event that can end a busy wait while a thread is armed
+  // or parked.
+  std::atomic<uint64_t> wait_wake_seq_{0};
+  std::atomic<uint32_t> wait_parked_total_{0};
+  void WakeParkedWaits();
+  // An empty yield by |self|: true if it parked (and is back).
+  bool NoteWaitSpin(XThread* self);
+  // The second half of both parks: arm, or park if nothing happened since.
+  bool TryWaitPark(XThread* self, uint64_t now, bool poll);
+  void WaitPark(XThread* self, uint64_t now, uint64_t length_ticks);
+  // |links| is leaving the blocked list by a way other than RereadyBlocked.
+  void DropWaitParkLocked(XThread* thread);
+
   // hakuX-Boosted: lock_ taken through this, so that with
   // guest_scheduler_stats on the once-a-second line can say how long the
   // dispatch threads waited for the one lock and how long they held it.
@@ -446,6 +530,15 @@ class GuestScheduler {
   uint64_t skew_bound_ticks_ = 0;
   uint64_t skew_cap_ticks_ = 0;
   bool skew_progress_gate_ = true;
+  // hakuX-Boosted: guest_scheduler_skew_host_progress, and how old the
+  // watchdog's reading may be to be believed.
+  bool skew_host_progress_ = false;
+  uint64_t skew_sample_fresh_ticks_ = 0;
+  // Times a CPU with an overdue probe was found busy on a core and so not
+  // taken for stalled. Mutable: SkewCpuStalled is a const look.
+  mutable std::atomic<uint64_t> skew_host_busy_{0};
+  // The watchdog's part, before it takes lock_.
+  void SkewSampleHostThreads();
   // Fibers waiting in a hold, and what they sleep on. skew_mutex_ is a leaf:
   // nothing else is taken while it is held and it is never taken under
   // lock_.
@@ -586,6 +679,17 @@ class GuestScheduler {
     std::atomic<uint64_t> yield_park_young{0};       // run under 2 ms old
     std::atomic<uint64_t> yield_park_barred{0};      // CanParkSpinner no
     std::atomic<uint64_t> poll_parks{0};   // poll loops parked
+    // hakuX-Boosted: guest_scheduler_park_waits.
+    std::atomic<uint64_t> wait_parks_yield{0};  // parks of yield spinners
+    std::atomic<uint64_t> wait_parks_poll{0};   // parks at a poll site
+    std::atomic<uint64_t> wait_park_ticks{0};   // time parked, all parks
+    std::atomic<uint64_t> wait_ended_timer{0};  // ended by their deadline
+    std::atomic<uint64_t> wait_ended_event{0};  // ended early by an event
+    std::atomic<uint64_t> wait_looks_event{0};  // an event since arming
+    std::atomic<uint64_t> wait_looks_barred{0};  // CanParkSpinner said no
+    std::atomic<uint64_t> wait_events{0};       // events counted while armed
+    std::atomic<uint64_t> poll_visits{0};       // poll site visits looked at
+    std::atomic<uint64_t> poll_changed{0};      // registers differed
     std::atomic<uint64_t> apc_pokes{0};
     std::atomic<uint64_t> lock_acquisitions{0};
     std::atomic<uint64_t> lock_wait_ticks{0};

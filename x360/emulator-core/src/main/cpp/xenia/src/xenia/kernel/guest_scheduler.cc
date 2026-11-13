@@ -41,6 +41,19 @@
 
 DECLARE_path(log_file);
 
+// hakuX-Boosted: defined in cpu/backend/a64/a64_seq_memory.cc, beside the
+// site that calls it (park_pause_poll_loops). The a64 backend is the only
+// one that has such sites.
+#if XE_ARCH_ARM64
+namespace xe {
+namespace cpu {
+namespace backend {
+extern void (*spin_poll_site_handler)(void* raw_context, uint64_t site);
+}  // namespace backend
+}  // namespace cpu
+}  // namespace xe
+#endif
+
 DEFINE_bool(
     guest_scheduler_stats, false,
     "Log guest scheduler counters once a second: blocked-waiter re-poll rate, "
@@ -120,6 +133,40 @@ DEFINE_uint32(
     "dispatch thread every 2 ms.",
     "Kernel");
 
+// hakuX-Boosted: busy waits that sleep (boosted/notes/guest-waits.md). The
+// earlier parks slept a whole millisecond at a time, were woken by nothing
+// but the clock, and needed 2 ms of unbroken spinning first, which a thread
+// that spins in bursts of 1.5 to 3 ms between short waits never gives them
+// (run 78: nine parks a second). These sleep from a tenth of a millisecond,
+// are ended by whatever can end the wait, and judge each burst on its own.
+DEFINE_bool(
+    guest_scheduler_park_waits, false,
+    "A guest thread that busy-waits (NtYieldExecution or a zero delay in "
+    "quick succession with nothing else to run, or a recognised "
+    "pause-and-poll loop in translated code, see park_pause_poll_loops) is "
+    "parked once the wait has lasted guest_scheduler_park_wait_after_us: "
+    "first for a tenth of a millisecond, then twice as long each time up to "
+    "guest_scheduler_park_wait_max_us. A park ends early when something "
+    "that can end the wait happens: a kernel object is signalled, a "
+    "critical section is left, another guest thread stops running, an APC "
+    "is queued, the GPU raises an interrupt. Implies "
+    "guest_scheduler_lean_yield and replaces "
+    "guest_scheduler_park_yield_spinners and guest_scheduler_park_poll_loops.",
+    "Kernel");
+DEFINE_uint32(
+    guest_scheduler_park_wait_after_us, 200,
+    "With guest_scheduler_park_waits: how long one burst of busy waiting "
+    "lasts before the thread is first parked. A wait that ends sooner is "
+    "never slowed.",
+    "Kernel");
+DEFINE_uint32(
+    guest_scheduler_park_wait_max_us, 1000,
+    "With guest_scheduler_park_waits: the longest single park, in "
+    "microseconds (clamped to 100..4000). It is the most a busy wait can "
+    "be answered late when what it waits for is a plain memory write that "
+    "nothing reports.",
+    "Kernel");
+
 // hakuX-Boosted: the bound on the skew between guest CPUs
 // (boosted/notes/guest-skew-bound.md). The console's six hardware threads
 // all run at once; here each is a host thread the phone may leave without a
@@ -154,6 +201,23 @@ DEFINE_bool(
     "thread while another guest CPU's running thread shows no progress (its "
     "host thread descheduled, or busy in host code such as translation). "
     "False leaves only the hold of a thread that readied another.",
+    "Kernel");
+
+// hakuX-Boosted: run 90 measured what the progress gate costs before the
+// first frame: 27 s against 8 s, 1,221 holds and 35.3 s held while the
+// title's main thread was in the translator or a long kernel call. Such a
+// thread does not answer its probe, but its host thread is on a core doing
+// the guest's work: it is not the case the bound exists for (a dispatch
+// thread the phone has taken off its core). The two are told apart by the
+// dispatch thread's own CPU-time clock.
+DEFINE_bool(
+    guest_scheduler_skew_host_progress, true,
+    "With guest_scheduler_skew_bound_us set: a guest CPU whose running "
+    "thread has not reached a safepoint is not taken for stalled while its "
+    "host thread is on a core (at least half of the last watchdog tick, by "
+    "the thread's CPU-time clock): it is in the translator or a kernel "
+    "call, working for the guest. Only a host thread that is not being run "
+    "holds the others. False judges by the safepoint alone, as before.",
     "Kernel");
 
 namespace xe {
@@ -201,6 +265,17 @@ static constexpr uint64_t kYieldParkAfterUs = 2000;
 static constexpr uint64_t kYieldSpinGapUs = 20;
 static constexpr uint64_t kPollParkAfterUs = 500;
 
+// hakuX-Boosted: guest_scheduler_park_waits. The first park of a burst, the
+// shortest time a park lasts even when an event asks for the thread sooner
+// (which bounds how often a busy neighbour can wake a spinner), how long an
+// armed thread has to reach its park before it must arm again, and the
+// longest eight passes of a pause-and-poll loop may take to count as one
+// unbroken wait.
+static constexpr uint64_t kWaitParkFirstUs = 100;
+static constexpr uint64_t kWaitParkMinUs = 50;
+static constexpr uint64_t kWaitArmWindowUs = 2000;
+static constexpr uint64_t kPollGapUs = 400;
+
 // hakuX-Boosted: guest_scheduler_skew_bound_us. How long a held fiber sleeps
 // before it looks again without having been woken (a preemption of the held
 // thread is only seen this way), the hold length from which each hold is
@@ -210,6 +285,10 @@ static constexpr uint64_t kPollParkAfterUs = 500;
 static constexpr uint64_t kSkewHoldSliceUs = 200;
 static constexpr uint64_t kSkewHoldLogUs = 4000;
 static constexpr int32_t kSkewWatchdogPriority = 28;
+// guest_scheduler_skew_host_progress: the share of a tick on a core, in
+// thousandths, from which a host thread counts as working. Four dispatch
+// threads packed on one core get a quarter each (run 73) and stay below it.
+static constexpr uint32_t kSkewOnCorePermille = 500;
 
 // Defined with the yield spinner's park below; a hold has the same rule.
 static bool CanParkSpinner(XThread* self);
@@ -405,6 +484,18 @@ static void SpinBackoffYieldFiber(void* raw_context) {
                                 GuestScheduler::YieldCause::kSpinSite);
 }
 
+// hakuX-Boosted: a pause-and-poll loop's site in translated code
+// (park_pause_poll_loops), called on every pass of the loop.
+XE_MAYBE_UNUSED static void PollSiteVisitFiber(void* raw_context,
+                                               uint64_t site) {
+  XThread* self = FiberThreadOf(raw_context);
+  if (!self) {
+    return;  // guest code on a thread the scheduler does not run
+  }
+  self->kernel_state()->guest_scheduler()->PollSiteVisit(self, raw_context,
+                                                         uint32_t(site));
+}
+
 // Raw host ticks per us for the watchdog's deadline math, 0 if unusable.
 static double CalibrateTicksPerUs() {
   // Median of three short samples. A single busy-spin sample can be stretched
@@ -469,6 +560,9 @@ void GuestScheduler::EnsureStarted() {
   }
   xe::cpu::backend::preempt_yield_handler = &PreemptCurrentFiber;
   xe::cpu::backend::spin_backoff_yield_handler = &SpinBackoffYieldFiber;
+#if XE_ARCH_ARM64
+  xe::cpu::backend::spin_poll_site_handler = &PollSiteVisitFiber;  // hakuX-Boosted
+#endif
   // Not in the ctor, which runs before per-title cvar overrides are applied.
   double ticks_per_us = CalibrateTicksPerUs();
   ticks_per_us_ = ticks_per_us;
@@ -479,6 +573,33 @@ void GuestScheduler::EnsureStarted() {
                           : kYieldParkAfterUs));
   yield_gap_ticks_ = uint64_t(ticks_per_us * kYieldSpinGapUs);
   poll_park_after_ticks_ = uint64_t(ticks_per_us * kPollParkAfterUs);
+  // hakuX-Boosted: guest_scheduler_park_waits, read once, before any
+  // dispatch thread exists. It needs the counter (0 = did not calibrate).
+  park_waits_ = cvars::guest_scheduler_park_waits && ticks_per_us > 0.0;
+  lean_yield_ = park_waits_ || cvars::guest_scheduler_lean_yield ||
+                cvars::guest_scheduler_park_yield_spinners;
+  if (park_waits_) {
+    const uint64_t max_us = std::min<uint64_t>(
+        4000, std::max<uint64_t>(kWaitParkFirstUs,
+                                 cvars::guest_scheduler_park_wait_max_us));
+    wait_park_after_ticks_ = std::max<uint64_t>(
+        1, uint64_t(ticks_per_us * cvars::guest_scheduler_park_wait_after_us));
+    wait_park_first_ticks_ =
+        std::max<uint64_t>(1, uint64_t(ticks_per_us * kWaitParkFirstUs));
+    wait_park_min_ticks_ =
+        std::max<uint64_t>(1, uint64_t(ticks_per_us * kWaitParkMinUs));
+    wait_park_max_ticks_ = std::max<uint64_t>(
+        wait_park_first_ticks_, uint64_t(ticks_per_us * max_us));
+    wait_arm_window_ticks_ =
+        std::max<uint64_t>(1, uint64_t(ticks_per_us * kWaitArmWindowUs));
+    poll_gap_ticks_ =
+        std::max<uint64_t>(1, uint64_t(ticks_per_us * kPollGapUs));
+    XELOGI(
+        "GuestScheduler: busy waits are parked after {} us, for {} us at "
+        "first and {} us at most, and woken by events",
+        uint32_t(cvars::guest_scheduler_park_wait_after_us), kWaitParkFirstUs,
+        max_us);
+  }
   if (cvars::guest_scheduler_lean_yield ||
       cvars::guest_scheduler_park_yield_spinners ||
       cvars::guest_scheduler_park_poll_loops ||
@@ -521,14 +642,20 @@ void GuestScheduler::EnsureStarted() {
           1, uint64_t(cvars::guest_scheduler_skew_cap_multiple));
       skew_cap_ticks_ = skew_bound_ticks_ * multiple;
       skew_progress_gate_ = cvars::guest_scheduler_skew_progress_gate;
+      // hakuX-Boosted: guest_scheduler_skew_host_progress.
+      skew_host_progress_ = cvars::guest_scheduler_skew_host_progress;
+      const uint64_t tick_us =
+          std::max(uint64_t(cvars::guest_scheduler_quantum_us),
+                   uint64_t(kMinWatchdogPeriodUs));
+      skew_sample_fresh_ticks_ = uint64_t(ticks_per_us * double(tick_us) * 3);
       XELOGI(
           "GuestScheduler: skew bound {} us, one hold at most {} us, "
-          "progress gate {}, judged every {} us (the watchdog tick)",
+          "progress gate {}, judged every {} us (the watchdog tick), a host "
+          "thread busy in host code {}",
           uint32_t(cvars::guest_scheduler_skew_bound_us),
           uint64_t(cvars::guest_scheduler_skew_bound_us) * multiple,
-          skew_progress_gate_ ? "on" : "off",
-          std::max(uint64_t(cvars::guest_scheduler_quantum_us),
-                   uint64_t(kMinWatchdogPeriodUs)));
+          skew_progress_gate_ ? "on" : "off", tick_us,
+          skew_host_progress_ ? "counts as progress" : "counts as stalled");
     }
   }
 
@@ -570,6 +697,8 @@ void GuestScheduler::Shutdown() {
   for (Cpu& cpu : cpus_) {
     if (cpu.ready_event) {
       cpu.ready_event->Set();
+      // hakuX-Boosted: and the sub-millisecond sleep, if it is in that.
+      WakeDispatchThread(cpu);
     }
   }
   if (io_event_) {
@@ -668,6 +797,33 @@ void GuestScheduler::Shutdown() {
   stopped_.store(true);
 }
 
+// hakuX-Boosted: with guest_scheduler_park_waits a dispatch thread whose
+// next deadline is a parked spinner's sleeps on its condition variable (the
+// ready event's wait only takes whole milliseconds). fine_parked is stored
+// before parked, so a waker that saw parked sees which sleep it is; a waker
+// that did not see parked has made its work visible under lock_ first, and
+// the dispatch thread looks at its queues under lock_ after it stores
+// parked (the rule the ready event already relies on).
+void GuestScheduler::WakeDispatchThread(Cpu& cpu) {
+  if (cpu.fine_parked.load()) {
+    {
+      std::lock_guard<std::mutex> lock(cpu.fine_mutex);
+      cpu.fine_signal = true;
+    }
+    cpu.fine_cv.notify_one();
+    return;
+  }
+  if (cpu.ready_event) {
+    cpu.ready_event->Set();
+  }
+}
+
+void GuestScheduler::FineSleep(Cpu& cpu, uint64_t micros) {
+  std::unique_lock<std::mutex> lock(cpu.fine_mutex);
+  cpu.fine_cv.wait_for(lock, std::chrono::microseconds(micros),
+                       [&cpu] { return cpu.fine_signal; });
+}
+
 void GuestScheduler::EnqueueReady(XThread* thread, int cpu_index,
                                   bool yield_to_other) {
   // hakuX-Boosted: guest_scheduler_skew_bound_us. A guest thread that makes
@@ -720,7 +876,7 @@ void GuestScheduler::EnqueueReady(XThread* thread, int cpu_index,
   }
   // Only a parked dispatch thread needs the syscall.
   if (cpus_[cpu_index].parked.load() && cpus_[cpu_index].ready_event) {
-    cpus_[cpu_index].ready_event->Set();
+    WakeDispatchThread(cpus_[cpu_index]);
   }
 }
 
@@ -925,6 +1081,7 @@ bool GuestScheduler::ForgetThread(XThread* thread) {
       }
     } else if (links.blocked) {
       UnlinkLocked(cpu.blocked_head, cpu.blocked_tail, thread);
+      DropWaitParkLocked(thread);  // hakuX-Boosted
     } else if (links.suspended) {
       UnlinkLocked(cpu.suspended_head, cpu.suspended_tail, thread);
     }
@@ -968,6 +1125,7 @@ bool GuestScheduler::TerminateThread(XThread* thread) {
           }
         } else if (links.blocked) {
           UnlinkLocked(cpu.blocked_head, cpu.blocked_tail, thread);
+          DropWaitParkLocked(thread);  // hakuX-Boosted
         } else if (links.suspended) {
           UnlinkLocked(cpu.suspended_head, cpu.suspended_tail, thread);
         }
@@ -990,6 +1148,7 @@ bool GuestScheduler::TerminateThread(XThread* thread) {
       Cpu& cpu = cpus_[links.cpu];
       if (links.blocked) {
         UnlinkLocked(cpu.blocked_head, cpu.blocked_tail, thread);
+        DropWaitParkLocked(thread);  // hakuX-Boosted
       } else {
         UnlinkLocked(cpu.suspended_head, cpu.suspended_tail, thread);
       }
@@ -1008,7 +1167,7 @@ bool GuestScheduler::TerminateThread(XThread* thread) {
   }
   if (wake_cpu >= 0 && cpus_[wake_cpu].parked.load() &&
       cpus_[wake_cpu].ready_event) {
-    cpus_[wake_cpu].ready_event->Set();
+    WakeDispatchThread(cpus_[wake_cpu]);
   }
   return false;
 }
@@ -1171,12 +1330,29 @@ void GuestScheduler::ExitIfTerminated() {
 bool GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower,
                                         YieldCause cause,
                                         XThread* known_self) {
+  // hakuX-Boosted: the empty yield first, and by itself. A title's main
+  // thread makes half a million of these a second with nothing else to run
+  // (run 90's profile: the yield and dispatch path was most of the 48% of
+  // its core that was not translated code). Everything the long way does
+  // for such a call is in TryEmptyYield; anything else falls through.
+  if (lean_yield_ && (cause == YieldCause::kNtYield ||
+                      cause == YieldCause::kZeroDelay)) {
+    XThread* fiber_thread =
+        known_self ? known_self : XThread::GetCurrentFiberThread();
+    if (fiber_thread) {
+      const int answer = TryEmptyYield(fiber_thread, quantum_end);
+      if (answer >= 0) {
+        return answer != 0;
+      }
+      known_self = fiber_thread;
+    }
+  }
   if (!OnDispatchThread("YieldCurrentThread")) {
     return false;
   }
   // An externally terminated thread stops here.
   ExitIfTerminated();
-  XThread* self = XThread::GetCurrentThread();
+  XThread* self = known_self ? known_self : XThread::GetCurrentThread();
   auto& links = self->scheduler_links();
   // hakuX-Boosted: a yield the guest asked for means it is not sitting in a
   // spin-wait, which ends a poll-loop watch (the JIT hooks keep their own).
@@ -1246,7 +1422,8 @@ bool GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower,
       cpu.empty_yields.store(
           cpu.empty_yields.load(std::memory_order_relaxed) + 1,
           std::memory_order_relaxed);
-      if (guest_call && cvars::guest_scheduler_park_yield_spinners) {
+      if (guest_call && cvars::guest_scheduler_park_yield_spinners &&
+          !park_waits_) {
         uint64_t seq_before_park =
             cpu.switch_seq.load(std::memory_order_relaxed);
         if (NoteEmptyYield(cpu, self)) {
@@ -1387,6 +1564,358 @@ bool GuestScheduler::NoteEmptyYield(Cpu& cpu, XThread* self) {
   here.streak_start_tick = start;
   here.streak_check_tick = Clock::host_tick_count_raw();
   return true;
+}
+
+// hakuX-Boosted: the empty yield's short way.
+//
+// What an empty NtYieldExecution or zero delay cost, by run 90's profile of
+// the title's main thread: the thread-local resolver (the thread, the CPU
+// index, the bound context: six or seven lookups a call), and for
+// NtYieldExecution the whole round trip through the dispatcher: four takes
+// of the scheduler lock (the mutex and its compare-and-swap), two fiber
+// switches, two clock reads, the counters' atomic adds, the thread id and
+// context rebound twice.
+//
+// Here the thread comes from the caller (found from the PPC context), the
+// CPU is the one the running fiber is linked to, and with nothing ready,
+// poked or asked of the thread the call returns after a handful of loads and
+// one plain store: no lock, no clock, no switch, no atomic read-modify-write.
+// Every test is of something that is raised again by its own source (the
+// ready summary, the poke, the preempt flag, the watchdog), so a stale read
+// costs one call. The preempt flag is up at the end of every slice and for
+// every probe of the skew bound, which sends the next call the long way:
+// the dispatch loop still makes its timed passes once a slice.
+int GuestScheduler::TryEmptyYield(XThread* self, bool quantum_end) {
+  auto& links = self->scheduler_links();
+  // A running fiber is linked to the CPU whose dispatch thread runs it
+  // (every path that queues a thread sets links.cpu to the CPU it queues it
+  // on, under the lock), so this is CurrentCpu() without the lookup.
+  const int cpu_index = links.cpu;
+  if (cpu_index < 0 || cpu_index >= kMaxCpus || !links.running) {
+    return -1;
+  }
+  if (links.preempted ||
+      links.terminate_pending.load(std::memory_order_relaxed) ||
+      self->thread_state()->context()->preempt_requested ||
+      self->suspend_count() != 0) {
+    return -1;
+  }
+  Cpu& cpu = cpus_[cpu_index];
+  if (cpu.ready_summary.load(std::memory_order_relaxed) != 0 ||
+      cpu.repoll_now.load(std::memory_order_relaxed)) {
+    return -1;
+  }
+  // The skew bound's probe and its owed look are the long way's business.
+  if (skew_bound_ticks_ &&
+      (links.skew_eval_owed ||
+       cpu.skew_probe_tick.load(std::memory_order_relaxed))) {
+    return -1;
+  }
+  if (cpu.poll_watch_thread) {
+    cpu.poll_watch_thread = nullptr;
+  }
+  if (quantum_end) {
+    self->OnQuantumEnd();
+  }
+  cpu.empty_yields.store(
+      cpu.empty_yields.load(std::memory_order_relaxed) + 1,
+      std::memory_order_relaxed);
+  const uint64_t seq_before = cpu.switch_seq.load(std::memory_order_relaxed);
+  bool parked = false;
+  if (park_waits_) {
+    parked = NoteWaitSpin(self);
+  } else if (cvars::guest_scheduler_park_yield_spinners) {
+    parked = NoteEmptyYield(cpu, self);
+  }
+  if (parked) {
+    // Parked and back, perhaps on another CPU. One dispatch is our own.
+    return (self->scheduler_links().cpu != cpu_index ||
+            cpus_[cpu_index].switch_seq.load(std::memory_order_relaxed) -
+                    seq_before >
+                1)
+               ? 1
+               : 0;
+  }
+  return 0;  // nothing else ran, which is what the caller reports
+}
+
+// hakuX-Boosted: guest_scheduler_park_waits.
+//
+// Which threads. One that busy-waits: either it calls NtYieldExecution or a
+// zero delay again and again with nothing else to run and no work between
+// the calls (NoteWaitSpin: 32 calls within 640 us), or it goes round a loop
+// in translated code that the translator has shown to do nothing but pause
+// and read memory, with the same registers on every pass (PollSiteVisit).
+// Each burst of waiting is judged on its own: a thread's own short waits
+// between bursts end a burst and do nothing else, which is why a thread
+// that spins for 2 ms at a time is parked at all.
+//
+// When. Once the burst is guest_scheduler_park_wait_after_us old. A wait
+// that is over sooner is never touched.
+//
+// For how long. Until the first of:
+// - an event that can end a busy wait (NoteWaitEvent: a kernel object
+//   signalled, a critical section left, another guest thread parking in a
+//   wait or exiting, an APC queued, a GPU interrupt delivered), but no
+//   sooner than kWaitParkMinUs after the park began;
+// - its deadline: kWaitParkFirstUs for the first park of a burst, twice the
+//   last after each, at most guest_scheduler_park_wait_max_us;
+// - a coarse millisecond deadline behind that, and the 64 ms backstop.
+// The thread then runs its own test again. Nothing decides for it that the
+// wait is over, so a park can only ever cost time, and never more than the
+// longest park per pass: with the default 1 ms that is a thirtieth of a
+// 30 Hz frame, and at the clamp (4 ms) still a quarter of a 60 Hz one.
+//
+// No event is slept through. Parking takes two looks. At the first the
+// thread arms: from then on every event moves wait_wake_seq_. At the next
+// look (the guest has run its test at least once in between) it parks only
+// if the sequence has not moved, and BlockCurrentThread compares it once
+// more under the lock after counting the thread as parked. An event's
+// source moves the sequence and then reads the parked count; the parker
+// counts itself and then reads the sequence: one of the two sees the other.
+// An event in that last window shortens the park to kWaitParkMinUs.
+//
+// What is not seen: a plain store to memory by another running guest thread
+// or by a host thread (the GPU's read pointer). For those the deadline is
+// the answer, which is why it starts at a tenth of a millisecond.
+//
+// On the dispatch thread. A parked spinner is an entry of the blocked list
+// with wait_park set. Its CPU's dispatch thread sleeps until the entry's
+// deadline on a condition variable (FineSleep), and anything made ready on
+// that CPU wakes it at once as before.
+bool GuestScheduler::NoteWaitSpin(XThread* self) {
+  auto& links = self->scheduler_links();
+  // The clock is read on every 32nd call.
+  if (++links.spin_calls & 31) {
+    return false;
+  }
+  const uint64_t now = Clock::host_tick_count_raw();
+  const uint64_t prev = links.spin_check_tick;
+  links.spin_check_tick = now;
+  if (links.poll_site) {
+    // It was last seen in a poll loop: this is another wait.
+    links.poll_site = 0;
+    links.spin_burst_tick = 0;
+  }
+  if (!prev || now - prev > 32 * yield_gap_ticks_ || !links.spin_burst_tick) {
+    // The first look of a burst (after a wait of the thread's own), or the
+    // thread did something between its yields: a new burst.
+    links.spin_burst_tick = now;
+    links.spin_park_shift = 0;
+    links.wait_armed = false;
+    return false;
+  }
+  if (now - links.spin_burst_tick < wait_park_after_ticks_) {
+    return false;
+  }
+  return TryWaitPark(self, now, false);
+}
+
+bool GuestScheduler::TryWaitPark(XThread* self, uint64_t now, bool poll) {
+  auto& links = self->scheduler_links();
+  if (!CanParkSpinner(self)) {
+    stats_.wait_looks_barred.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  // Events are counted while now < wait_armed_until_ (or a thread is
+  // parked). Raised here without a compare-and-swap: two threads arming at
+  // once can leave the earlier of their two times, which costs the other at
+  // most one event it then waits out its deadline for.
+  const uint64_t until = now + wait_arm_window_ticks_;
+  if (wait_armed_until_.load(std::memory_order_relaxed) < until) {
+    wait_armed_until_.store(until);
+  }
+  const uint64_t seq = wait_wake_seq_.load();
+  if (!links.wait_armed || now - links.wait_arm_tick >= wait_arm_window_ticks_) {
+    links.wait_armed = true;
+    links.wait_arm_tick = now;
+    links.wait_arm_seq = seq;
+    return false;
+  }
+  if (links.wait_arm_seq != seq) {
+    // Something happened since the last look: the guest's next passes test
+    // for it, and the look after them decides.
+    links.wait_arm_tick = now;
+    links.wait_arm_seq = seq;
+    stats_.wait_looks_event.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  uint64_t length = wait_park_first_ticks_ << links.spin_park_shift;
+  if (length >= wait_park_max_ticks_) {
+    length = wait_park_max_ticks_;
+  } else {
+    ++links.spin_park_shift;
+  }
+  (poll ? stats_.wait_parks_poll : stats_.wait_parks_yield)
+      .fetch_add(1, std::memory_order_relaxed);
+  WaitPark(self, now, length);
+  // Back, perhaps on another CPU. The burst keeps its age and the thread
+  // stays armed with the sequence it parked on: events during the park
+  // moved it, and the looks that follow see that.
+  auto& after = self->scheduler_links();
+  const uint64_t back = Clock::host_tick_count_raw();
+  after.spin_check_tick = back;
+  after.spin_calls = 0;
+  after.poll_visits = 0;
+  after.wait_arm_tick = back;
+  const uint64_t again = back + wait_arm_window_ticks_;
+  if (wait_armed_until_.load(std::memory_order_relaxed) < again) {
+    wait_armed_until_.store(again);
+  }
+  return true;
+}
+
+void GuestScheduler::WaitPark(XThread* self, uint64_t now,
+                              uint64_t length_ticks) {
+  auto& links = self->scheduler_links();
+  links.wait_park = true;
+  links.wait_park_start_tick = now;
+  links.wait_deadline_tick = now + length_ticks;
+  links.wait_min_tick =
+      now + std::min<uint64_t>(wait_park_min_ticks_, length_ticks);
+  // Events stay counted for the whole park and the window after it.
+  const uint64_t until = now + length_ticks + wait_arm_window_ticks_;
+  if (wait_armed_until_.load(std::memory_order_relaxed) < until) {
+    wait_armed_until_.store(until);
+  }
+  // A timed sleep to the rest of the scheduler, with a millisecond deadline
+  // behind the fine one in case the fine one is not served.
+  const double ticks_per_us = ticks_per_us_ > 0.0 ? ticks_per_us_ : 1.0;
+  const uint64_t length_ms =
+      uint64_t(double(length_ticks) / ticks_per_us) / 1000 + 2;
+  self->set_cooperative_wait_shape(XThread::CooperativeWaitKind::kDelay,
+                                   nullptr, 0);
+  BlockCurrentThread(Clock::QueryHostUptimeMillis() + length_ms, 0, false);
+  self->clear_cooperative_wait_shape();
+}
+
+void GuestScheduler::WakeParkedWaits() {
+  const uint64_t until = wait_armed_until_.load(std::memory_order_relaxed);
+  if (!wait_parked_total_.load(std::memory_order_relaxed) &&
+      Clock::host_tick_count_raw() >= until) {
+    // Nobody is parked or about to park.
+    return;
+  }
+  wait_wake_seq_.fetch_add(1);
+  stats_.wait_events.fetch_add(1, std::memory_order_relaxed);
+  if (!wait_parked_total_.load()) {
+    return;
+  }
+  // A wake already asked for and not yet carried out covers this one.
+  bool any = false;
+  for (int i = 0; i < kMaxCpus; ++i) {
+    if (cpus_[i].wait_parked.load(std::memory_order_relaxed) &&
+        !cpus_[i].wait_wake_noted.load(std::memory_order_relaxed)) {
+      any = true;
+      break;
+    }
+  }
+  if (!any) {
+    return;
+  }
+  bool wake[kMaxCpus] = {};
+  {
+    TimedLock lock(this);
+    for (int i = 0; i < kMaxCpus; ++i) {
+      Cpu& cpu = cpus_[i];
+      if (!cpu.wait_parked.load(std::memory_order_relaxed) ||
+          cpu.wait_wake_noted.load(std::memory_order_relaxed)) {
+        continue;
+      }
+      cpu.wait_wake_noted.store(true, std::memory_order_relaxed);
+      cpu.wake_wait_parks = true;
+      cpu.repoll_now.store(true, std::memory_order_relaxed);
+      wake[i] = true;
+    }
+  }
+  for (int i = 0; i < kMaxCpus; ++i) {
+    if (wake[i] && cpus_[i].parked.load() && cpus_[i].ready_event) {
+      WakeDispatchThread(cpus_[i]);
+    }
+  }
+}
+
+void GuestScheduler::DropWaitParkLocked(XThread* thread) {
+  auto& links = thread->scheduler_links();
+  if (links.wait_park) {
+    links.wait_park = false;
+    wait_parked_total_.fetch_sub(1);
+    // The CPU's own count is put right by its next RereadyBlocked pass.
+  }
+}
+
+// hakuX-Boosted: a visit to a pause-and-poll loop's site (park_pause_poll_loops
+// in the translator, MemoryPollParkPass). The pass has shown that the loop
+// the site is in contains nothing but pauses, loads of guest memory, pure
+// arithmetic and its own branches: no store to memory, no call, no atomic, no
+// clock, no trap. So a pass through it changes nothing but the thread's own
+// registers, and the site sits on the way back to the top.
+//
+// The thread is only parked when, on top of that, its registers are the same
+// on every eighth visit for guest_scheduler_park_wait_after_us, with no more
+// than kPollGapUs between two looks. A loop that advances anything of its
+// own (a string scan's pointer, a retry counter) never has the same
+// registers twice and is never parked; one that has can only be waiting for
+// memory to change under it, or for nothing at all. Either way the park
+// ends by an event or its deadline and the loop runs its own test again:
+// the park cannot take the thread out of the loop or keep it in.
+static uint64_t HashGuestRegisters(const cpu::ppc::PPCContext* context) {
+  // Everything before thread_id is architectural state (the condition and
+  // status registers, r0-r31, CTR, LR, MSR, the floating-point and vector
+  // registers); what follows is the emulator's own. Padding is zeroed when
+  // the context is made and never written.
+  const size_t words =
+      (offsetof(cpu::ppc::PPCContext, thread_id) + sizeof(uint64_t) - 1) /
+      sizeof(uint64_t);
+  const uint64_t* p = reinterpret_cast<const uint64_t*>(context);
+  uint64_t h = 0x9E3779B97F4A7C15ull;
+  for (size_t i = 0; i < words; ++i) {
+    h = (h ^ p[i]) * 0xFF51AFD7ED558CCDull;
+    h ^= h >> 29;
+  }
+  return h;
+}
+
+void GuestScheduler::PollSiteVisit(XThread* self, void* raw_context,
+                                   uint32_t site) {
+  auto* context = static_cast<cpu::ppc::PPCContext*>(raw_context);
+  if (context->preempt_requested) {
+    // Asked to give way, or probed: what any backoff site does.
+    SpinBackoffYieldFiber(raw_context);
+    return;
+  }
+  if (!park_waits_) {
+    return;
+  }
+  auto& links = self->scheduler_links();
+  if (links.poll_site != site) {
+    links.poll_site = site;
+    links.poll_visits = 0;
+    links.spin_check_tick = 0;
+    links.wait_armed = false;
+  }
+  if (++links.poll_visits & 7) {
+    return;
+  }
+  const uint64_t now = Clock::host_tick_count_raw();
+  const uint64_t prev = links.spin_check_tick;
+  links.spin_check_tick = now;
+  const uint64_t hash = HashGuestRegisters(context);
+  stats_.poll_visits.fetch_add(1, std::memory_order_relaxed);
+  if (!prev || now - prev > poll_gap_ticks_ || hash != links.poll_hash) {
+    if (prev && hash != links.poll_hash) {
+      stats_.poll_changed.fetch_add(1, std::memory_order_relaxed);
+    }
+    links.poll_hash = hash;
+    links.spin_burst_tick = now;
+    links.spin_park_shift = 0;
+    links.wait_armed = false;
+    return;
+  }
+  if (now - links.spin_burst_tick < wait_park_after_ticks_) {
+    return;
+  }
+  TryWaitPark(self, now, true);
 }
 
 // hakuX-Boosted: guest_scheduler_park_poll_loops.
@@ -1587,6 +2116,25 @@ bool GuestScheduler::SkewCpuStalled(const Cpu& cpu, uint64_t now,
   if (probe == cpu.skew_capped_probe_tick.load(std::memory_order_relaxed)) {
     return false;
   }
+  // hakuX-Boosted: guest_scheduler_skew_host_progress. The probe is overdue,
+  // so the thread is not reaching guest code. If the watchdog's last
+  // reading of its CPU time, taken during this probe and no more than three
+  // ticks ago, says it was on a core for half the tick or more, it is
+  // working in host code and not behind in the sense that matters. A
+  // descheduled thread gains no CPU time, so its verdict is as it was; with
+  // no reading yet, or a stale one (the watchdog itself is late), the
+  // safepoint alone decides, as before.
+  if (skew_host_progress_) {
+    const uint64_t sample =
+        cpu.skew_oncore_sample_tick.load(std::memory_order_relaxed);
+    if (sample > probe && now >= sample &&
+        now - sample <= skew_sample_fresh_ticks_ &&
+        cpu.skew_oncore_permille.load(std::memory_order_relaxed) >=
+            kSkewOnCorePermille) {
+      skew_host_busy_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+  }
   if (probe_out) {
     *probe_out = probe;
   }
@@ -1760,6 +2308,43 @@ static int64_t SkewThreadCpuNs(bool valid, int cpu_clock) {
   }
 #endif
   return -1;
+}
+
+// hakuX-Boosted: guest_scheduler_skew_host_progress, the watchdog's part.
+// Run at the top of each tick, before the new probes are raised and without
+// lock_ (the readings are system calls): any probe still set here has been
+// outstanding for a whole tick. The first reading of a probe is the base,
+// each later one gives the share of the tick between them that the thread
+// spent on a core.
+void GuestScheduler::SkewSampleHostThreads() {
+  const double ticks_per_us = ticks_per_us_ > 0.0 ? ticks_per_us_ : 1.0;
+  for (int i = 0; i < kMaxCpus; ++i) {
+    Cpu& cpu = cpus_[i];
+    const uint64_t probe = cpu.skew_probe_tick.load(std::memory_order_relaxed);
+    if (!probe || !cpu.skew_cpu_clock_valid.load(std::memory_order_relaxed)) {
+      cpu.skew_sample_prev_ns = -1;
+      continue;
+    }
+    const int64_t ns = SkewThreadCpuNs(true, cpu.skew_cpu_clock);
+    const uint64_t tick = Clock::host_tick_count_raw();
+    if (ns >= 0 && cpu.skew_sample_prev_ns >= 0 &&
+        cpu.skew_sample_prev_probe == probe && tick > cpu.skew_sample_prev_tick &&
+        ns >= cpu.skew_sample_prev_ns) {
+      const double wall_ns =
+          double(tick - cpu.skew_sample_prev_tick) / ticks_per_us * 1000.0;
+      if (wall_ns > 0.0) {
+        const double share =
+            double(ns - cpu.skew_sample_prev_ns) * 1000.0 / wall_ns;
+        cpu.skew_oncore_permille.store(
+            share >= 1000.0 ? 1000u : uint32_t(share),
+            std::memory_order_relaxed);
+        cpu.skew_oncore_sample_tick.store(tick, std::memory_order_relaxed);
+      }
+    }
+    cpu.skew_sample_prev_ns = ns;
+    cpu.skew_sample_prev_tick = tick;
+    cpu.skew_sample_prev_probe = probe;
+  }
 }
 
 bool GuestScheduler::SkewDescribeThread(int cpu_index, uint32_t* tid,
@@ -2114,6 +2699,8 @@ void GuestScheduler::WakeAll() {
   if (!started_.load()) {
     return;
   }
+  // hakuX-Boosted: guest_scheduler_park_waits (an I/O completion, an APC).
+  NoteWaitEvent();
   // Skip the lock when no CPU has a blocked waiter. A stale hint costs at
   // most one backoff interval.
   bool any_blocked = false;
@@ -2148,7 +2735,7 @@ void GuestScheduler::WakeAll() {
   for (int i = 0; i < kMaxCpus; ++i) {
     if (cpus_[i].has_blocked.load(std::memory_order_relaxed) &&
         cpus_[i].parked.load() && cpus_[i].ready_event) {
-      cpus_[i].ready_event->Set();
+      WakeDispatchThread(cpus_[i]);
     }
   }
 }
@@ -2158,6 +2745,10 @@ void GuestScheduler::WakeForSignal(const XObject* object,
   if (!started_.load()) {
     return;
   }
+  // hakuX-Boosted: guest_scheduler_park_waits. A signalled event, a released
+  // semaphore or mutant, a handed-over critical section: before the test
+  // below, because a busy-waiting thread is on no blocked list.
+  NoteWaitEvent();
   bool any_blocked = false;
   for (int i = 0; i < kMaxCpus; ++i) {
     if (cpus_[i].has_blocked.load()) {
@@ -2261,7 +2852,7 @@ void GuestScheduler::WakeForSignal(const XObject* object,
   }
   for (int i = 0; i < kMaxCpus; ++i) {
     if (wake[i] && cpus_[i].parked.load() && cpus_[i].ready_event) {
-      cpus_[i].ready_event->Set();
+      WakeDispatchThread(cpus_[i]);
     }
   }
 }
@@ -2277,6 +2868,7 @@ bool GuestScheduler::WakeForApc(XThread* thread) {
   if (!thread || !started_.load()) {
     return true;
   }
+  NoteWaitEvent();  // hakuX-Boosted: guest_scheduler_park_waits
   int wake_cpu = -1;
   {
     TimedLock lock(this);
@@ -2299,7 +2891,7 @@ bool GuestScheduler::WakeForApc(XThread* thread) {
   stats_.apc_pokes.fetch_add(1, std::memory_order_relaxed);
   if (wake_cpu >= 0 && cpus_[wake_cpu].parked.load() &&
       cpus_[wake_cpu].ready_event) {
-    cpus_[wake_cpu].ready_event->Set();
+    WakeDispatchThread(cpus_[wake_cpu]);
   }
   return true;
 }
@@ -2313,6 +2905,7 @@ void GuestScheduler::NotifyThreadExited(XThread* thread) {
   // This CPU's dispatch loop reclaims it, since we can't drop the last handle
   // while running on its fiber.
   cpus_[CurrentCpu()].exited_thread = thread;
+  NoteWaitEvent();  // hakuX-Boosted: guest_scheduler_park_waits
 }
 
 void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
@@ -2331,6 +2924,18 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
   cpus_[cpu_index].poll_watch_thread = nullptr;
   cpus_[cpu_index].streak_thread = nullptr;
   stats_.blocks.fetch_add(1, std::memory_order_relaxed);
+  // hakuX-Boosted: guest_scheduler_park_waits. A wait of the thread's own
+  // ends its burst of busy waiting; and a thread that stops running has
+  // usually just finished what a busy-waiting thread is waiting for (a
+  // worker going back to sleep), so it counts as an event for those. A
+  // spinner's own park is neither.
+  if (park_waits_ && !self->scheduler_links().wait_park) {
+    auto& own = self->scheduler_links();
+    own.spin_check_tick = 0;
+    own.wait_armed = false;
+    own.poll_site = 0;
+    NoteWaitEvent();
+  }
   // hakuX-Boosted: with the poke (WakeForApc) an alertable waiter is told of
   // its APC, so it needs no timed look of its own.
   const bool apc_poke = cvars::guest_scheduler_apc_poke;
@@ -2434,6 +3039,25 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
     if (due && due < cpu.next_timed_repoll_ms) {
       cpu.next_timed_repoll_ms = due;
     }
+    // hakuX-Boosted: guest_scheduler_park_waits. Counted as parked first,
+    // then the event sequence is read (see WaitPark's comment): an event
+    // since the thread's last look shortens the park to its minimum instead
+    // of being slept through.
+    if (links.wait_park) {
+      wait_parked_total_.fetch_add(1);
+      cpu.wait_parked.store(
+          cpu.wait_parked.load(std::memory_order_relaxed) + 1,
+          std::memory_order_relaxed);
+      cpu.wait_wake_noted.store(false, std::memory_order_relaxed);
+      if (wait_wake_seq_.load() != links.wait_arm_seq) {
+        links.wait_arm_seq = wait_wake_seq_.load();
+        links.wait_deadline_tick = links.wait_min_tick;
+      }
+      if (!cpu.next_fine_repoll_tick ||
+          links.wait_deadline_tick < cpu.next_fine_repoll_tick) {
+        cpu.next_fine_repoll_tick = links.wait_deadline_tick;
+      }
+    }
     // has_blocked was raised at the top of this block (seq_cst, pairing
     // with the wake pre-filters' loads).
   }
@@ -2484,12 +3108,61 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
     XThread* kept_head = nullptr;
     XThread* kept_tail = nullptr;
     int kept_max_prio = -1;
+    // hakuX-Boosted: guest_scheduler_park_waits. The parked spinners here:
+    // the clock is only read when there are any.
+    const bool have_parks =
+        cpu.wait_parked.load(std::memory_order_relaxed) != 0;
+    const uint64_t now_tick = have_parks ? Clock::host_tick_count_raw() : 0;
+    const bool wake_parks = cpu.wake_wait_parks;
+    cpu.wake_wait_parks = false;
+    uint32_t kept_parks = 0;
+    uint64_t fine_next = 0;
     XThread* t = cpu.blocked_head;
     while (t) {
       auto& links = t->scheduler_links();
       XThread* next = links.ready_next;
+      // hakuX-Boosted: a parked spinner stays until its deadline, or, when
+      // an event asked for it, until its shortest park is over.
+      bool park_released = false;
+      if (links.wait_park) {
+        uint64_t due_tick = links.wait_deadline_tick;
+        if (wake_parks && links.wait_min_tick < due_tick) {
+          due_tick = links.wait_min_tick;
+        }
+        if (!force_all && now_tick < due_tick &&
+            !(links.wait_deadline_ms && now_ms >= links.wait_deadline_ms)) {
+          links.wait_deadline_tick = due_tick;
+          links.ready_next = nullptr;
+          LinkTailLocked(kept_head, kept_tail, t);
+          int prio = ClampPriority(t->priority());
+          if (prio > kept_max_prio) {
+            kept_max_prio = prio;
+          }
+          if (links.wait_deadline_ms && links.wait_deadline_ms < next_due) {
+            next_due = links.wait_deadline_ms;
+          }
+          if (!fine_next || due_tick < fine_next) {
+            fine_next = due_tick;
+          }
+          ++kept_parks;
+          t = next;
+          continue;
+        }
+        (due_tick < links.wait_deadline_tick || wake_parks
+             ? stats_.wait_ended_event
+             : stats_.wait_ended_timer)
+            .fetch_add(1, std::memory_order_relaxed);
+        if (now_tick > links.wait_park_start_tick) {
+          stats_.wait_park_ticks.fetch_add(
+              now_tick - links.wait_park_start_tick,
+              std::memory_order_relaxed);
+        }
+        links.wait_park = false;
+        wait_parked_total_.fetch_sub(1);
+        park_released = true;
+      }
       // Skip a gated waiter whose wait cannot have resolved yet.
-      if (links.wait_gated && !force_all) {
+      if (links.wait_gated && !force_all && !park_released) {
         // Three gate kinds: a single object's epoch, a multi-wait's summed
         // epoch, or (neither) a pure timed sleep that only the deadline below
         // can resolve.
@@ -2586,6 +3259,14 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
     cpu.max_blocked_prio = kept_max_prio;
     cpu.next_timed_repoll_ms = next_due;
     cpu.has_blocked.store(kept_head != nullptr, std::memory_order_relaxed);
+    // hakuX-Boosted: guest_scheduler_park_waits.
+    if (have_parks || kept_parks) {
+      cpu.wait_parked.store(kept_parks, std::memory_order_relaxed);
+      cpu.next_fine_repoll_tick = fine_next;
+      if (!kept_parks) {
+        cpu.wait_wake_noted.store(false, std::memory_order_relaxed);
+      }
+    }
     if (rescued) {
       stats_.backstop_rescues.fetch_add(rescued - rescued_by_look,
                                         std::memory_order_relaxed);
@@ -2638,7 +3319,7 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
   for (int i = 0; i < kMaxCpus; ++i) {
     if ((wake_mask & (uint32_t(1) << i)) && cpus_[i].parked.load() &&
         cpus_[i].ready_event) {
-      cpus_[i].ready_event->Set();
+      WakeDispatchThread(cpus_[i]);
     }
   }
 }
@@ -2670,7 +3351,12 @@ void GuestScheduler::RunLoop(int cpu_index) {
     // the parked waiters actually need, a wake skips it entirely.
     uint64_t now = Clock::QueryHostUptimeMillis();
     bool poked = cpu.repoll_now.exchange(false, std::memory_order_relaxed);
-    if (poked || now >= cpu.next_timed_repoll_ms) {
+    // hakuX-Boosted: a parked spinner's deadline (0 with
+    // guest_scheduler_park_waits off, and then nothing more is read).
+    const bool fine_due =
+        cpu.next_fine_repoll_tick &&
+        Clock::host_tick_count_raw() >= cpu.next_fine_repoll_tick;
+    if (poked || fine_due || now >= cpu.next_timed_repoll_ms) {
       RereadyBlocked(cpu_index, poked);
     }
 
@@ -2692,7 +3378,7 @@ void GuestScheduler::RunLoop(int cpu_index) {
           LinkReadyLocked(cpus_[home], next, at_head);
         }
         if (cpus_[home].parked.load() && cpus_[home].ready_event) {
-          cpus_[home].ready_event->Set();
+          WakeDispatchThread(cpus_[home]);
         }
         XELOGD("GuestScheduler: migrated tid={:08X} to CPU {}",
                next->thread_id(), home);
@@ -2718,6 +3404,17 @@ void GuestScheduler::RunLoop(int cpu_index) {
     // MarkReady wakes us sooner), otherwise idle until something is runnable.
     // Park before re-checking the queues, so a wake that saw parked still
     // false is caught here instead of slept through.
+    // hakuX-Boosted: which sleep this will be is stored first
+    // (WakeDispatchThread). Only this thread and the fibers it runs write
+    // next_fine_repoll_tick, so it cannot change before the sleep below.
+    const uint64_t fine_deadline = cpu.next_fine_repoll_tick;
+    if (fine_deadline) {
+      {
+        std::lock_guard<std::mutex> fine_lock(cpu.fine_mutex);
+        cpu.fine_signal = false;
+      }
+      cpu.fine_parked.store(true);
+    }
     cpu.parked.store(true);
     bool have_blocked;
     bool have_work;
@@ -2739,10 +3436,33 @@ void GuestScheduler::RunLoop(int cpu_index) {
     }
     if (have_work) {
       cpu.parked.store(false);
+      cpu.fine_parked.store(false);
       continue;
     }
     if (skew_bound_ticks_ && skew_holders_.load()) {
       SkewNotify();
+    }
+    // hakuX-Boosted: guest_scheduler_park_waits. A parked spinner's deadline
+    // is under a millisecond away, which the ready event cannot time: sleep
+    // on the condition variable until it, the millisecond deadline, or a
+    // wake, whichever is first.
+    if (fine_deadline) {
+      const uint64_t tick_now = Clock::host_tick_count_raw();
+      uint64_t sleep_us = 0;
+      if (fine_deadline > tick_now && ticks_per_us_ > 0.0) {
+        sleep_us = uint64_t(double(fine_deadline - tick_now) / ticks_per_us_);
+      }
+      const uint64_t ms_now = Clock::QueryHostUptimeMillis();
+      const uint64_t ms_due = cpu.next_timed_repoll_ms;
+      const uint64_t ms_left = ms_due > ms_now ? ms_due - ms_now : 0;
+      sleep_us = std::min<uint64_t>(sleep_us, ms_left * 1000);
+      if (sleep_us) {
+        FineSleep(cpu, sleep_us);
+      }
+      cpu.parked.store(false);
+      cpu.fine_parked.store(false);
+      stats_.idle_wakes.fetch_add(1, std::memory_order_relaxed);
+      continue;
     }
     if (!have_blocked) {
       if (dispatched_any_.load()) {
@@ -2974,6 +3694,20 @@ void GuestScheduler::ReportStatsIfDue() {
         take(stats_.yield_park_young), take(stats_.yield_park_barred),
         take(stats_.yield_park_others_ran));
   }
+  // hakuX-Boosted: guest_scheduler_park_waits.
+  if (park_waits_) {
+    XELOGI(
+        "GuestScheduler: busy waits: parked yield spinners {}, poll loops {}, "
+        "{} us parked in all | parks ended by the deadline {}, by an event {} "
+        "| looks that did not park: an event since the last look {}, not "
+        "allowed here {} | events counted {} | poll site looks {}, registers "
+        "changed {}",
+        take(stats_.wait_parks_yield), take(stats_.wait_parks_poll),
+        to_us(take(stats_.wait_park_ticks)), take(stats_.wait_ended_timer),
+        take(stats_.wait_ended_event), take(stats_.wait_looks_event),
+        take(stats_.wait_looks_barred), take(stats_.wait_events),
+        take(stats_.poll_visits), take(stats_.poll_changed));
+  }
   {
     uint64_t acquisitions = take(stats_.lock_acquisitions);
     uint64_t wait_ticks = take(stats_.lock_wait_ticks);
@@ -3003,7 +3737,8 @@ void GuestScheduler::ReportStatsIfDue() {
         "{}), held {} us in all, longest {} us ({}), ended by the cap {}, cut "
         "short by a preemption {} | awaited host threads on a core for {} us "
         "of the holds | signals that readied a thread on another CPU {} | "
-        "wakes that waited behind a hold {} ({} us)",
+        "wakes that waited behind a hold {} ({} us) | overdue probes of a "
+        "host thread busy in host code, not held for {}",
         holds_start + holds_progress, holds_start, holds_progress,
         to_us(take(stats_.skew_hold_ticks)), to_us(longest.ticks),
         longest.ticks
@@ -3018,7 +3753,7 @@ void GuestScheduler::ReportStatsIfDue() {
         take(stats_.skew_holds_capped), take(stats_.skew_holds_cut),
         take(stats_.skew_target_on_core_ns) / 1000, take(stats_.skew_debts),
         take(stats_.skew_wakes_behind_hold),
-        take(stats_.skew_wakes_behind_hold_us));
+        take(stats_.skew_wakes_behind_hold_us), take(skew_host_busy_));
   }
   // hakuX-Boosted: the missed wakes by kind (boosted/notes/guest-scheduler.md
   // says what each one is and which should read nought).
@@ -3344,6 +4079,10 @@ void GuestScheduler::WatchdogLoop() {
       ReportNoProgress();
     }
 
+    // hakuX-Boosted: guest_scheduler_skew_host_progress.
+    if (skew_bound_ticks_ && skew_host_progress_) {
+      SkewSampleHostThreads();
+    }
     uint64_t now = Clock::host_tick_count_raw();
     TimedLock lock(this);
     for (int i = 0; i < kMaxCpus; ++i) {
