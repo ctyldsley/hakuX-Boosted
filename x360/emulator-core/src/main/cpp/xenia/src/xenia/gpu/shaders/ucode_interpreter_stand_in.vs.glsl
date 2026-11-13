@@ -6,7 +6,9 @@
 // (placeholder_stand_in.glsli, vulkan_placeholder_ps_mode). The original
 // writes gl_Position only, which is all the no-op placeholder pixel shader
 // needs, and stays as it is so that nothing changes when the stand-in is off.
-// Keep the two in step: the differences are marked "hakuX-Boosted".
+// Keep the two in step: the differences are marked "hakuX-Boosted". Besides
+// the two outputs, this copy reads every vertex format and applies the fetch's
+// exponent bias, where the original covers eight formats and no bias.
 //
 //   location 0  the interpolator the guest pixel shader's first texture fetch
 //               reads its coordinates from
@@ -144,9 +146,26 @@ vec4 Operand(uint reg, uint sel, uint swiz, uint negate, bool const_rel) {
 float SNorm(int x, float maxv) { return clamp(float(x) / maxv, -1.0, 1.0); }
 float XeF16(uint v) { return unpackHalf2x16(v).x; }
 
-// Partial format coverage. Unhandled formats fall through to (0,0,0,1).
+// hakuX-Boosted: one component of a packed vertex format, as the translated
+// shaders unpack it (SpirvShaderTranslator::ProcessVertexFetchInstruction,
+// the kZeroClampMinusOne mode of signed fractions).
+float XePacked(uint word, int offset, int width, bool is_signed,
+               bool is_integer) {
+  if (is_signed) {
+    int x = bitfieldExtract(int(word), offset, width);
+    return is_integer ? float(x)
+                      : SNorm(x, float((1u << uint(width - 1)) - 1u));
+  }
+  uint x = bitfieldExtract(word, offset, width);
+  return is_integer ? float(x) : float(x) / float((1u << uint(width)) - 1u);
+}
+
+// hakuX-Boosted: every Xenos vertex format (the original leaves out the
+// packed 16_16_16_16, 2_10_10_10, 10_11_11 and 11_11_10 and the 32-bit
+// integers, which read as (0,0,0,1) there). Components a format does not have
+// are 0, as in the translated shaders (the original has 1 in W).
 vec4 ConvertVertex(uint format, bool is_signed, bool is_integer, uvec4 d) {
-  vec4 v = vec4(0.0, 0.0, 0.0, 1.0);
+  vec4 v = vec4(0.0);
   if (format == 57u) {  // 32_32_32_FLOAT
     v.x = uintBitsToFloat(d.x);
     v.y = uintBitsToFloat(d.y);
@@ -190,6 +209,36 @@ vec4 ConvertVertex(uint format, bool is_signed, bool is_integer, uvec4 d) {
         v[k] = is_integer ? float(bu) : float(bu) / 255.0;
       }
     }
+  } else if (format == 7u) {  // 2_10_10_10 (hakuX-Boosted, and the rest)
+    v = vec4(XePacked(d.x, 0, 10, is_signed, is_integer),
+             XePacked(d.x, 10, 10, is_signed, is_integer),
+             XePacked(d.x, 20, 10, is_signed, is_integer),
+             XePacked(d.x, 30, 2, is_signed, is_integer));
+  } else if (format == 16u) {  // 10_11_11
+    v.x = XePacked(d.x, 0, 11, is_signed, is_integer);
+    v.y = XePacked(d.x, 11, 11, is_signed, is_integer);
+    v.z = XePacked(d.x, 22, 10, is_signed, is_integer);
+  } else if (format == 17u) {  // 11_11_10
+    v.x = XePacked(d.x, 0, 10, is_signed, is_integer);
+    v.y = XePacked(d.x, 10, 11, is_signed, is_integer);
+    v.z = XePacked(d.x, 21, 11, is_signed, is_integer);
+  } else if (format == 26u) {  // 16_16_16_16
+    v = vec4(XePacked(d.x, 0, 16, is_signed, is_integer),
+             XePacked(d.x, 16, 16, is_signed, is_integer),
+             XePacked(d.y, 0, 16, is_signed, is_integer),
+             XePacked(d.y, 16, 16, is_signed, is_integer));
+  } else if (format == 33u || format == 34u || format == 35u) {
+    // 32, 32_32, 32_32_32_32
+    uint count = format == 33u ? 1u : (format == 34u ? 2u : 4u);
+    for (uint k = 0u; k < count; ++k) {
+      if (is_signed) {
+        v[k] = float(int(d[k]));
+        if (!is_integer) v[k] *= 1.0 / 2147483647.0;
+      } else {
+        v[k] = float(d[k]);
+        if (!is_integer) v[k] *= 1.0 / 4294967295.0;
+      }
+    }
   }
   return v;
 }
@@ -222,6 +271,10 @@ void ExecVfetch(uint off) {
   uint index = uint(max(Comp(RegGet(index_reg % REG_COUNT), src_swiz & 3u), 0.0));
   uvec4 d = GatherVertexDwords(fc_index, index, stride, offset);
   vec4 v = ConvertVertex(format, is_signed, is_integer, d);
+  // hakuX-Boosted: the fetch's exponent bias (bits 24:29 of the second word,
+  // signed), which the original does not apply.
+  int exp_adjust = int(w1 << 2) >> 26;
+  if (exp_adjust != 0) v *= exp2(float(exp_adjust));
 
   // Destination swizzle (3 bits/comp: 0-3 = xyzw, 4 = 0, 5 = 1, 7 = keep).
   vec4 res = RegGet(dst_reg % REG_COUNT);
