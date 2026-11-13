@@ -9,10 +9,14 @@ only check is the GitHub Actions build of this branch.
 ## Where it stands
 
 - Done: step 1 (defaults), step 2 (the config store), step 3 (settings
-  screens), step 4 (the look), each as written code.
-- In progress: getting the build green with all four.
+  screens), step 4 (the look). Built green with all four: run 99, commit
+  `5901650` (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43525236794).
+  That build compiled on the first attempt; it proves the code compiles and
+  the APK packs, nothing about behaviour.
+- In progress: nothing.
 - Next, for whoever has the phone: the checks listed under each step. For a
-  later session: the items under "Not done".
+  later session: the items under "Not done" in step 4, the two core writers
+  under step 2, and the diff of the phone's config under step 1.
 
 ## Step 1: defaults
 
