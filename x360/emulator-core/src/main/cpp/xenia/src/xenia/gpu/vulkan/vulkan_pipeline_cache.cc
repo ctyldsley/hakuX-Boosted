@@ -248,6 +248,26 @@ DEFINE_bool(
     "XenDroid's interpreter, as before.",
     "Vulkan");
 
+DEFINE_bool(
+    vulkan_placeholder_depth_only_async, false,
+    "With vulkan_placeholder_pipelines: the pipeline of a draw without a "
+    "pixel shader (shadow maps, depth pre-passes) that the interpreter "
+    "cannot stand in for is compiled in the background like any other, and "
+    "the draw is dropped until it is ready. Off: it is translated and "
+    "compiled on the GPU command thread when first drawn, a hitch as long "
+    "as the compile.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_placeholder_interpreter_vertex_budget, 0,
+    "With vulkan_placeholder_pipelines: the most host vertices drawn "
+    "through an interpreter placeholder in one guest frame. A draw that "
+    "would go over is dropped for that frame (it is drawn once its real "
+    "pipeline is ready, or in a frame with room). The interpreter costs the "
+    "GPU many times what the translated vertex shader does, for every "
+    "vertex, so this bounds what placeholders can add to a frame. 0: no "
+    "limit.",
+    "Vulkan");
+
 // hakuX-Boosted: the bounds of shader_ahead_speculate (gpu_flags.cc).
 DEFINE_int32(
     shader_ahead_max_outstanding, 2,
@@ -982,8 +1002,13 @@ bool VulkanPipelineCache::CanCreatePipelineAsync(bool has_pixel_shader,
   // hakuX-Boosted: a draw without a pixel shader has nothing to stand in for
   // but its vertex shader, so with the interpreter its placeholder is exact
   // (vulkan_placeholder_depth_only_interpreter).
+  // hakuX-Boosted: and with vulkan_placeholder_depth_only_async such a draw
+  // is asynchronous whether or not the interpreter can stand in (without it
+  // there is no placeholder: it is dropped until its pipeline is ready).
   return cvars::async_shader_compilation && !creation_threads_.empty() &&
          (has_pixel_shader ||
+          (cvars::vulkan_placeholder_pipelines &&
+           cvars::vulkan_placeholder_depth_only_async) ||
           (use_interpreter && cvars::vulkan_placeholder_pipelines &&
            cvars::vulkan_placeholder_depth_only_interpreter &&
            ucode_interpreter_vs_ != VK_NULL_HANDLE)) &&
@@ -1254,10 +1279,15 @@ bool VulkanPipelineCache::ConfigurePipeline(
       // MakePlaceholder (below), so that a slot can also be given one late
       // or from a creation thread. A full-screen pass that waits for its
       // real pipeline (require_real) gets none.
+      // hakuX-Boosted: and never from the translated vertex shader for a draw
+      // without a pixel shader (vulkan_placeholder_depth_only_async lets one
+      // get here): that placeholder would be the real pipeline, compiled on
+      // this thread.
       bool make_placeholder =
           !require_real &&
-          (use_interpreter || (vertex_shader->is_translated() &&
-                               cvars::vulkan_placeholder_real_vs));
+          (use_interpreter ||
+           (vertex_shader->is_translated() && pixel_shader != nullptr &&
+            cvars::vulkan_placeholder_real_vs));
       if (make_placeholder) {
         MakePlaceholder(creation_arguments, use_interpreter, false);
       } else if (!require_real && cvars::vulkan_placeholder_translate_first &&
@@ -1315,7 +1345,19 @@ bool VulkanPipelineCache::ConfigurePipeline(
         pipeline_pair.second.pipeline_layout_stale.store(
             false, std::memory_order_release);
       }
-      if (!EnsurePipelineCreated(creation_arguments)) {
+      // hakuX-Boosted: timed, for the once-a-second line: this is a driver
+      // compile on the GPU command thread.
+      const auto sync_create_start = std::chrono::steady_clock::now();
+      bool sync_created = EnsurePipelineCreated(creation_arguments);
+      double sync_create_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() -
+                                  sync_create_start)
+                                  .count();
+      ++draw_thread_pipelines_;
+      draw_thread_pipeline_ms_ += sync_create_ms;
+      draw_thread_pipeline_worst_ms_ =
+          std::max(draw_thread_pipeline_worst_ms_, sync_create_ms);
+      if (!sync_created) {
         return false;
       }
     }
@@ -1893,8 +1935,12 @@ void VulkanPipelineCache::OnPipelineReused(
     return;
   }
   bool interpreter = use_interpreter && ucode_interpreter_vs_ != VK_NULL_HANDLE;
-  bool make_placeholder = interpreter || (vertex_shader->is_translated() &&
-                                          cvars::vulkan_placeholder_real_vs);
+  // hakuX-Boosted: as in ConfigurePipeline, none from the translated vertex
+  // shader for a draw without a pixel shader.
+  bool make_placeholder =
+      interpreter ||
+      (vertex_shader->is_translated() && pixel_shader != nullptr &&
+       cvars::vulkan_placeholder_real_vs);
   if (!make_placeholder) {
     return;
   }
@@ -1936,7 +1982,9 @@ void VulkanPipelineCache::NoteDrawSkipped(uint64_t vertex_shader_hash,
     }
   }
   ++skipped_draws_;
-  if (reasons & kSkipVertexShaderNotTranslated) {
+  if (reasons & kSkipInterpreterBudget) {
+    ++skipped_interpreter_budget_;
+  } else if (reasons & kSkipVertexShaderNotTranslated) {
     ++skipped_untranslated_vs_;
   } else if (reasons & kSkipPlaceholderCompiling) {
     ++skipped_placeholder_compiling_;
@@ -1985,6 +2033,9 @@ void VulkanPipelineCache::NoteDrawSkipped(uint64_t vertex_shader_hash,
        "bindings were not ready when this draw was set up"},
       {kSkipStandInNoSampler,
        "no sampler was left in this submission for the stand-in"},
+      {kSkipInterpreterBudget,
+       "the frame's allowance of vertices drawn through the interpreter was "
+       "spent (vulkan_placeholder_interpreter_vertex_budget)"},
       {kSkipInterpreterOff,
        "interpreter refused: async_shader_vs_interpreter is off"},
       {kSkipVertexShaderTranslated,
@@ -2489,7 +2540,7 @@ void VulkanPipelineCache::LogStatsIfDue() {
       draw_thread_translations_ * 19 + skipped_draws_ * 23 +
       placeholders_inline_ * 29 + placeholders_async_ * 31 +
       placeholders_late_ * 37 + fullscreen_waits_ * 41 +
-      speculative_refused_budget_ * 43;
+      speculative_refused_budget_ * 43 + draw_thread_pipelines_ * 47;
   if (signature == stats_logged_signature_) {
     return;
   }
@@ -2531,20 +2582,24 @@ void VulkanPipelineCache::LogStatsIfDue() {
   if (cover) {
     XELOGI(
         "placeholder cover: draws skipped {} (vertex shader not translated "
-        "{}, no placeholder {}, placeholder compiling {}, other {}); "
+        "{}, no placeholder {}, placeholder compiling {}, over the "
+        "interpreter's vertex budget {}, other {}); "
         "placeholders made on the GPU command thread {} (slowest {:.1f} ms), "
         "handed to creation threads {}, of all those late {}, with the "
         "interpreter's version 2 {}; waits for a "
         "creation thread's placeholder {} ({:.1f} ms), for a full-screen "
         "pass's real pipeline {} ({:.1f} ms); translations done on the GPU "
-        "command thread {} ({:.1f} ms)",
+        "command thread {} ({:.1f} ms); real pipelines compiled on the GPU "
+        "command thread {} ({:.1f} ms, slowest {:.1f} ms)",
         skipped_draws_, skipped_untranslated_vs_, skipped_no_placeholder_,
-        skipped_placeholder_compiling_, skipped_other_, placeholders_inline_,
+        skipped_placeholder_compiling_, skipped_interpreter_budget_,
+        skipped_other_, placeholders_inline_,
         placeholder_inline_worst_ms_, placeholders_async_, placeholders_late_,
         placeholders_program_, placeholder_waits_, placeholder_wait_ms_,
         fullscreen_waits_,
         fullscreen_wait_ms_, draw_thread_translations_,
-        draw_thread_translation_ms_);
+        draw_thread_translation_ms_, draw_thread_pipelines_,
+        draw_thread_pipeline_ms_, draw_thread_pipeline_worst_ms_);
   }
 }
 

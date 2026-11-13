@@ -1278,6 +1278,42 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // constants for the ucode interpreter rather than a shader's packed subset.
   // Used to invalidate the binding when switching interpreter <-> normal.
   bool float_constants_vertex_are_full_ = false;
+  // hakuX-Boosted: where the GPU command thread's time goes, by what a draw
+  // was drawn with, for one line a second in the log (shader_profiling,
+  // boosted/notes/shader-first-run.md). GPU command thread only.
+  enum FirstRunDrawKind : uint32_t {
+    kFirstRunDrawReal,
+    kFirstRunDrawInterpreter,
+    kFirstRunDrawInterpreterProgram,
+    kFirstRunDrawTranslatedPlaceholder,
+    kFirstRunDrawSkipped,
+    // Draws that returned before a pipeline was chosen (copies, nothing to
+    // draw, failures).
+    kFirstRunDrawOther,
+    kFirstRunDrawKindCount,
+  };
+  struct FirstRunSplit {
+    uint64_t window_start_ns = 0;
+    uint64_t thread_cpu_start_ns = 0;
+    uint64_t draws[kFirstRunDrawKindCount] = {};
+    uint64_t draw_ns[kFirstRunDrawKindCount] = {};
+    uint64_t draw_vertices[kFirstRunDrawKindCount] = {};
+    // Within the draws: choosing or making the pipeline (placeholders made on
+    // this thread included), and the constants and descriptors.
+    uint64_t configure_pipeline_ns = 0;
+    uint64_t bindings_ns = 0;
+    uint64_t swaps = 0;
+    uint64_t swap_ns = 0;
+    uint64_t last_swap_ns = 0;
+    uint64_t longest_frame_ns = 0;
+  };
+  FirstRunSplit first_run_split_;
+  static uint64_t FirstRunNowNs();
+  static uint64_t FirstRunThreadCpuNs();
+  void FirstRunSplitLogIfDue(uint64_t now_ns);
+  // Host vertices drawn through an interpreter placeholder in the guest
+  // frame so far (vulkan_placeholder_interpreter_vertex_budget).
+  uint64_t frame_interpreter_vertices_ = 0;
   // hakuX-Boosted: what is behind the bool and loop constants in the buffer
   // they were last uploaded to: the interpreter's programs of a draw, or
   // nothing.

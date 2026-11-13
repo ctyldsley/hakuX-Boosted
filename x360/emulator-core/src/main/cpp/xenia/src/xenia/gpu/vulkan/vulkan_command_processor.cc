@@ -151,6 +151,7 @@ DECLARE_bool(vulkan_placeholder_interpreter_translated_vs);
 DECLARE_bool(vulkan_placeholder_interpreter_geometry);
 // hakuX-Boosted: boosted/notes/shader-first-run.md.
 DECLARE_bool(vulkan_placeholder_interpreter_v2);
+DECLARE_int32(vulkan_placeholder_interpreter_vertex_budget);
 
 DEFINE_bool(
     vulkan_dynamic_rendering, true,
@@ -2236,6 +2237,33 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   if (pipeline_cache_) {
     pipeline_cache_->NoteFrameBoundary();
   }
+  // hakuX-Boosted: so is vulkan_placeholder_interpreter_vertex_budget's; and
+  // the frame is counted for the once-a-second split, with this swap's own
+  // time (the presenter's and the submission's) when the function returns.
+  frame_interpreter_vertices_ = 0;
+  struct FirstRunSwapTimer {
+    VulkanCommandProcessor* command_processor = nullptr;
+    uint64_t start_ns = 0;
+    ~FirstRunSwapTimer() {
+      if (!command_processor) {
+        return;
+      }
+      uint64_t now_ns = FirstRunNowNs();
+      FirstRunSplit& split = command_processor->first_run_split_;
+      ++split.swaps;
+      split.swap_ns += now_ns - start_ns;
+      if (split.last_swap_ns) {
+        split.longest_frame_ns =
+            std::max(split.longest_frame_ns, now_ns - split.last_swap_ns);
+      }
+      split.last_swap_ns = now_ns;
+      command_processor->FirstRunSplitLogIfDue(now_ns);
+    }
+  } first_run_swap;
+  if (cvars::shader_profiling) {
+    first_run_swap.command_processor = this;
+    first_run_swap.start_ns = FirstRunNowNs();
+  }
 
   if (render_target_cache_) {
     render_target_cache_->LogResolveDetailsOnFrameEnd();
@@ -3785,6 +3813,82 @@ void VulkanCommandProcessor::OnShaderPairAhead(
   }
 }
 
+// hakuX-Boosted: the once-a-second split of the GPU command thread's time
+// (boosted/notes/shader-first-run.md).
+
+uint64_t VulkanCommandProcessor::FirstRunNowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+
+uint64_t VulkanCommandProcessor::FirstRunThreadCpuNs() {
+#if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID
+  timespec thread_time;
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &thread_time) == 0) {
+    return uint64_t(thread_time.tv_sec) * UINT64_C(1000000000) +
+           uint64_t(thread_time.tv_nsec);
+  }
+#endif
+  return 0;
+}
+
+void VulkanCommandProcessor::FirstRunSplitLogIfDue(uint64_t now_ns) {
+  FirstRunSplit& split = first_run_split_;
+  if (!split.window_start_ns) {
+    split.window_start_ns = now_ns;
+    split.thread_cpu_start_ns = FirstRunThreadCpuNs();
+    return;
+  }
+  uint64_t window_ns = now_ns - split.window_start_ns;
+  if (window_ns < UINT64_C(1000000000)) {
+    return;
+  }
+  uint64_t thread_cpu_ns = FirstRunThreadCpuNs();
+  auto ms = [](uint64_t ns) { return double(ns) * 1e-6; };
+  uint64_t placeholder_draws =
+      split.draws[kFirstRunDrawInterpreter] +
+      split.draws[kFirstRunDrawInterpreterProgram] +
+      split.draws[kFirstRunDrawTranslatedPlaceholder];
+  uint64_t placeholder_ns =
+      split.draw_ns[kFirstRunDrawInterpreter] +
+      split.draw_ns[kFirstRunDrawInterpreterProgram] +
+      split.draw_ns[kFirstRunDrawTranslatedPlaceholder];
+  XELOGI(
+      "first run split: {:.0f} ms, {} frame(s) (longest {:.1f} ms), the GPU "
+      "command thread on a core for {:.0f} ms of them; draws with their real "
+      "pipeline {} in {:.1f} ms ({} vertices); with a placeholder {} in "
+      "{:.1f} ms: XenDroid's interpreter {} in {:.1f} ms ({} vertices), the "
+      "interpreter's version 2 {} in {:.1f} ms ({} vertices), a translated "
+      "vertex shader {} in {:.1f} ms ({} vertices); skipped {} in {:.1f} ms; "
+      "other {} in {:.1f} ms; of the draws' time, choosing or making the "
+      "pipeline {:.1f} ms, constants and descriptors {:.1f} ms; swaps {} in "
+      "{:.1f} ms",
+      ms(window_ns), split.swaps, ms(split.longest_frame_ns),
+      ms(thread_cpu_ns - split.thread_cpu_start_ns),
+      split.draws[kFirstRunDrawReal], ms(split.draw_ns[kFirstRunDrawReal]),
+      split.draw_vertices[kFirstRunDrawReal], placeholder_draws,
+      ms(placeholder_ns), split.draws[kFirstRunDrawInterpreter],
+      ms(split.draw_ns[kFirstRunDrawInterpreter]),
+      split.draw_vertices[kFirstRunDrawInterpreter],
+      split.draws[kFirstRunDrawInterpreterProgram],
+      ms(split.draw_ns[kFirstRunDrawInterpreterProgram]),
+      split.draw_vertices[kFirstRunDrawInterpreterProgram],
+      split.draws[kFirstRunDrawTranslatedPlaceholder],
+      ms(split.draw_ns[kFirstRunDrawTranslatedPlaceholder]),
+      split.draw_vertices[kFirstRunDrawTranslatedPlaceholder],
+      split.draws[kFirstRunDrawSkipped],
+      ms(split.draw_ns[kFirstRunDrawSkipped]), split.draws[kFirstRunDrawOther],
+      ms(split.draw_ns[kFirstRunDrawOther]), ms(split.configure_pipeline_ns),
+      ms(split.bindings_ns), split.swaps, ms(split.swap_ns));
+  uint64_t last_swap_ns = split.last_swap_ns;
+  split = FirstRunSplit();
+  split.window_start_ns = now_ns;
+  split.thread_cpu_start_ns = thread_cpu_ns;
+  // The frame in progress goes on into the next window.
+  split.last_swap_ns = last_swap_ns;
+}
+
 bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                        uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
@@ -3794,6 +3898,32 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
   const RegisterFile& regs = *register_file_;
+
+  // hakuX-Boosted: this draw's time, put down to what it was drawn with when
+  // the function returns (shader_profiling only: two clock reads a draw).
+  struct FirstRunDrawTimer {
+    VulkanCommandProcessor* command_processor = nullptr;
+    uint64_t start_ns = 0;
+    uint32_t kind = kFirstRunDrawOther;
+    uint64_t vertices = 0;
+    ~FirstRunDrawTimer() {
+      if (!command_processor) {
+        return;
+      }
+      uint64_t now_ns = FirstRunNowNs();
+      FirstRunSplit& split = command_processor->first_run_split_;
+      ++split.draws[kind];
+      split.draw_ns[kind] += now_ns - start_ns;
+      split.draw_vertices[kind] += vertices;
+      // Here as well as at the swap: a title that presents nothing for
+      // seconds still gets its lines.
+      command_processor->FirstRunSplitLogIfDue(now_ns);
+    }
+  } first_run_draw;
+  if (cvars::shader_profiling) {
+    first_run_draw.command_processor = this;
+    first_run_draw.start_ns = FirstRunNowNs();
+  }
 
   // One-time confirmation of the effective guest depth path for this title
   // (after per-game config has loaded) - lets a setting like the per-game
@@ -4308,12 +4438,19 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // cache), translating the shaders - doing this now to obtain the used
   // textures.
   VulkanPipelineCache::Pipeline* pipeline;
-  if (!pipeline_cache_->ConfigurePipeline(
-          vertex_shader_translation, pixel_shader_translation,
-          primitive_processing_result, normalized_depth_control,
-          normalized_color_mask,
-          render_target_cache_->last_update_render_pass_key(), use_interpreter,
-          &pipeline, wait_for_real_pipeline)) {
+  const uint64_t first_run_configure_start_ns =
+      first_run_draw.command_processor ? FirstRunNowNs() : 0;
+  const bool pipeline_configured = pipeline_cache_->ConfigurePipeline(
+      vertex_shader_translation, pixel_shader_translation,
+      primitive_processing_result, normalized_depth_control,
+      normalized_color_mask,
+      render_target_cache_->last_update_render_pass_key(), use_interpreter,
+      &pipeline, wait_for_real_pipeline);
+  if (first_run_draw.command_processor) {
+    first_run_split_.configure_pipeline_ns +=
+        FirstRunNowNs() - first_run_configure_start_ns;
+  }
+  if (!pipeline_configured) {
     XELOGE("IssueDraw: ConfigurePipeline failed for VS={:016X} PS={:016X}",
            vertex_shader->ucode_data_hash(),
            pixel_shader ? pixel_shader->ucode_data_hash() : 0);
@@ -4389,6 +4526,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // is ready (a later frame renders it). Never translate/compile on the draw
     // thread for these.
     // hakuX-Boosted: why, once for each pair of shaders.
+    first_run_draw.kind = kFirstRunDrawSkipped;
     pipeline_cache_->NoteDrawSkipped(
         skip_vertex_shader_hash, skip_pixel_shader_hash,
         interpreter_refusal() |
@@ -4410,6 +4548,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // Placeholder mode: real pipeline not created yet and no placeholder -
     // skip this draw rather than stalling the draw thread.
     // hakuX-Boosted: why, once for each pair of shaders.
+    first_run_draw.kind = kFirstRunDrawSkipped;
     pipeline_cache_->NoteDrawSkipped(
         skip_vertex_shader_hash, skip_pixel_shader_hash,
         (use_interpreter ? 0 : interpreter_refusal()) |
@@ -4451,6 +4590,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       !pipeline->placeholder_program.load(std::memory_order_acquire)) {
     // hakuX-Boosted: counted and explained, it used to be silent.
     if (cvars::vulkan_placeholder_pipelines) {
+      first_run_draw.kind = kFirstRunDrawSkipped;
       pipeline_cache_->NoteDrawSkipped(
           skip_vertex_shader_hash, skip_pixel_shader_hash,
           VulkanPipelineCache::kSkipInterpreterPlaceholderInlineShader,
@@ -4470,6 +4610,41 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       current_pipeline != VK_NULL_HANDLE &&
       current_pipeline ==
           pipeline->placeholder_pipeline.load(std::memory_order_acquire);
+  // hakuX-Boosted: what this draw is drawn with, for the once-a-second split,
+  // and the frame's allowance of vertices for the interpreter
+  // (vulkan_placeholder_interpreter_vertex_budget): a draw that would go
+  // over it is dropped rather than added to a frame that is already slow.
+  {
+    const bool placeholder_interpreter =
+        placeholder_bound &&
+        pipeline->uses_interpreter.load(std::memory_order_acquire);
+    const uint64_t draw_vertices =
+        primitive_processing_result.host_draw_vertex_count;
+    if (placeholder_interpreter) {
+      const int32_t vertex_budget =
+          cvars::vulkan_placeholder_interpreter_vertex_budget;
+      if (vertex_budget > 0 &&
+          frame_interpreter_vertices_ + draw_vertices >
+              uint64_t(vertex_budget)) {
+        first_run_draw.kind = kFirstRunDrawSkipped;
+        pipeline_cache_->NoteDrawSkipped(
+            skip_vertex_shader_hash, skip_pixel_shader_hash,
+            VulkanPipelineCache::kSkipInterpreterBudget, pipeline);
+        return true;
+      }
+      frame_interpreter_vertices_ += draw_vertices;
+    }
+    first_run_draw.vertices = draw_vertices;
+    first_run_draw.kind =
+        !placeholder_bound
+            ? kFirstRunDrawReal
+            : (placeholder_interpreter
+                   ? (pipeline->placeholder_program.load(
+                          std::memory_order_acquire)
+                          ? kFirstRunDrawInterpreterProgram
+                          : kFirstRunDrawInterpreter)
+                   : kFirstRunDrawTranslatedPlaceholder);
+  }
   VulkanPipelineCache::StandIn stand_in;
   const VulkanPipelineCache::PipelineLayoutProvider* stand_in_layout = nullptr;
   if (placeholder_bound) {
@@ -4519,6 +4694,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (!stand_in_candidates) {
       // Should not happen (the pipeline was made for one of them): nothing
       // valid to bind to the stand-in's texture, so no draw.
+      first_run_draw.kind = kFirstRunDrawSkipped;
       pipeline_cache_->NoteDrawSkipped(
           skip_vertex_shader_hash, skip_pixel_shader_hash,
           VulkanPipelineCache::kSkipStandInNoTexture, pipeline);
@@ -4532,6 +4708,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         static_cast<const PipelineLayout*>(stand_in_layout);
     if (stand_in_pipeline_layout->texture_count_vertex() ||
         stand_in_pipeline_layout->sampler_count_vertex()) {
+      first_run_draw.kind = kFirstRunDrawSkipped;
       pipeline_cache_->NoteDrawSkipped(
           skip_vertex_shader_hash, skip_pixel_shader_hash,
           VulkanPipelineCache::kSkipStandInVertexBindings, pipeline);
@@ -4624,6 +4801,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       if (stand_in_sampler == VK_NULL_HANDLE) {
         // No sampler to be had in this submission: the draw waits for the
         // real pipeline, as it would without the stand-in.
+        first_run_draw.kind = kFirstRunDrawSkipped;
         pipeline_cache_->NoteDrawSkipped(
             skip_vertex_shader_hash, skip_pixel_shader_hash,
             VulkanPipelineCache::kSkipStandInNoSampler, pipeline);
@@ -4999,13 +5177,19 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // Update uniform buffers and descriptor sets after binding the pipeline with
   // the new layout.
-  if (!UpdateBindings(vertex_shader, pixel_shader, stage_bindings_ready[0],
-                      stage_bindings_ready[1], interpreter_placeholder,
-                      placeholder_pixel_shader,
-                      stand_in_has_texture ? &stand_in_texture_binding
-                                           : nullptr,
-                      program_placeholder ? &interpreter_program_draw
-                                          : nullptr)) {
+  const uint64_t first_run_bindings_start_ns =
+      first_run_draw.command_processor ? FirstRunNowNs() : 0;
+  const bool bindings_updated = UpdateBindings(
+      vertex_shader, pixel_shader, stage_bindings_ready[0],
+      stage_bindings_ready[1], interpreter_placeholder,
+      placeholder_pixel_shader,
+      stand_in_has_texture ? &stand_in_texture_binding : nullptr,
+      program_placeholder ? &interpreter_program_draw : nullptr);
+  if (first_run_draw.command_processor) {
+    first_run_split_.bindings_ns +=
+        FirstRunNowNs() - first_run_bindings_start_ns;
+  }
+  if (!bindings_updated) {
     return false;
   }
 

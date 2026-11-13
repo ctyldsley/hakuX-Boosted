@@ -425,6 +425,9 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     kSkipStandInNoTexture = 1u << 24,
     kSkipStandInVertexBindings = 1u << 25,
     kSkipStandInNoSampler = 1u << 26,
+    // hakuX-Boosted: the frame's allowance of vertices drawn through the
+    // interpreter is spent (vulkan_placeholder_interpreter_vertex_budget).
+    kSkipInterpreterBudget = 1u << 27,
   };
   // Counts the skipped draw and says why in the log, once for each pair of
   // shaders and set of reasons. Adds what the slot itself says to `reasons`.
@@ -1104,6 +1107,12 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // Translations EnsureShadersTranslated had to do on the GPU command thread.
   uint64_t draw_thread_translations_ = 0;
   double draw_thread_translation_ms_ = 0.0;
+  // hakuX-Boosted: real pipelines ConfigurePipeline created on the GPU
+  // command thread itself (a draw that could not be asynchronous).
+  uint64_t draw_thread_pipelines_ = 0;
+  double draw_thread_pipeline_ms_ = 0.0;
+  double draw_thread_pipeline_worst_ms_ = 0.0;
+  uint64_t skipped_interpreter_budget_ = 0;
   uint64_t stats_logged_ms_ = 0;
   uint64_t stats_logged_signature_ = 0;
 
