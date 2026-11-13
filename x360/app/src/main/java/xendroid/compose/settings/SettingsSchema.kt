@@ -191,7 +191,8 @@ object SettingsSchema {
             b("GPU", "execute_unclipped_draw_vs_on_cpu_with_scissor", "Unclipped draw VS on CPU (scissor)", false),
             b("GPU", "mrt_edram_used_range_clamp_to_min", "MRT EDRAM used-range clamp to min", true),
             b("GPU", "execute_unclipped_draw_vs_on_cpu", "Unclipped draw VS on CPU", true),
-            b("GPU", "readback_memexport", "Readback memexport", false),
+            // hakuX-Boosted: "Readback memexport" was here. The core has no such setting
+            // (its key is in no DEFINE_), so the row changed nothing; removed.
             b("GPU", "force_convert_triangle_fans_to_lists", "Convert triangle fans to lists", false),
             b("GPU", "non_seamless_cube_map", "Non-seamless cube map", true),
             b("GPU", "depth_float24_round", "Depth float24 round", false),
@@ -210,7 +211,7 @@ object SettingsSchema {
             // A slider (an integer in the config): 0 off, 1 log + no culling, 2 log + no
             // depth test, 3 log + neither.
             i("GPU", "tessellation_debug", "Tessellation diagnostics (0 off, 1 no cull, 2 no depth, 3 both)", 0, 0, 3),
-            b("GPU", "value_convert_7e3_8888_reuse", "value_convert_7e3_8888_reuse", true),
+            b("GPU", "value_convert_7e3_8888_reuse", "Decode reused HDR tiles before blending", true),
         )),
 
         SettingsCategory("CPU", listOf(

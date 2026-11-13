@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -38,6 +39,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -62,8 +64,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import xendroid.compose.Utils
 import xendroid.compose.core.BundledDriver
+import xendroid.compose.core.HostApp
+import xendroid.compose.core.ShaderCaches
 import xendroid.compose.core.SessionLogs
 import xendroid.compose.settings.ConfigGuard
+import xendroid.compose.settings.ConfigStore
 import xendroid.compose.settings.Setting
 import xendroid.compose.settings.SettingValue
 import xendroid.compose.settings.SettingsCategory
@@ -138,6 +143,9 @@ fun HostSettingsPane(
     modifier: Modifier = Modifier,
     header: LazyListScope.() -> Unit = {},
     footer: LazyListScope.() -> Unit = {},
+    /** Settings (by key) the host shows in its own rows above, left out of the sections
+     *  so that no setting is on the screen twice. */
+    omit: Set<String> = emptySet(),
 ) {
     // Which sections are open: kept across a rotation, and across the host's tabs where the
     // host keeps a tab's saved state (hakuX's SettingsTabsFrame does). The first one starts
@@ -145,9 +153,12 @@ fun HostSettingsPane(
     var open by rememberSaveable { mutableStateOf(listOf(SECTION_ORDER.first())) }
     val listState = rememberLazyListState()
     if (vm == null) {
-        LazyColumn(modifier.fillMaxSize(), state = listState) {
-            header()
+        // The short list shown while the settings are read has a state of its own: handed
+        // the saved one, it would cut the restored scroll position down to its few rows
+        // and the tab would come back at the top.
+        LazyColumn(modifier.fillMaxSize(), state = remember { LazyListState() }) {
             item(key = "x360.notice") { ConfigNoticeCard(loaded = false) }
+            header()
             item(key = "x360.state") {
                 HostNote(
                     if (failed) "The Xbox 360 core's settings could not be read on this phone."
@@ -160,14 +171,18 @@ fun HostSettingsPane(
     }
     HostSettingsLifecycle(vm)
     val values by vm.values.collectAsStateWithLifecycle()
-    val sections = remember(vm) {
+    val sections = remember(vm, omit) {
         val byTitle = vm.categories.associateBy { it.title }
         // a section the order doesn't name (one upstream adds later) still shows, at the end
-        SECTION_ORDER.mapNotNull { byTitle[it] } + vm.categories.filter { it.title !in SECTION_ORDER }
+        (SECTION_ORDER.mapNotNull { byTitle[it] } + vm.categories.filter { it.title !in SECTION_ORDER })
+            .map { c -> if (omit.isEmpty()) c else c.copy(settings = c.settings.filter { it.key !in omit }) }
+            .filter { it.settings.isNotEmpty() }
     }
+    val shaderCaches = rememberShaderCaches()
     LazyColumn(modifier.fillMaxSize(), state = listState) {
-        header()
         item(key = "x360.notice") { ConfigNoticeCard(loaded = true) }
+        item(key = "x360.signin") { SignInRow() }
+        header()
         item(key = "x360.title") { HostSection("Emulation settings") }
         item(key = "x360.hint") {
             HostNote(
@@ -193,7 +208,147 @@ fun HostSettingsPane(
                 }
             }
         }
+        shaderCacheItems(shaderCaches)
         footer()
+    }
+}
+
+/**
+ * hakuX-Boosted: shown only while no profile is signed in. Xbox 360 games keep their
+ * saves under the signed-in profile: without one a title shows no saves and says it
+ * cannot save. The row opens the profiles screen; the state is read again on return.
+ */
+@Composable
+private fun SignInRow() {
+    val context = LocalContext.current
+    val owner = LocalLifecycleOwner.current
+    var resumes by remember { mutableIntStateOf(0) }
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumes++
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+    val signedOut by produceState(false, resumes) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                val handle = ConfigStore(context.applicationContext).openLiveSnapshot()
+                try {
+                    handle.getString("Profiles", "logged_profile_slot_0_xuid").isNullOrEmpty()
+                } finally {
+                    handle.closeDiscard()
+                }
+            }.getOrDefault(false)
+        }
+    }
+    if (!signedOut) return
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Column(
+            Modifier
+                .clickable(role = Role.Button) {
+                    runCatching {
+                        context.startActivity(HostApp.screenIntent(context, HostApp.SCREEN_PROFILES, null, null))
+                    }
+                }
+                .padding(16.dp),
+        ) {
+            Text("No profile is signed in", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Xbox 360 games keep their saves under a profile. Without one a game shows no " +
+                    "saves and cannot save. Tap to choose or create a profile.",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
+}
+
+/** The titles with shaders on disc, and a way to read them again after one is cleared. */
+private class ShaderCacheState(val entries: List<ShaderCaches.Entry>?, val reload: () -> Unit)
+
+@Composable
+private fun rememberShaderCaches(): ShaderCacheState {
+    val context = LocalContext.current.applicationContext
+    var generation by remember { mutableIntStateOf(0) }
+    val entries by produceState<List<ShaderCaches.Entry>?>(null, generation) {
+        value = withContext(Dispatchers.IO) { runCatching { ShaderCaches.list(context) }.getOrDefault(emptyList()) }
+    }
+    return ShaderCacheState(entries) { generation++ }
+}
+
+/**
+ * hakuX-Boosted: each title's shader cache, its size, and a tap to clear it (asked
+ * first). What a player needs when a title draws wrongly after an update of the app or
+ * the driver, or when storage runs short.
+ */
+private fun LazyListScope.shaderCacheItems(state: ShaderCacheState) {
+    item(key = "x360.shaders.title") { HostSection("Shader caches") }
+    val entries = state.entries
+    item(key = "x360.shaders.hint") {
+        HostNote(
+            when {
+                entries == null -> "Measuring…"
+                entries.isEmpty() -> "No game has stored shaders yet. They are kept as a game is played."
+                else -> "What each game has compiled so far, kept so that it does not stutter the " +
+                    "next time. Clearing one is safe: the game compiles its shaders again as it " +
+                    "plays. Close the game first."
+            }
+        )
+    }
+    if (entries != null) {
+        items(entries, key = { "x360.shaders." + it.titleId }) { entry -> ShaderCacheRow(entry, state.reload) }
+    }
+}
+
+@Composable
+private fun ShaderCacheRow(entry: ShaderCaches.Entry, onCleared: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var confirm by remember { mutableStateOf(false) }
+    val title = entry.name ?: ("Game " + entry.titleId)
+    val size = android.text.format.Formatter.formatShortFileSize(context, entry.bytes)
+    ListItem(
+        headlineContent = { Text(title) },
+        supportingContent = {
+            Text(size + (if (entry.name != null) ", " + entry.titleId else "") + ". Tap to clear.")
+        },
+        modifier = Modifier.clickable(role = Role.Button) { confirm = true },
+    )
+    if (confirm) {
+        AlertDialog(
+            onDismissRequest = { confirm = false },
+            title = { Text("Clear the shader cache?") },
+            text = {
+                Text(
+                    "$title: $size. The game will compile its shaders again as it plays, " +
+                        "with the stutter of a first run until the cache is rebuilt. Saves and " +
+                        "settings are not touched."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirm = false
+                    scope.launch {
+                        val freed = withContext(Dispatchers.IO) {
+                            runCatching { ShaderCaches.clear(context.applicationContext, entry.titleId) }.getOrDefault(0L)
+                        }
+                        Toast.makeText(
+                            context,
+                            "Cleared " + android.text.format.Formatter.formatShortFileSize(context, freed),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        onCleared()
+                    }
+                }) { Text("Clear") }
+            },
+            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+        )
     }
 }
 

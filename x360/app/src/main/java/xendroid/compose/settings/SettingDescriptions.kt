@@ -92,7 +92,6 @@ object SettingDescriptions {
         "present_render_pass_clear" to "Clear the whole screen via the render pass instead of separate clears of the letterbox bars",
         "protect_on_release" to "Locks freed memory so any later access faults, catching use-after-free bugs",
         "protect_zero" to "Blocks reads and writes to the zero page so null-pointer accesses fault instead of corrupting",
-        "readback_memexport" to "Read shader memory-export data back to the CPU; some games need it, off is slightly faster",
         "readback_resolve" to "Which resolves are copied back to guest RAM; UMA reads mapped memory directly and is the only mode that works on Adreno",
         "render_target_path" to "Render target emulation path: fast fixed-function or slower pixel-exact software blending",
         "resolve_copy_dest_number_packing" to "Packs full-resolve destinations by copy_dest_number instead of assuming an unsigned fraction; only has an effect with accurate resolve number formats on",
