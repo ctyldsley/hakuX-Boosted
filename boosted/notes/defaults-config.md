@@ -353,7 +353,7 @@ No image, icon, font, logo or name was added. The words on screen are
    D-pad and is unmistakable; the dimming does not look green.
 3. Xbox 360 tab: the notice card (after test 1 of step 2), the sign-in row
    (remove the active profile), the shader cache rows with real sizes
-   (Fable II's should be about 47 MB by the handoff's figures), clearing
+   (the handoff measured 46 MB of pipeline cache, 1.2 MB of shaders and 52 KB of pipeline states on disc after the Banjo run), clearing
    one and the size going.
 4. Profiles, per-game settings, key map without their divider lines: does
    the list still read as rows? If not, the lines go back in one place
