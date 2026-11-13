@@ -75,4 +75,29 @@ Phone: Xiaomi, Snapdragon SM8850 (2 prime + 6 performance cores), Adreno
   in the first ten minutes of the title.
 - The title's own audio mixing thread takes about 28% of a core.
 
+Added 2026-11-13 00:55, from the 200 s profile of the six dispatch threads
+(1 kHz, Fable II, first minutes of play). Shares are of all six threads'
+time unless a thread is named.
+
+- One guest function, `sub_82B9BF90`, is 19.1% of everything and 52.7% of
+  the 3D Engine thread (guest CPU 3): a wait loop that spins. For the
+  scheduler session: this is the largest single saving on offer, a
+  spinning guest wait that should park. Find what it polls (a memory
+  word, see the `MemoryPollPark` lines) and why it is not parked already.
+- `sub_82C62548` is 6.1% of everything and 29.9% of guest CPU 5: the
+  title's audio mixer. For the CPU translation session: a good specimen
+  of hot translated code (tight float and vector loops).
+- Host-call thunks (`a64_host_code`) 3.7% overall, 6.8% of GameThread.
+- `tlsdesc_resolver_dynamic` 2.4% overall, 4.9% of GameThread.
+- Translating at run time is visible on GameThread: `SimplificationPass::Run`
+  3.8%, `SimplifyBitArith` 1.0%, plus register allocation, context
+  promotion and constant propagation, about 6% of that thread; 1.6% + 0.4%
+  + 0.3% + 0.3% + 0.3% overall. `SimplificationPass` alone costs more than
+  the rest of the passes together: for the CPU translation session, look
+  at why (it reruns to a fixed point).
+- Scheduler mutex traffic: `pthread_mutex_lock` 1.4% and unlock 1.0%
+  overall (2.9% and 2.0% of GameThread), `YieldCurrentThread` 0.6% self,
+  clock reads about 1%.
+- `mprotect` 0.4% overall, 1.2% of the 3D Engine thread (memory watches).
+
 Detail and evidence: `boosted/HANDOFF.md`, "Right now".
