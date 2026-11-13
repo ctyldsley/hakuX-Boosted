@@ -126,6 +126,12 @@ int InstrEmit_branch(PPCHIRBuilder& f, const char* src, uint64_t cia,
     if (lk && f.TryInlineLeafCall(target, cia)) {
       return 0;
     }
+    // hakuX-Boosted: a kernel import stub as the host call itself. After the
+    // leaf test, which refuses import stubs, so the order changes nothing
+    // there.
+    if (lk && f.TryInlineExternCall(target, cia)) {
+      return 0;
+    }
   }
 
   // TODO(benvanik): this may be wrong and overwrite LRs when not desired!
