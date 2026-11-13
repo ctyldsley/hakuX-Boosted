@@ -97,8 +97,15 @@ fun SettingsTabsFrame(
         )
       }
     }
-    holder.SaveableStateProvider(shown.name) {
-      content(PaddingValues(0.dp))
+    // A tab's content is a group of its own (key): with the state provider alone the
+    // Global and Xbox tabs, which are the same Column in SettingsScreen, reused each
+    // other's nodes, and on device (run 78) the tab row and the accessibility tree
+    // changed while the old tab's rows stayed drawn. The holder outside the group still
+    // keeps each tab's scroll position.
+    androidx.compose.runtime.key(shown) {
+      holder.SaveableStateProvider(shown.name) {
+        content(PaddingValues(0.dp))
+      }
     }
   }
 }

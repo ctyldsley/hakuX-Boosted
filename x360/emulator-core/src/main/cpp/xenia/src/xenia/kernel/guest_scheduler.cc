@@ -78,6 +78,17 @@ DEFINE_bool(
     "about a millisecond at a time until something else runs there or it "
     "stops yielding. Implies guest_scheduler_lean_yield.",
     "Kernel");
+// hakuX-Boosted: on device (run 78, Fable II) the spinner's runs were ended
+// by its own short waits 300 to 700 times a second, so almost none reached
+// 2 ms and it was parked about nine times a second. A setting, so the
+// threshold can be tried on the phone without a build.
+DEFINE_uint32(
+    guest_scheduler_yield_park_after_us, 2000,
+    "With guest_scheduler_park_yield_spinners: how long a run of quick "
+    "empty yields lasts before the yielder is parked. Lower parks a thread "
+    "that spins in short bursts between waits, at the cost of answering "
+    "up to a millisecond or two later each time.",
+    "Kernel");
 DEFINE_bool(
     guest_scheduler_park_poll_loops, false,
     "A guest thread that stays in a recognised spin-wait (the loops the "
@@ -330,7 +341,10 @@ void GuestScheduler::EnsureStarted() {
   double ticks_per_us = CalibrateTicksPerUs();
   ticks_per_us_ = ticks_per_us;
   // hakuX-Boosted: 0 (the counter did not calibrate) switches the parks off.
-  yield_park_after_ticks_ = uint64_t(ticks_per_us * kYieldParkAfterUs);
+  yield_park_after_ticks_ = uint64_t(
+      ticks_per_us * (cvars::guest_scheduler_yield_park_after_us
+                          ? cvars::guest_scheduler_yield_park_after_us
+                          : kYieldParkAfterUs));
   yield_gap_ticks_ = uint64_t(ticks_per_us * kYieldSpinGapUs);
   poll_park_after_ticks_ = uint64_t(ticks_per_us * kPollParkAfterUs);
   if (cvars::guest_scheduler_lean_yield ||
@@ -2131,7 +2145,7 @@ void GuestScheduler::ReportStatsIfDue() {
   if (cvars::guest_scheduler_park_yield_spinners) {
     XELOGI(
         "GuestScheduler: yield spinner looks that did not park: another "
-        "yielder {}, work between yields {}, run under 2 ms {}, not "
+        "yielder {}, work between yields {}, run too young {}, not "
         "allowed here {} | dispatches during a run {}",
         take(stats_.yield_park_new_thread), take(stats_.yield_park_slow),
         take(stats_.yield_park_young), take(stats_.yield_park_barred),
