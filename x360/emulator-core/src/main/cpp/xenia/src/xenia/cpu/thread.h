@@ -40,7 +40,11 @@ class Thread {
   const std::string& thread_name() const { return thread_name_; }
 
  protected:
+  // hakuX-Boosted: write through SetCurrentThreadPointer, read through
+  // GetCurrentThread: with host_thread_state_slot on the value lives in the
+  // host thread's state (base/host_thread_state.h) and this is unused.
   thread_local static Thread* current_thread_;
+  static void SetCurrentThreadPointer(Thread* thread);
 
   ThreadState* thread_state_ = nullptr;
   std::unique_ptr<xe::threading::Thread> thread_ = nullptr;

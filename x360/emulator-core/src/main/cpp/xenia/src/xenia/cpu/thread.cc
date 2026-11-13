@@ -8,6 +8,7 @@
  */
 
 #include "xenia/cpu/thread.h"
+#include "xenia/base/host_thread_state.h"
 #include "xenia/base/platform.h"
 #include "xenia/cpu/thread_state.h"
 
@@ -21,9 +22,30 @@ Thread::~Thread() {}
 
 // hakuX-Boosted: never inlined (a thread_local read by code that fibers carry
 // between host threads: kernel/xthread.cc, XThread::GetCurrentThread).
-XE_NOINLINE bool Thread::IsInThread() { return current_thread_ != nullptr; }
+// With host_thread_state_slot on they read the host thread's state instead
+// (base/host_thread_state.h): its address is read afresh on each call.
+XE_NOINLINE bool Thread::IsInThread() { return GetCurrentThread() != nullptr; }
 
-XE_NOINLINE Thread* Thread::GetCurrentThread() { return current_thread_; }
+XE_NOINLINE Thread* Thread::GetCurrentThread() {
+  if (const auto* state = xe::threading::HostThreadStateForRead()) {
+    Thread* thread = state->cpu_thread;
+    xe::threading::HostThreadStateVerify(
+        state, "the current cpu::Thread", reinterpret_cast<uintptr_t>(thread),
+        reinterpret_cast<uintptr_t>(current_thread_));
+    return thread;
+  }
+  return current_thread_;
+}
+
+XE_NOINLINE void Thread::SetCurrentThreadPointer(Thread* thread) {
+  if (auto* state = xe::threading::HostThreadStateForWrite()) {
+    state->cpu_thread = thread;
+    if (!xe::threading::HostThreadStateKeepsThreadLocal(state)) {
+      return;
+    }
+  }
+  current_thread_ = thread;
+}
 uint32_t Thread::GetCurrentThreadId() {
   return Thread::GetCurrentThread()->thread_state()->thread_id();
 }
