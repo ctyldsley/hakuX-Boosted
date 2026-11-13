@@ -15,7 +15,7 @@ Base: `claude/integration-1113` at `d940365`. Pushed only to
   `guest_scheduler_skew_bound_us` (0 = off, the default, today's
   behaviour), the hard cap, the counters on the per-second lines, a line
   per long hold, the hold named in late wake lines, the totals in the
-  thread dump. Built by Actions (see "Build").
+  thread dump. Built green by Actions, run 80 (see "Build").
 - In progress: nothing.
 - Next: the device runs of "What to run on the phone". Then, by what they
   show, one of the items in "What is next".
@@ -481,5 +481,7 @@ By what the device runs show:
 
 - `08a7171` (the code): Actions run 79, replaced before it finished by
   the push of this file (a newer push cancels a running build).
-- The commit that carries this file (same code, plus this file): its run's
-  result is added below when known.
+- `df2aa96` (the same code, plus this file): Actions run 80, green, both
+  jobs (hakuX's core, and the APK with the 360 core).
+- The commit that records this result changes this file only; its own run
+  builds the same code again.
