@@ -11,6 +11,8 @@
 #include <chrono>
 #include <cstdint>
 
+#include "xenia/base/host_perf.h"
+
 namespace xe {
 
 // Guest-frame present timing for the debug overlay.
@@ -41,6 +43,11 @@ inline std::atomic<float>& frame_fps() {
 // FPS is a RenderDoc-style average over a ~1s sliding time window (framerate
 // independent); instant_ms stays the raw present-to-present delta.
 inline void RecordGuestPresent() {
+  // hakuX-Boosted: the one call into base/host_perf.cc (the performance hint
+  // session, the core placement policy and the once-a-second core log). Three
+  // loads and a return while every host_perf_* setting is off.
+  host_perf::OnGuestFramePresented();
+
   using clock = std::chrono::steady_clock;
   static constexpr double kWindowMs = 1000.0;
   static constexpr size_t kCap = 1024;  // covers >1000 fps within the window
