@@ -31,6 +31,13 @@
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
 
+// hakuX-Boosted: a dispatch thread's CPU-time clock, for the skew bound's
+// split of a hold (pthread_getcpuclockid, clock_gettime).
+#if XE_PLATFORM_LINUX
+#include <pthread.h>
+#include <time.h>
+#endif
+
 DECLARE_path(log_file);
 
 DEFINE_bool(
@@ -112,6 +119,42 @@ DEFINE_uint32(
     "dispatch thread every 2 ms.",
     "Kernel");
 
+// hakuX-Boosted: the bound on the skew between guest CPUs
+// (boosted/notes/guest-skew-bound.md). The console's six hardware threads
+// all run at once; here each is a host thread the phone may leave without a
+// core for tens of milliseconds while the others run on, which reorders the
+// title's threads in a way the console never does. Measured on the SM8850
+// (run 73, 2026-11-13, phone hot, four dispatch threads on one core): Fable
+// II's worker ran 64 ms after the event that starts it, the main thread got
+// a frame ahead of it and the title deadlocked. 0, the default, is what ran
+// before any of this existed.
+DEFINE_uint32(
+    guest_scheduler_skew_bound_us, 0,
+    "Bound, in microseconds, on how far a guest thread may run ahead of "
+    "another guest CPU whose host thread is not being run. A thread that "
+    "readies a thread on another guest CPU (an event set, a semaphore "
+    "release, a critical section hand-over, a resume) and then runs on is "
+    "held at a safepoint once that CPU has not acted on it for this long, "
+    "and every running thread is held while another CPU's running thread "
+    "has shown no progress for this long. Judged once per watchdog tick "
+    "(guest_scheduler_quantum_us), so the effective bound is this plus up "
+    "to one tick. 0 = off. Try 500 and 2000.",
+    "Kernel");
+DEFINE_uint32(
+    guest_scheduler_skew_cap_multiple, 20,
+    "The longest one hold of guest_scheduler_skew_bound_us may last, as a "
+    "multiple of the bound (20 = 10 ms at a bound of 500). After it the "
+    "held thread runs on and does not wait for the same lapse again, so a "
+    "host thread that is truly stuck cannot hang the title.",
+    "Kernel");
+DEFINE_bool(
+    guest_scheduler_skew_progress_gate, true,
+    "With guest_scheduler_skew_bound_us set: also hold every running guest "
+    "thread while another guest CPU's running thread shows no progress (its "
+    "host thread descheduled, or busy in host code such as translation). "
+    "False leaves only the hold of a thread that readied another.",
+    "Kernel");
+
 namespace xe {
 namespace kernel {
 
@@ -157,6 +200,19 @@ static constexpr uint64_t kYieldParkAfterUs = 2000;
 static constexpr uint64_t kYieldSpinGapUs = 20;
 static constexpr uint64_t kPollParkAfterUs = 500;
 
+// hakuX-Boosted: guest_scheduler_skew_bound_us. How long a held fiber sleeps
+// before it looks again without having been woken (a preemption of the held
+// thread is only seen this way), the hold length from which each hold is
+// logged, and the watchdog's priority while the bound is on (nice -12 on
+// Android, above the dispatch threads' -8: the watchdog raises the probes
+// and must not queue behind the threads it is timing).
+static constexpr uint64_t kSkewHoldSliceUs = 200;
+static constexpr uint64_t kSkewHoldLogUs = 4000;
+static constexpr int32_t kSkewWatchdogPriority = 28;
+
+// Defined with the yield spinner's park below; a hold has the same rule.
+static bool CanParkSpinner(XThread* self);
+
 // Logical CPU index of the host thread currently executing, or -1 on any
 // non-dispatch thread. Set by each CPU's RunLoop.
 static thread_local int t_current_cpu = -1;
@@ -199,8 +255,19 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
   }
   auto* context = self->thread_state()->context();
   auto& links = self->scheduler_links();
+  // hakuX-Boosted: guest_scheduler_skew_bound_us. First, because it must see
+  // every safepoint the watchdog's probe reaches, whatever the thread is
+  // doing: it answers the probe and, where a hold is allowed, waits for a
+  // guest CPU that has fallen behind. It never yields the fiber.
+  self->kernel_state()->guest_scheduler()->SkewAtSafepoint(self);
   // hakuX-Boosted: guest_scheduler_park_poll_loops, see PollWatchAtBackoff.
   if (self->kernel_state()->guest_scheduler()->PollWatchAtSafepoint(self)) {
+    return;
+  }
+  // hakuX-Boosted: the flag was up for the probe alone. Before the deferral
+  // counters below, which would otherwise count every probe at raised IRQL
+  // or under the global lock as a declined preemption.
+  if (self->kernel_state()->guest_scheduler()->SkewOnlyProbed(self)) {
     return;
   }
   // A co-resident fiber would re-enter the recursive lock on this host thread,
@@ -269,6 +336,9 @@ static void SpinBackoffYieldFiber(void* /*raw_context*/) {
     return;
   }
   auto* scheduler = self->kernel_state()->guest_scheduler();
+  // hakuX-Boosted: guest_scheduler_skew_bound_us (the poll-loop watch below
+  // can return without reaching YieldCurrentThread, which answers it too).
+  scheduler->SkewAtBackoff(self);
   // hakuX-Boosted: guest_scheduler_park_poll_loops.
   if (scheduler->PollWatchAtBackoff(self)) {
     return;
@@ -374,6 +444,32 @@ void GuestScheduler::EnsureStarted() {
                            : "host tick counter did not calibrate");
   }
 
+  // hakuX-Boosted: guest_scheduler_skew_bound_us. Set before any dispatch
+  // thread exists. It needs the watchdog (the probes are raised on its
+  // tick), so without a timeslice it stays off.
+  if (cvars::guest_scheduler_skew_bound_us) {
+    if (!quantum_ticks_) {
+      XELOGW(
+          "GuestScheduler: guest_scheduler_skew_bound_us is set but there is "
+          "no watchdog tick (see the line above), so the skew bound is off");
+    } else {
+      skew_bound_ticks_ = std::max<uint64_t>(
+          1, uint64_t(ticks_per_us * cvars::guest_scheduler_skew_bound_us));
+      const uint64_t multiple = std::max<uint64_t>(
+          1, uint64_t(cvars::guest_scheduler_skew_cap_multiple));
+      skew_cap_ticks_ = skew_bound_ticks_ * multiple;
+      skew_progress_gate_ = cvars::guest_scheduler_skew_progress_gate;
+      XELOGI(
+          "GuestScheduler: skew bound {} us, one hold at most {} us, "
+          "progress gate {}, judged every {} us (the watchdog tick)",
+          uint32_t(cvars::guest_scheduler_skew_bound_us),
+          uint64_t(cvars::guest_scheduler_skew_bound_us) * multiple,
+          skew_progress_gate_ ? "on" : "off",
+          std::max(uint64_t(cvars::guest_scheduler_quantum_us),
+                   uint64_t(kMinWatchdogPeriodUs)));
+    }
+  }
+
   for (int i = 0; i < kMaxCpus; ++i) {
     cpus_[i].ready_event = xe::threading::Event::CreateAutoResetEvent(false);
   }
@@ -383,6 +479,10 @@ void GuestScheduler::EnsureStarted() {
     watchdog_thread_ =
         xe::threading::Thread::Create(params, [this]() { WatchdogLoop(); });
     watchdog_thread_->set_name("Guest Scheduler Watchdog");
+    // hakuX-Boosted: only with the skew bound on.
+    if (skew_bound_ticks_) {
+      watchdog_thread_->set_priority(kSkewWatchdogPriority);
+    }
   }
   for (int i = 0; i < kMaxCpus; ++i) {
     xe::threading::Thread::CreationParameters params;
@@ -508,6 +608,24 @@ void GuestScheduler::Shutdown() {
 
 void GuestScheduler::EnqueueReady(XThread* thread, int cpu_index,
                                   bool yield_to_other) {
+  // hakuX-Boosted: guest_scheduler_skew_bound_us. A guest thread that makes
+  // another runnable on another guest CPU (a resume, a new thread) is in
+  // that CPU's debt until it acts on it, as for a signal (WakeForSignal).
+  XThread* skew_debtor = nullptr;
+  int skew_debtor_cpu = -1;
+  uint64_t skew_now = 0;
+  if (skew_bound_ticks_) {
+    skew_debtor_cpu = CurrentCpu();
+    if (skew_debtor_cpu >= 0 && skew_debtor_cpu != cpu_index) {
+      skew_debtor = XThread::GetCurrentFiberThread();
+      if (skew_debtor == thread) {
+        skew_debtor = nullptr;
+      }
+      if (skew_debtor) {
+        skew_now = Clock::host_tick_count_raw();
+      }
+    }
+  }
   {
     TimedLock lock(this);
     auto& links = thread->scheduler_links();
@@ -532,6 +650,10 @@ void GuestScheduler::EnqueueReady(XThread* thread, int cpu_index,
     LinkReadyLocked(cpus_[cpu_index], thread, at_head);
     if (yield_to_other) {
       cpus_[cpu_index].yield_to_other = thread;
+    }
+    if (skew_debtor) {
+      SkewAddDebtLocked(skew_debtor, skew_debtor_cpu, cpu_index,
+                        thread->thread_id(), skew_now);
     }
   }
   // Only a parked dispatch thread needs the syscall.
@@ -851,6 +973,17 @@ void GuestScheduler::SwitchTo(XThread* next) {
           Clock::host_tick_count_raw() + quantum_ticks_;
     }
     cpus_[CurrentCpu()].quantum_deadline_tick = links.quantum_deadline_tick;
+    // hakuX-Boosted: guest_scheduler_skew_bound_us. A dispatch is a
+    // scheduling decision: whoever readied a thread here has been answered.
+    if (skew_bound_ticks_) {
+      Cpu& cpu = cpus_[CurrentCpu()];
+      cpu.skew_serve_seq.store(
+          cpu.skew_serve_seq.load(std::memory_order_relaxed) + 1);
+      cpu.skew_running.store(true);
+    }
+  }
+  if (skew_bound_ticks_ && skew_holders_.load()) {
+    SkewNotify();
   }
   stats_.switches.fetch_add(1, std::memory_order_relaxed);
   XThread::SetCurrentThread(next);
@@ -858,12 +991,32 @@ void GuestScheduler::SwitchTo(XThread* next) {
   // A flag raised while this fiber was off-CPU is stale, the dispatcher
   // already served it. A raise racing this clear is restored by the watchdog.
   next->thread_state()->context()->preempt_requested = 0;
+  // hakuX-Boosted: guest_scheduler_skew_bound_us. A probe the watchdog
+  // raised since the lock above was released must not lose its flag to that
+  // clear, or it would stay unanswered for a tick and this CPU would be
+  // taken for stalled.
+  if (skew_bound_ticks_ && cpus_[CurrentCpu()].skew_probe_tick.load()) {
+    next->thread_state()->context()->preempt_requested = 1;
+  }
   next->fiber()->SwitchTo();
   // Back on the idle fiber.
   {
     TimedLock lock(this);
     links.running = false;
     cpus_[CurrentCpu()].current_thread = nullptr;
+    // hakuX-Boosted: guest_scheduler_skew_bound_us. No fiber runs here now:
+    // a probe it left unanswered is void, and nobody waits for this CPU's
+    // progress. The time is stored before the flag is lowered, so a reader
+    // that sees no fiber running sees since when.
+    if (skew_bound_ticks_) {
+      Cpu& cpu = cpus_[CurrentCpu()];
+      cpu.skew_idle_since_tick.store(Clock::host_tick_count_raw());
+      cpu.skew_probe_tick.store(0);
+      cpu.skew_running.store(false);
+    }
+  }
+  if (skew_bound_ticks_ && skew_holders_.load()) {
+    SkewNotify();
   }
   XThread::SetCurrentThread(nullptr);
 }
@@ -968,6 +1121,32 @@ bool GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower,
       cause == YieldCause::kZeroDelay || cause == YieldCause::kNtYield;
   if (guest_call) {
     cpus_[CurrentCpu()].poll_watch_thread = nullptr;
+  }
+  // hakuX-Boosted: guest_scheduler_skew_bound_us. A yield shows the thread
+  // is being run, so it answers the watchdog's probe; the look at the other
+  // CPUs that every probe is followed by is made here only for
+  // NtYieldExecution, which guest code calls directly and where a guest
+  // sleep could stand. Any other caller may be kernel code in the middle of
+  // something: the look is then owed, and the flag raised on the way out
+  // takes the thread to its next JIT safepoint for it. That also covers a
+  // round trip through the dispatcher, which clears the flag.
+  struct SkewOwedGuard {
+    XThread* thread;
+    ~SkewOwedGuard() {
+      if (thread && thread->scheduler_links().skew_eval_owed) {
+        thread->thread_state()->context()->preempt_requested = 1;
+      }
+    }
+  } skew_owed_guard{skew_bound_ticks_ ? self : nullptr};
+  if (skew_bound_ticks_) {
+    if (SkewAnswerProbe(cpus_[CurrentCpu()])) {
+      links.skew_eval_owed = true;
+    }
+    if (links.skew_eval_owed && cause == YieldCause::kNtYield &&
+        CanParkSpinner(self)) {
+      links.skew_eval_owed = false;
+      SkewEvaluateAndHold(self);
+    }
   }
   // hakuX-Boosted: NtYieldExecution asks for a quantum end, which kept it out
   // of the path below: every call went to the dispatch loop and back even
@@ -1253,6 +1432,504 @@ bool GuestScheduler::PollWatchAtBackoff(XThread* self) {
   return true;
 }
 
+// hakuX-Boosted: guest_scheduler_skew_bound_us, the bound on the skew between
+// guest CPUs (boosted/notes/guest-skew-bound.md has the reasoning at length).
+//
+// What it is for. Each guest CPU is a host thread, and the phone can leave
+// one without a core for tens of milliseconds while the other five run on.
+// The console never does that, and titles rely on it: Fable II starts a
+// worker and comes back for its result a frame later holding a lock the
+// worker needs. So a guest thread must not run far ahead of a guest CPU
+// that should be running and is not.
+//
+// How a CPU is known to be behind, without a check in translated code:
+// - The probe. Every watchdog tick each running fiber's CPU gets
+//   skew_probe_tick = now (unless one is still outstanding) and the fiber's
+//   preempt flag. The fiber answers at its next safepoint, yield or
+//   backoff site by storing 0. A probe outstanding for longer than the
+//   bound means that host thread is not reaching guest code: descheduled,
+//   or deep in host code. That CPU is "stalled".
+// - The debt. A guest thread whose signal readies a thread on another CPU
+//   notes that CPU's skew_serve_seq, which moves at every dispatch there and
+//   every time that CPU finds, under the lock, nothing to run. Until it
+//   moves the signal has not been acted on. If meanwhile no fiber runs
+//   there for longer than the bound (counted from the signal, or from when
+//   its last fiber left if that is later), that CPU's host thread was woken
+//   and has not turned up.
+//
+// The two gates, both judged by a fiber for itself, once per probe, at a
+// place where a guest sleep could stand (CanParkSpinner: not in a wait,
+// below DISPATCH_LEVEL, not under the global lock):
+// - Start gate: it has a debt on a CPU that is behind as above. Only the
+//   signaller waits.
+// - Progress gate: another CPU is stalled. Every running thread waits.
+//
+// The hold. The fiber stays the running fiber of its CPU and its host
+// thread sleeps on skew_cv_ until the awaited CPU acts or answers, the hard
+// cap passes, or something asks this thread to give way (a preemption by a
+// higher-priority thread, a terminate, a suspend, shutdown). Nothing else
+// on the holder's CPU runs meanwhile: that CPU stands still in guest time,
+// which is the point. It was chosen over running the readied fiber on the
+// signaller's or an idle dispatch thread because a guest thread carries its
+// CPU number, and two fibers of one guest CPU running at once on two host
+// threads break titles that keep per-processor data without a lock.
+//
+// Why the scheduler itself cannot deadlock on this:
+// - A hold takes no lock while it sleeps but skew_mutex_ (inside the
+//   condition wait), which is a leaf: never taken under lock_, and nothing
+//   is taken under it.
+// - A CPU in a hold counts as on time (skew_holding): it is never the
+//   target of a hold, and every target is a CPU that is not holding, so
+//   there is no cycle of holders. The awaited side never waits for the
+//   holder to release anything of the scheduler's.
+// - The awaited condition is liveness of a host thread (a dispatch, a
+//   verified idle pass, an answered probe), never progress of the guest
+//   program, so a guest lock the holder owns cannot keep the hold from
+//   ending: the awaited thread ends it by running into that lock.
+// - Every hold ends at the cap, and a capped hold is not repeated for the
+//   same lapse (the debt is dropped, the probe is marked).
+// - A held thread is at a JIT safepoint or at the entry of NtYieldExecution
+//   and holds no host lock there, the same assumption every fiber switch at
+//   a safepoint already makes. The global critical region is tested.
+bool GuestScheduler::SkewAnswerProbe(Cpu& cpu) {
+  if (!cpu.skew_probe_tick.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  // Sequentially consistent with the holders' count: either the load below
+  // sees a holder and wakes it, or that holder's look at this CPU, which
+  // comes after its count went up, sees the probe answered.
+  cpu.skew_probe_tick.store(0);
+  if (skew_holders_.load()) {
+    SkewNotify();
+  }
+  return true;
+}
+
+void GuestScheduler::SkewNotify() {
+  // Through the mutex, so a holder between its look and its sleep is not
+  // missed. A miss would cost one slice of kSkewHoldSliceUs, no more.
+  { std::lock_guard<std::mutex> lock(skew_mutex_); }
+  skew_cv_.notify_all();
+}
+
+bool GuestScheduler::SkewCpuStalled(const Cpu& cpu, uint64_t now,
+                                    uint64_t* probe_out) const {
+  if (!cpu.skew_running.load() || cpu.skew_holding.load()) {
+    return false;
+  }
+  const uint64_t probe = cpu.skew_probe_tick.load();
+  if (!probe || now <= probe || now - probe <= skew_bound_ticks_) {
+    return false;
+  }
+  if (probe == cpu.skew_capped_probe_tick.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  if (probe_out) {
+    *probe_out = probe;
+  }
+  return true;
+}
+
+void GuestScheduler::SkewAddDebtLocked(XThread* debtor, int from_cpu,
+                                       int to_cpu, uint32_t tid,
+                                       uint64_t now) {
+  if (to_cpu == from_cpu || to_cpu < 0 || to_cpu >= kMaxCpus) {
+    return;
+  }
+  auto& links = debtor->scheduler_links();
+  const uint8_t bit = uint8_t(1u << to_cpu);
+  const uint64_t seq =
+      cpus_[to_cpu].skew_serve_seq.load(std::memory_order_relaxed);
+  // An older debt on that CPU that it has not acted on stands as it is: the
+  // thread readied first is the one overdue.
+  if ((links.skew_debt_mask & bit) && links.skew_debt_seq[to_cpu] == seq) {
+    return;
+  }
+  links.skew_debt_mask |= bit;
+  links.skew_debt_tick[to_cpu] = now;
+  links.skew_debt_seq[to_cpu] = seq;
+  links.skew_debt_tid[to_cpu] = tid;
+  stats_.skew_debts.fetch_add(1, std::memory_order_relaxed);
+}
+
+void GuestScheduler::SkewAtSafepoint(XThread* self) {
+  if (!skew_bound_ticks_) {
+    return;
+  }
+  const int cpu_index = CurrentCpu();
+  if (cpu_index < 0) {
+    return;
+  }
+  auto& links = self->scheduler_links();
+  const bool due = SkewAnswerProbe(cpus_[cpu_index]) || links.skew_eval_owed;
+  if (!due) {
+    return;
+  }
+  // Where the thread may not be held the look is dropped, not kept owed: a
+  // thread at raised IRQL or under the global lock is one others may be
+  // waiting for, and the next probe is a tick away.
+  links.skew_eval_owed = false;
+  if (CanParkSpinner(self)) {
+    SkewEvaluateAndHold(self);
+  }
+}
+
+void GuestScheduler::SkewAtBackoff(XThread* self) {
+  if (!skew_bound_ticks_) {
+    return;
+  }
+  const int cpu_index = CurrentCpu();
+  if (cpu_index < 0) {
+    return;
+  }
+  if (SkewAnswerProbe(cpus_[cpu_index])) {
+    // The preempt flag is still up here (the backoff site only calls in
+    // with it up and does not clear it), so the loop's safepoint is next.
+    self->scheduler_links().skew_eval_owed = true;
+  }
+}
+
+bool GuestScheduler::SkewOnlyProbed(XThread* self) {
+  if (!skew_bound_ticks_) {
+    return false;
+  }
+  // Every reason the flag is raised for, other than the probe, leaves a
+  // mark that is tested here: a priority preemption or a wake that outranks
+  // (preempted), a terminate, shutdown, the slice's end (the deadline). A
+  // suspend raises no flag today and acts at the next yield; with the probe
+  // it acts within a tick. Anything missed is raised again by its own
+  // source or acts at the slice's end, as a flag lost to SwitchTo's clear
+  // already does.
+  auto& links = self->scheduler_links();
+  if (links.preempted ||
+      links.terminate_pending.load(std::memory_order_relaxed) ||
+      shutting_down_.load(std::memory_order_relaxed) ||
+      self->suspend_count() != 0) {
+    return false;
+  }
+  const uint64_t deadline = links.quantum_deadline_tick;
+  return deadline && Clock::host_tick_count_raw() < deadline;
+}
+
+void GuestScheduler::SkewEvaluateAndHold(XThread* self) {
+  auto& links = self->scheduler_links();
+  const int me = CurrentCpu();
+  // One awaited CPU at a time; after a hold the look is taken afresh.
+  for (int round = 0; round < kMaxCpus; ++round) {
+    // Something already asks this thread to give way: that comes first,
+    // and the look is made when the thread runs again.
+    if (links.preempted ||
+        links.terminate_pending.load(std::memory_order_relaxed) ||
+        shutting_down_.load(std::memory_order_relaxed) ||
+        self->suspend_count() != 0) {
+      links.skew_eval_owed = true;
+      return;
+    }
+    const uint64_t now = Clock::host_tick_count_raw();
+    int target = -1;
+    bool progress_gate = false;
+    uint64_t behind_since = 0;
+    // The start gate: the CPUs this thread readied a thread on.
+    for (int i = 0; i < kMaxCpus && links.skew_debt_mask; ++i) {
+      const uint8_t bit = uint8_t(1u << i);
+      if (!(links.skew_debt_mask & bit)) {
+        continue;
+      }
+      const Cpu& cpu = cpus_[i];
+      if (i == me || cpu.skew_serve_seq.load() != links.skew_debt_seq[i]) {
+        // Acted on (or this thread has moved there itself).
+        links.skew_debt_mask &= uint8_t(~bit);
+        continue;
+      }
+      uint64_t since = links.skew_debt_tick[i];
+      if (cpu.skew_running.load()) {
+        // A fiber runs there and the readied thread waits its turn behind
+        // it, as it would on the console. Only if that fiber is itself not
+        // being run is the CPU behind.
+        uint64_t probe = 0;
+        if (!SkewCpuStalled(cpu, now, &probe)) {
+          continue;
+        }
+        since = std::max(since, probe);
+      } else {
+        // No fiber runs there: its host thread has been asked to come and
+        // dispatch. Behind once that has lasted longer than the bound.
+        since = std::max(since, cpu.skew_idle_since_tick.load());
+        if (now <= since || now - since <= skew_bound_ticks_) {
+          continue;
+        }
+      }
+      target = i;
+      behind_since = since;
+      break;
+    }
+    // The progress gate: any other CPU whose running fiber is not being run.
+    if (target < 0 && skew_progress_gate_) {
+      for (int i = 0; i < kMaxCpus; ++i) {
+        uint64_t probe = 0;
+        if (i != me && SkewCpuStalled(cpus_[i], now, &probe)) {
+          target = i;
+          progress_gate = true;
+          behind_since = probe;
+          break;
+        }
+      }
+    }
+    if (target < 0) {
+      return;
+    }
+    if (!SkewHold(self, target, progress_gate, behind_since)) {
+      // Cut short: the thread gives way first and looks again afterwards.
+      links.skew_eval_owed = true;
+      return;
+    }
+  }
+}
+
+// Nanoseconds the dispatch thread of |cpu| has spent on a core, -1 unknown.
+static int64_t SkewThreadCpuNs(bool valid, int cpu_clock) {
+#if XE_PLATFORM_LINUX
+  if (valid) {
+    timespec ts;
+    if (clock_gettime(clockid_t(cpu_clock), &ts) == 0) {
+      return int64_t(ts.tv_sec) * 1000000000 + int64_t(ts.tv_nsec);
+    }
+  }
+#endif
+  return -1;
+}
+
+bool GuestScheduler::SkewDescribeThread(int cpu_index, uint32_t* tid,
+                                        std::string* name) {
+  TimedLock lock(this);
+  if (!*tid) {
+    XThread* running = cpus_[cpu_index].current_thread;
+    if (!running) {
+      return false;
+    }
+    *tid = running->thread_id();
+    *name = running->thread_name();
+    return true;
+  }
+  // A thread the scheduler has linked or running is alive under the lock.
+  auto match = [&](XThread* t) {
+    if (t && t->thread_id() == *tid) {
+      *name = t->thread_name();
+      return true;
+    }
+    return false;
+  };
+  for (Cpu& cpu : cpus_) {
+    if (match(cpu.current_thread)) {
+      return true;
+    }
+    for (int prio = 0; prio < 32; ++prio) {
+      for (XThread* t = cpu.ready_head[prio]; t;
+           t = t->scheduler_links().ready_next) {
+        if (match(t)) {
+          return true;
+        }
+      }
+    }
+    for (XThread* t = cpu.blocked_head; t;
+         t = t->scheduler_links().ready_next) {
+      if (match(t)) {
+        return true;
+      }
+    }
+    for (XThread* t = cpu.suspended_head; t;
+         t = t->scheduler_links().ready_next) {
+      if (match(t)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool GuestScheduler::SkewHold(XThread* self, int target, bool progress_gate,
+                              uint64_t behind_since_tick) {
+  auto& links = self->scheduler_links();
+  const int me = CurrentCpu();
+  Cpu& mine = cpus_[me];
+  Cpu& theirs = cpus_[target];
+  const uint8_t target_bit = uint8_t(1u << target);
+  const bool has_debt = (links.skew_debt_mask & target_bit) != 0;
+  const uint64_t debt_seq = links.skew_debt_seq[target];
+  // Whom this waits for: the stalled CPU's running fiber, or the thread
+  // this one readied.
+  uint32_t target_tid = progress_gate ? 0 : links.skew_debt_tid[target];
+  std::string target_name;
+  bool target_named = false;
+  if (progress_gate) {
+    target_named = SkewDescribeThread(target, &target_tid, &target_name);
+  }
+  const uint64_t probe_at_start =
+      theirs.skew_probe_tick.load(std::memory_order_relaxed);
+  const int64_t on_core_before = SkewThreadCpuNs(
+      theirs.skew_cpu_clock_valid.load(), theirs.skew_cpu_clock);
+  const uint64_t start = Clock::host_tick_count_raw();
+  const uint64_t start_us = NowMicros();
+  const double ticks_per_us = ticks_per_us_ > 0.0 ? ticks_per_us_ : 1.0;
+
+  // From here this CPU is on time for everyone else, and whoever waited
+  // for it is told so.
+  mine.skew_holding.store(true);
+  skew_holders_.fetch_add(1);
+  SkewNotify();
+
+  bool capped = false;
+  bool cut = false;
+  {
+    std::unique_lock<std::mutex> lock(skew_mutex_);
+    for (;;) {
+      const uint64_t now = Clock::host_tick_count_raw();
+      if (now - start >= skew_cap_ticks_) {
+        capped = true;
+        break;
+      }
+      // Plain reads of flags others write under lock_; a stale one costs a
+      // slice. A thread that outranks this one, a terminate, a suspend and
+      // shutdown all end the hold: the caller then gives way as it would
+      // have without it.
+      if (links.preempted ||
+          links.terminate_pending.load(std::memory_order_relaxed) ||
+          shutting_down_.load(std::memory_order_relaxed) ||
+          self->suspend_count() != 0) {
+        cut = true;
+        break;
+      }
+      bool behind;
+      if (progress_gate) {
+        behind = SkewCpuStalled(theirs, now);
+      } else {
+        // Until that CPU makes a scheduling decision; if a fiber runs there
+        // without one, for as long as that fiber is not being run.
+        behind = theirs.skew_serve_seq.load() == debt_seq &&
+                 (!theirs.skew_running.load() || SkewCpuStalled(theirs, now));
+      }
+      if (!behind) {
+        break;
+      }
+      const uint64_t left_us =
+          uint64_t(double(skew_cap_ticks_ - (now - start)) / ticks_per_us) + 1;
+      skew_cv_.wait_for(lock, std::chrono::microseconds(std::min<uint64_t>(
+                                  left_us, kSkewHoldSliceUs)));
+    }
+  }
+
+  const uint64_t end = Clock::host_tick_count_raw();
+  const uint64_t held = end - start;
+  mine.skew_hold_start_us.store(start_us, std::memory_order_relaxed);
+  mine.skew_hold_end_us.store(NowMicros(), std::memory_order_relaxed);
+  // Answered before the hold is lowered, so this CPU is never seen as
+  // neither holding nor answering.
+  mine.skew_probe_tick.store(0);
+  mine.skew_holding.store(false);
+  skew_holders_.fetch_sub(1);
+
+  if (capped) {
+    // Not again for the same lapse: the debt is dropped, and the probe that
+    // stayed unanswered is marked so that nobody waits for it any more.
+    if (has_debt) {
+      links.skew_debt_mask &= uint8_t(~target_bit);
+    }
+    if (progress_gate && probe_at_start) {
+      theirs.skew_capped_probe_tick.store(probe_at_start,
+                                          std::memory_order_relaxed);
+    }
+  }
+  // The held thread did not run: its slice is as long as it was.
+  {
+    TimedLock lock(this);
+    if (links.quantum_deadline_tick) {
+      links.quantum_deadline_tick += held;
+      if (mine.current_thread == self) {
+        mine.quantum_deadline_tick = links.quantum_deadline_tick;
+      }
+    }
+  }
+
+  (progress_gate ? stats_.skew_holds_progress : stats_.skew_holds_start)
+      .fetch_add(1, std::memory_order_relaxed);
+  stats_.skew_hold_ticks.fetch_add(held, std::memory_order_relaxed);
+  skew_run_holds_.fetch_add(1, std::memory_order_relaxed);
+  skew_run_hold_ticks_.fetch_add(held, std::memory_order_relaxed);
+  if (capped) {
+    stats_.skew_holds_capped.fetch_add(1, std::memory_order_relaxed);
+    skew_run_capped_.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (cut) {
+    stats_.skew_holds_cut.fetch_add(1, std::memory_order_relaxed);
+  }
+  const int64_t on_core_after = SkewThreadCpuNs(
+      theirs.skew_cpu_clock_valid.load(), theirs.skew_cpu_clock);
+  int64_t on_core_ns = -1;
+  if (on_core_before >= 0 && on_core_after >= on_core_before) {
+    on_core_ns = on_core_after - on_core_before;
+    stats_.skew_target_on_core_ns.fetch_add(uint64_t(on_core_ns),
+                                            std::memory_order_relaxed);
+  }
+  uint64_t run_longest = skew_run_longest_ticks_.load(std::memory_order_relaxed);
+  while (held > run_longest &&
+         !skew_run_longest_ticks_.compare_exchange_weak(
+             run_longest, held, std::memory_order_relaxed)) {
+  }
+
+  const uint64_t held_us = uint64_t(double(held) / ticks_per_us);
+  const bool longest =
+      held > skew_longest_ticks_.load(std::memory_order_relaxed);
+  const bool log = capped || held_us >= kSkewHoldLogUs;
+  if (longest || log) {
+    if (!target_named) {
+      target_named = SkewDescribeThread(target, &target_tid, &target_name);
+    }
+    if (!target_named) {
+      target_name = "?";
+    }
+  }
+  if (longest) {
+    std::lock_guard<std::mutex> lock(skew_report_mutex_);
+    if (held > skew_longest_.ticks) {
+      skew_longest_.ticks = held;
+      skew_longest_.holder_tid = self->thread_id();
+      skew_longest_.holder_name = self->thread_name();
+      skew_longest_.holder_cpu = me;
+      skew_longest_.target_tid = target_tid;
+      skew_longest_.target_name = target_name;
+      skew_longest_.target_cpu = target;
+      skew_longest_.progress_gate = progress_gate;
+      skew_longest_.capped = capped;
+      skew_longest_ticks_.store(held, std::memory_order_relaxed);
+    }
+  }
+  if (log) {
+    static std::atomic<int> budget{400};
+    if (budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+      const uint64_t behind_us =
+          end > behind_since_tick
+              ? uint64_t(double(end - behind_since_tick) / ticks_per_us)
+              : held_us;
+      XELOGW(
+          "GuestScheduler: skew hold, tid={:08X} '{}' on cpu {} waited {:.1f} "
+          "ms for cpu {} ({}: tid={:08X} '{}'; that CPU was {:.1f} ms behind "
+          "in all, its host thread on a core for {:.1f} ms of the hold){} "
+          "(frame {})",
+          self->thread_id(), self->thread_name(), me,
+          double(held_us) / 1000.0, target,
+          progress_gate ? "progress gate, its running thread showed no "
+                          "progress"
+                        : "start gate, it had not dispatched the thread this "
+                          "one readied",
+          target_tid, target_name, double(behind_us) / 1000.0,
+          on_core_ns >= 0 ? double(on_core_ns) / 1e6 : -1.0,
+          capped ? ", ended by the cap" : (cut ? ", cut short" : ""),
+          xe::logging::GetFrameNumber());
+    }
+  }
+  return !cut;
+}
+
 void GuestScheduler::SpinYield(std::chrono::milliseconds host_sleep) {
   XThread* self = XThread::GetCurrentFiberThread();
   if (self) {
@@ -1428,6 +2105,22 @@ void GuestScheduler::WakeForSignal(const XObject* object,
   if (!any_blocked) {
     return;
   }
+  // hakuX-Boosted: guest_scheduler_skew_bound_us. A guest thread whose
+  // signal readies a waiter parked on another guest CPU is in that CPU's
+  // debt until it acts on the signal (the start gate, SkewEvaluateAndHold).
+  // A signal from a host thread (audio, GPU, timers) has nobody to hold.
+  XThread* skew_debtor = nullptr;
+  int skew_debtor_cpu = -1;
+  uint64_t skew_now = 0;
+  if (skew_bound_ticks_) {
+    skew_debtor_cpu = CurrentCpu();
+    if (skew_debtor_cpu >= 0) {
+      skew_debtor = XThread::GetCurrentFiberThread();
+      if (skew_debtor) {
+        skew_now = Clock::host_tick_count_raw();
+      }
+    }
+  }
   bool wake[kMaxCpus] = {};
   {
     TimedLock lock(this);
@@ -1449,6 +2142,10 @@ void GuestScheduler::WakeForSignal(const XObject* object,
         running->thread_state()->context()->preempt_requested = 1;
       }
       wake[links.cpu] = true;
+      if (skew_debtor) {
+        SkewAddDebtLocked(skew_debtor, skew_debtor_cpu, links.cpu,
+                          sole_waiter->thread_id(), skew_now);
+      }
     } else {
       // Wake the CPUs hosting a waiter whose wait includes this object. The
       // walk is bounded by the blocked population, which the empty-yield fast
@@ -1460,6 +2157,7 @@ void GuestScheduler::WakeForSignal(const XObject* object,
         }
         bool any_watcher = false;
         int watcher_prio = 0;
+        uint32_t watcher_tid = 0;  // hakuX-Boosted: for the skew bound
         for (XThread* t = cpu.blocked_head; t;
              t = t->scheduler_links().ready_next) {
           auto& links = t->scheduler_links();
@@ -1474,6 +2172,9 @@ void GuestScheduler::WakeForSignal(const XObject* object,
           }
           if (watches) {
             int prio = ClampPriority(t->priority());
+            if (!any_watcher || prio > watcher_prio) {
+              watcher_tid = t->thread_id();
+            }
             watcher_prio = any_watcher ? std::max(watcher_prio, prio) : prio;
             any_watcher = true;
           }
@@ -1488,6 +2189,10 @@ void GuestScheduler::WakeForSignal(const XObject* object,
           running->thread_state()->context()->preempt_requested = 1;
         }
         wake[i] = true;
+        if (skew_debtor) {
+          SkewAddDebtLocked(skew_debtor, skew_debtor_cpu, i, watcher_tid,
+                            skew_now);
+        }
       }
     }
   }
@@ -1881,6 +2586,17 @@ void GuestScheduler::RunLoop(int cpu_index) {
   // Adopt this host thread's stack as this CPU's idle fiber.
   cpu.idle_fiber = xe::threading::Fiber::CreateFromThread();
   XELOGI("GuestScheduler: CPU {} dispatch loop started", cpu_index);
+  // hakuX-Boosted: this thread's CPU-time clock, read by a fiber that holds
+  // for this CPU (guest_scheduler_skew_bound_us).
+#if XE_PLATFORM_LINUX
+  if (skew_bound_ticks_) {
+    clockid_t cpu_clock;
+    if (pthread_getcpuclockid(pthread_self(), &cpu_clock) == 0) {
+      cpu.skew_cpu_clock = int(cpu_clock);
+      cpu.skew_cpu_clock_valid.store(true);
+    }
+  }
+#endif
 
   while (!shutting_down_.load()) {
     if (cpu_index == 0) {
@@ -1947,10 +2663,23 @@ void GuestScheduler::RunLoop(int cpu_index) {
       have_blocked = cpu.blocked_head != nullptr;
       have_work = cpu.ready_summary.load(std::memory_order_relaxed) != 0 ||
                   cpu.repoll_now.load(std::memory_order_relaxed);
+      // hakuX-Boosted: guest_scheduler_skew_bound_us. Nothing ready and no
+      // poke pending, seen under the lock every signaller pokes under: this
+      // CPU has looked at everything sent to it so far and has nothing to
+      // run. That too is a scheduling decision (a readied thread can have
+      // gone to another CPU, or have been terminated), and a signaller that
+      // waited for a dispatch here would otherwise wait out its cap.
+      if (!have_work && skew_bound_ticks_) {
+        cpu.skew_serve_seq.store(
+            cpu.skew_serve_seq.load(std::memory_order_relaxed) + 1);
+      }
     }
     if (have_work) {
       cpu.parked.store(false);
       continue;
+    }
+    if (skew_bound_ticks_ && skew_holders_.load()) {
+      SkewNotify();
     }
     if (!have_blocked) {
       if (dispatched_any_.load()) {
@@ -2007,6 +2736,33 @@ void GuestScheduler::NoteWakeLatency(uint64_t latency_us, XThread* thread) {
   }
   wake_latency_counts_[bucket].fetch_add(1, std::memory_order_relaxed);
   RaiseMax(wake_latency_max_us_, latency_us);
+  // hakuX-Boosted: guest_scheduler_skew_bound_us. The delay is counted as it
+  // was, hold or no hold: the bound does not make a wake any earlier, it
+  // keeps the signaller from running ahead of it. But a hold freezes the
+  // holder's whole CPU, so a thread parked there that was signalled during
+  // the hold runs late because of the bound, not because of the host. How
+  // much of this wake's delay overlaps the last hold on its CPU is counted
+  // apart and named in the late wake's line, so the two are not confused.
+  uint64_t behind_hold_us = 0;
+  if (skew_bound_ticks_ && thread) {
+    const int cpu_index = thread->scheduler_links().cpu;
+    if (cpu_index >= 0 && cpu_index < kMaxCpus) {
+      const uint64_t hold_start =
+          cpus_[cpu_index].skew_hold_start_us.load(std::memory_order_relaxed);
+      const uint64_t hold_end =
+          cpus_[cpu_index].skew_hold_end_us.load(std::memory_order_relaxed);
+      const uint64_t now_us = NowMicros();
+      const uint64_t signal_us = now_us > latency_us ? now_us - latency_us : 0;
+      const uint64_t from = std::max(hold_start, signal_us);
+      const uint64_t to = std::min(hold_end, now_us);
+      if (hold_end > hold_start && to > from) {
+        behind_hold_us = std::min(to - from, latency_us);
+        stats_.skew_wakes_behind_hold.fetch_add(1, std::memory_order_relaxed);
+        stats_.skew_wakes_behind_hold_us.fetch_add(behind_hold_us,
+                                                   std::memory_order_relaxed);
+      }
+    }
+  }
   if (latency_us >= kLateWakeLogUs && thread) {
     static std::atomic<int> budget{400};
     if (budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
@@ -2014,12 +2770,16 @@ void GuestScheduler::NoteWakeLatency(uint64_t latency_us, XThread* thread) {
       XELOGW(
           "GuestScheduler: late wake, tid={:08X} '{}' ran {:.1f} ms after the "
           "signal it waited for (handle {:08X}, {} handle(s), cpu {}, frame "
-          "{})",
+          "{}){}",
           thread->thread_id(), thread->thread_name(),
           double(latency_us) / 1000.0,
           links.wait_handle_count ? links.wait_handles[0] : 0,
           uint32_t(links.wait_handle_count), links.cpu,
-          xe::logging::GetFrameNumber());
+          xe::logging::GetFrameNumber(),
+          behind_hold_us
+              ? fmt::format(", {:.1f} ms of it behind a skew hold on its CPU",
+                            double(behind_hold_us) / 1000.0)
+              : std::string());
     }
   }
 }
@@ -2163,6 +2923,40 @@ void GuestScheduler::ReportStatsIfDue() {
         to_us(held_ticks),
         acquisitions ? to_us(held_ticks * 1000) / acquisitions : 0);
   }
+  // hakuX-Boosted: guest_scheduler_skew_bound_us
+  // (boosted/notes/guest-skew-bound.md says how to read it).
+  if (skew_bound_ticks_) {
+    SkewLongest longest;
+    {
+      std::lock_guard<std::mutex> lock(skew_report_mutex_);
+      longest = skew_longest_;
+      skew_longest_ = SkewLongest();
+      skew_longest_ticks_.store(0, std::memory_order_relaxed);
+    }
+    const uint64_t holds_start = take(stats_.skew_holds_start);
+    const uint64_t holds_progress = take(stats_.skew_holds_progress);
+    XELOGI(
+        "GuestScheduler: skew bound: holds {} (start gate {}, progress gate "
+        "{}), held {} us in all, longest {} us ({}), ended by the cap {}, cut "
+        "short by a preemption {} | awaited host threads on a core for {} us "
+        "of the holds | signals that readied a thread on another CPU {} | "
+        "wakes that waited behind a hold {} ({} us)",
+        holds_start + holds_progress, holds_start, holds_progress,
+        to_us(take(stats_.skew_hold_ticks)), to_us(longest.ticks),
+        longest.ticks
+            ? fmt::format(
+                  "tid={:08X} '{}' on cpu {} waited for cpu {} tid={:08X} "
+                  "'{}', {} gate{}",
+                  longest.holder_tid, longest.holder_name, longest.holder_cpu,
+                  longest.target_cpu, longest.target_tid, longest.target_name,
+                  longest.progress_gate ? "progress" : "start",
+                  longest.capped ? ", ended by the cap" : "")
+            : std::string("none"),
+        take(stats_.skew_holds_capped), take(stats_.skew_holds_cut),
+        take(stats_.skew_target_on_core_ns) / 1000, take(stats_.skew_debts),
+        take(stats_.skew_wakes_behind_hold),
+        take(stats_.skew_wakes_behind_hold_us));
+  }
   // hakuX-Boosted: the missed wakes by kind (boosted/notes/guest-scheduler.md
   // says what each one is and which should read nought).
   XELOGI(
@@ -2260,6 +3054,21 @@ void GuestScheduler::ReportNoProgress(bool on_request) {
   uint64_t now_ms = Clock::QueryHostUptimeMillis();
   // hakuX-Boosted: the whole run's wake delays and critical section waits.
   XELOGW("  {}", LatencyTotalsLine(nullptr, 0, 0));
+  // hakuX-Boosted: the skew bound's totals of the run, and below, per CPU,
+  // whether its running thread is in a hold or has a probe outstanding.
+  const double skew_ticks_per_us = ticks_per_us_ > 0.0 ? ticks_per_us_ : 1.0;
+  const uint64_t skew_now = Clock::host_tick_count_raw();
+  if (skew_bound_ticks_) {
+    XELOGW(
+        "  skew bound: {} holds in the run, {:.1f} ms held in all, longest "
+        "{:.1f} ms, {} ended by the cap",
+        skew_run_holds_.load(std::memory_order_relaxed),
+        double(skew_run_hold_ticks_.load(std::memory_order_relaxed)) /
+            skew_ticks_per_us / 1000.0,
+        double(skew_run_longest_ticks_.load(std::memory_order_relaxed)) /
+            skew_ticks_per_us / 1000.0,
+        skew_run_capped_.load(std::memory_order_relaxed));
+  }
   // hakuX-Boosted: the handles the parked fibers wait on, described once
   // lock_ is released (looking an object up takes the kernel's own locks).
   std::vector<uint32_t> waited_handles;
@@ -2277,6 +3086,18 @@ void GuestScheduler::ReportNoProgress(bool on_request) {
           uint32_t(kpcr->current_irql),
           uint32_t(context->preempt_requested),
           cpu.ready_summary.load(std::memory_order_relaxed));
+      if (skew_bound_ticks_) {
+        const uint64_t probe =
+            cpu.skew_probe_tick.load(std::memory_order_relaxed);
+        XELOGW(
+            "    skew bound: {}, probe {}",
+            cpu.skew_holding.load() ? "in a hold" : "not in a hold",
+            probe && skew_now > probe
+                ? fmt::format("unanswered for {:.1f} ms",
+                              double(skew_now - probe) / skew_ticks_per_us /
+                                  1000.0)
+                : std::string("answered"));
+      }
     } else {
       XELOGW("  CPU {} idle, ready_summary={:#x}", i,
              cpu.ready_summary.load(std::memory_order_relaxed));
@@ -2464,6 +3285,20 @@ void GuestScheduler::WatchdogLoop() {
     TimedLock lock(this);
     for (int i = 0; i < kMaxCpus; ++i) {
       XThread* running = cpus_[i].current_thread;
+      // hakuX-Boosted: guest_scheduler_skew_bound_us, the probe. Every tick
+      // each running fiber is asked to show that its host thread is being
+      // run: the tick is noted (unless the last probe is still unanswered,
+      // whose age is the measure of how far the CPU is behind) and the
+      // preempt flag takes the fiber to its next safepoint, which answers
+      // and, the flag having been up for nothing else, returns at once
+      // (SkewAtSafepoint, SkewOnlyProbed). The time is stored before the
+      // flag is raised, so a safepoint that sees the flag sees the probe.
+      if (skew_bound_ticks_ && running) {
+        if (!cpus_[i].skew_probe_tick.load(std::memory_order_relaxed)) {
+          cpus_[i].skew_probe_tick.store(now);
+        }
+        running->thread_state()->context()->preempt_requested = 1;
+      }
       if (running && now >= cpus_[i].quantum_deadline_tick) {
         running->thread_state()->context()->preempt_requested = 1;
       }
