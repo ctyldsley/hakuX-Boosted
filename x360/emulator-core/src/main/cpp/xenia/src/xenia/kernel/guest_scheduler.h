@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -184,6 +185,21 @@ class GuestScheduler {
   bool PollWatchAtBackoff(XThread* self);
   void PollWatchArm(XThread* self);
 
+  // hakuX-Boosted: guest_scheduler_skew_bound_us, the bound on how far one
+  // guest CPU may run ahead of another whose host thread is not being run
+  // (boosted/notes/guest-skew-bound.md; the comment above SkewHold in the
+  // .cc file is the design). These are the JIT hooks' part, called on the
+  // fiber. All three return at once with the setting at 0.
+  // The safepoint: answers this CPU's probe and, where a guest thread may
+  // be held (not in a wait, below DISPATCH_LEVEL, not under the global
+  // lock), looks at the other CPUs and waits for one that has fallen behind.
+  void SkewAtSafepoint(XThread* self);
+  // True when the safepoint was called for the probe alone: nothing asks the
+  // thread to give way, so the caller returns without a yield.
+  bool SkewOnlyProbed(XThread* self);
+  // A spin-wait's backoff site: answers the probe (the thread is running).
+  void SkewAtBackoff(XThread* self);
+
   // Parks the running guest fiber on its CPU's blocked list and yields. Returns
   // once the dispatcher re-readies it so the wait can re-poll. A single-object
   // wait on an epoch-bumping type is re-readied only when the epoch moves past
@@ -319,6 +335,38 @@ class GuestScheduler {
     XThread* poll_watch_thread = nullptr;
     bool poll_watch_expects_backoff = false;
     uint64_t poll_watch_start_tick = 0;  // 0 = no backoff site seen yet
+
+    // hakuX-Boosted: guest_scheduler_skew_bound_us. All atomics, read
+    // without the lock by fibers on other CPUs; nothing here is touched with
+    // the setting at 0.
+    // Raw tick at which the watchdog asked the running fiber to show it is
+    // being run, 0 once answered (at a safepoint, a yield, or by leaving
+    // the CPU). Set under lock_ by the watchdog only while a fiber runs.
+    std::atomic<uint64_t> skew_probe_tick{0};
+    // The probe on which a hold for this CPU ran into the hard cap: nobody
+    // waits for that same unanswered probe again.
+    std::atomic<uint64_t> skew_capped_probe_tick{0};
+    // Scheduling decisions of this CPU's dispatch thread: every dispatch of
+    // a fiber, and every time it found, under lock_, nothing to run and
+    // nothing poked. A signaller compares it with the value at its signal.
+    // Written under lock_.
+    std::atomic<uint64_t> skew_serve_seq{0};
+    // A fiber is running here (current_thread, readable without the lock).
+    std::atomic<bool> skew_running{false};
+    // Raw tick at which the last fiber left this CPU.
+    std::atomic<uint64_t> skew_idle_since_tick{0};
+    // The running fiber is waiting in a hold. A holding CPU is on time by
+    // definition: nobody waits for it, which is what keeps holds acyclic.
+    std::atomic<bool> skew_holding{false};
+    // The last completed hold here, in NowMicros time, so that a wake that
+    // waited behind it says so (NoteWakeLatency).
+    std::atomic<uint64_t> skew_hold_start_us{0};
+    std::atomic<uint64_t> skew_hold_end_us{0};
+    // This dispatch thread's CPU-time clock (pthread_getcpuclockid), for
+    // the split of a hold between "its host thread was on a core" (host
+    // code: translation, a long kernel call) and "it was not".
+    int skew_cpu_clock = 0;
+    std::atomic<bool> skew_cpu_clock_valid{false};
   };
 
   // The dispatch thread a thread is pinned to by its guest current_cpu.
@@ -383,6 +431,59 @@ class GuestScheduler {
   uint64_t yield_park_after_ticks_ = 0;
   uint64_t yield_gap_ticks_ = 0;
   uint64_t poll_park_after_ticks_ = 0;
+
+  // hakuX-Boosted: guest_scheduler_skew_bound_us, see SkewHold in the .cc.
+  // 0 = off: no probe is raised, no debt recorded, nobody is held.
+  uint64_t skew_bound_ticks_ = 0;
+  uint64_t skew_cap_ticks_ = 0;
+  bool skew_progress_gate_ = true;
+  // Fibers waiting in a hold, and what they sleep on. skew_mutex_ is a leaf:
+  // nothing else is taken while it is held and it is never taken under
+  // lock_.
+  std::atomic<uint32_t> skew_holders_{0};
+  std::mutex skew_mutex_;
+  std::condition_variable skew_cv_;
+  // Wakes the holders after a change they may be waiting for.
+  void SkewNotify();
+  // Answers |cpu|'s probe; true if one was outstanding.
+  bool SkewAnswerProbe(Cpu& cpu);
+  // |cpu| has a running fiber whose probe has gone unanswered past the
+  // bound (and no hold for that probe has run into the cap yet).
+  bool SkewCpuStalled(const Cpu& cpu, uint64_t now,
+                      uint64_t* probe_out = nullptr) const;
+  // Records that |debtor|, running on |from_cpu|, readied thread |tid| on
+  // |to_cpu|. Caller holds lock_.
+  void SkewAddDebtLocked(XThread* debtor, int from_cpu, int to_cpu,
+                         uint32_t tid, uint64_t now);
+  // The two gates: finds a CPU |self| has to wait for and holds for it.
+  void SkewEvaluateAndHold(XThread* self);
+  // Holds the calling fiber for |target|. False if something on this CPU
+  // cut the hold short (a preemption, a terminate, shutdown).
+  bool SkewHold(XThread* self, int target, bool progress_gate,
+                uint64_t behind_since_tick);
+  // Name and id of the thread |tid| (or, with |tid| 0, the fiber running on
+  // |cpu_index|) if the scheduler still has it linked. Takes lock_.
+  bool SkewDescribeThread(int cpu_index, uint32_t* tid, std::string* name);
+  // The longest hold since the last once-a-second line.
+  struct SkewLongest {
+    uint64_t ticks = 0;
+    uint32_t holder_tid = 0;
+    uint32_t target_tid = 0;
+    int holder_cpu = -1;
+    int target_cpu = -1;
+    bool progress_gate = false;
+    bool capped = false;
+    std::string holder_name;
+    std::string target_name;
+  };
+  std::mutex skew_report_mutex_;
+  SkewLongest skew_longest_;
+  std::atomic<uint64_t> skew_longest_ticks_{0};
+  // Never reset, for the thread dump.
+  std::atomic<uint64_t> skew_run_holds_{0};
+  std::atomic<uint64_t> skew_run_capped_{0};
+  std::atomic<uint64_t> skew_run_hold_ticks_{0};
+  std::atomic<uint64_t> skew_run_longest_ticks_{0};
 
   KernelState* kernel_state_;
 
@@ -480,6 +581,18 @@ class GuestScheduler {
     std::atomic<uint64_t> lock_acquisitions{0};
     std::atomic<uint64_t> lock_wait_ticks{0};
     std::atomic<uint64_t> lock_held_ticks{0};
+    // hakuX-Boosted: guest_scheduler_skew_bound_us.
+    std::atomic<uint64_t> skew_debts{0};           // cross-CPU readyings
+    std::atomic<uint64_t> skew_holds_start{0};     // holds, start gate
+    std::atomic<uint64_t> skew_holds_progress{0};  // holds, progress gate
+    std::atomic<uint64_t> skew_hold_ticks{0};      // time held, all holds
+    std::atomic<uint64_t> skew_holds_capped{0};    // ended by the hard cap
+    std::atomic<uint64_t> skew_holds_cut{0};       // ended by a preemption
+    // Of the time held, how long the awaited dispatch thread was on a core.
+    std::atomic<uint64_t> skew_target_on_core_ns{0};
+    // Satisfied waits whose wake waited behind a hold on their own CPU.
+    std::atomic<uint64_t> skew_wakes_behind_hold{0};
+    std::atomic<uint64_t> skew_wakes_behind_hold_us{0};
   };
   Stats stats_;
   // hakuX-Boosted: see NoteWakeLatency. Never reset, so a thread dump has

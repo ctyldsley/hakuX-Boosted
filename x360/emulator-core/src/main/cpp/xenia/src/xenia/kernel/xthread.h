@@ -615,6 +615,21 @@ class XThread : public XObject, public cpu::Thread {
     // Same, for holding the global critical region. Diagnostic only - yielding
     // there would let a co-resident fiber re-enter the recursive lock.
     uint32_t preempt_defers_lock = 0;
+
+    // hakuX-Boosted: guest_scheduler_skew_bound_us (the start gate, see
+    // GuestScheduler::SkewEvaluateAndHold). The guest CPUs on which this
+    // thread readied another thread and has not yet seen a scheduling
+    // decision since: one bit per CPU, with the time of the signal, that
+    // CPU's count of scheduling decisions then and whom it readied (an id,
+    // never a pointer). Written under the scheduler lock by this thread
+    // itself as it signals, read only by this thread at its checkpoints.
+    uint8_t skew_debt_mask = 0;
+    uint64_t skew_debt_tick[6] = {};
+    uint64_t skew_debt_seq[6] = {};
+    uint32_t skew_debt_tid[6] = {};
+    // A probe was answered where the thread may not be held (inside a kernel
+    // call): the look at the other CPUs is owed at the next JIT safepoint.
+    bool skew_eval_owed = false;
   };
   SchedulerLinks& scheduler_links() { return scheduler_links_; }
 
