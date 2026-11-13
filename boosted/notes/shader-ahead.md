@@ -3,7 +3,7 @@
 Base: `claude/integration-1113` at `d940365`. **Nothing here has been run on a
 device.** The checks were a host syntax pass (clang, the changed files only,
 with the header-only dependencies fetched) and the GitHub Actions build of the
-branch. Every timing, every visual result and every hit rate is unknown until
+branch (run 83, green). Every timing, every visual result and every hit rate is unknown until
 the phone says.
 
 Every new behaviour is behind a setting that is off by default. With the
@@ -33,7 +33,11 @@ Next (not started, in this order): see "What I would do next" at the end.
 
 | Commit | What | Run |
 |---|---|---|
-| `393f5ea` | all the code | 81 (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43485706424), see the end of this file for its result |
+| `393f5ea` | all the code | 81, cancelled by the next push before it finished (a newer push replaces a running build) |
+| `47022d1` | all the code and these notes | 83, green (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43486136432) |
+
+Run 83 is the build of all the code on this branch. The only commit after
+`47022d1` changes this file alone.
 
 ## What the guest makes known, and when (from the code)
 
