@@ -8,9 +8,11 @@ only check is the GitHub Actions build of this branch.
 
 ## Where it stands
 
-- Done: step 1 (defaults), step 2 (the config store).
-- In progress: step 3 (settings screens).
-- Next: step 4 (the look).
+- Done: step 1 (defaults), step 2 (the config store), step 3 (settings
+  screens), step 4 (the look), each as written code.
+- In progress: getting the build green with all four.
+- Next, for whoever has the phone: the checks listed under each step. For a
+  later session: the items under "Not done".
 
 ## Step 1: defaults
 
@@ -219,3 +221,185 @@ did; a value with characters outside the Basic Multilingual Plane (an
 emoji in a path) has never been through it. The unit tests added
 (`ConfigFilesTest`) are not compiled or run by the Actions build; the Java
 helper itself was compiled and exercised on a desktop JVM in this session.
+
+## Step 3: settings screens
+
+### Whether a tab can leave another tab's rows drawn (read from the code)
+
+`SettingsTabsFrame` (`android/app/.../boosted/SettingsTabs.kt`) wraps the
+tab's content in `key(shown) { holder.SaveableStateProvider(shown.name) {
+... } }`. My reading:
+
+- `SaveableStateProvider` is built on `ReusableContent(key)`. When its key
+  changes, Compose keeps the layout nodes and composes the new content into
+  them. Global and Xbox are the same `Column` call in hakuX's
+  `SettingsScreen.kt`, so before the fix one tab's nodes were handed to the
+  other; the Xbox 360 tab is a different composable, which is why going via
+  it redrew. That matches what run 78 showed.
+- `key(shown)` outside it makes each tab a group of its own: on a switch the
+  old group is removed with its nodes and the new one is composed from
+  nothing. No node is reused, so there is nothing left to stay drawn. I
+  believe the fix is sound. **It has not been seen on a screen.**
+- Scroll position: each tab's `rememberScrollState` (Global, Xbox) and
+  `rememberLazyListState` plus the open sections (Xbox 360) are saved by
+  the holder when the tab's group is disposed and restored when it comes
+  back, because the holder is outside the `key`. The holder itself and the
+  chosen tab are `rememberSaveable`, so both survive a rotation and the
+  process being killed.
+- Returning from another screen: the 360 side's screens (profiles, install
+  content, controls, about) are another activity, so the settings screen is
+  not recomposed from nothing; hakuX's own (hard disk, controllers) pop the
+  navigation stack, which restores saved state the same way a rotation
+  does.
+- One fault found and fixed: while the 360 core's settings load, the pane
+  shows a short list, and it was given the same saved list state as the
+  full list. A restored scroll position would have been cut down to that
+  short list, so after the process was killed the Xbox 360 tab would come
+  back at the top. The short list now has a state of its own
+  (`HostSettingsPane.kt`).
+- Left as it is: if the saved tab were Xbox 360 on a phone where the 360
+  core is not available, the frame shows Global's key while the content
+  lambda still tests the saved tab. It cannot be chosen there, so it can
+  only arise from a backup restored to an older phone.
+
+To check on the phone, with screenshots and not the text tree: Global to
+Xbox and back several times, quickly; scroll Xbox halfway, go to Global,
+come back; rotate on each tab; open Profiles from Xbox 360 and return.
+
+### Every row, by the owner's rule
+
+| Tab | Rows |
+|---|---|
+| Global | Games folders (each folder, Add a folder); Appearance: App theme; Updates: Check for updates; Logs: Export logs |
+| Xbox | Controls (On-screen controls, Controllers); Display (uncapped, aspect, show frame rate, stutter monitor in debug builds); Console (hard disk, migrate, language, clock, console timing in debug builds); Network; Console video; Graphics; GPU driver |
+| Xbox 360 | the notice card and the sign-in row when there is something to say; Console (Profiles, Install content); Files (All files access); Controls (On-screen controls, Controller buttons); GPU driver; Emulation settings (16 sections, 137 rows); Shader caches; About |
+
+Found and fixed: **the Xbox 360 GPU driver was on its tab twice**, once as
+the host's row under "GPU driver" and once inside the "Graphics driver
+(Vulkan)" section (`Vulkan|vulkan_lib_path`). The section no longer lists
+it (`HostSettingsPane`'s new `omit`, passed by `HostApp.Settings`).
+
+One row that is on one tab but not wholly true to it: Global's "Export
+logs" exports hakuX's logs only; the 360 core's are exported by "Export
+session logs to Downloads" under Xbox 360, Logging. The owner named logs
+as Global, so it stays; making the Global row export both is a small job
+in `data/Logs.kt` (upstream) or a second step in `boosted/`.
+
+### Added
+
+- **A sign-in row**, at the top of the Xbox 360 tab, only while
+  `logged_profile_slot_0_xuid` is empty: "No profile is signed in", why it
+  matters, and a tap opens Profiles. With step 2 this shows only when no
+  profile exists on disc or the player removed the active one. Read again
+  on every return to the screen.
+- **Shader caches**, at the foot of the Xbox 360 tab: one row per title
+  that has shader files, largest first, with the title's name where the
+  library has seen it, its size, and a tap to clear after a confirmation
+  that says what clearing costs. Files counted: everything under
+  `<cache root>/shaders` whose name starts with the title's ID
+  (`shareable/<ID>.xsh`, `shareable/<ID>.<fsi|fbo>.vk.xpso`,
+  `local/<ID>.vk.bin`). `core/ShaderCaches.kt`.
+- **Descriptions**: every one of the schema's settings already had one
+  (checked by script: 139 names, 139 descriptions, none empty), so none
+  was added. One row was titled by its raw key
+  (`value_convert_7e3_8888_reuse`) and is now "Decode reused HDR tiles
+  before blending".
+- **Removed**: "Readback memexport". The core has no setting of that name,
+  so the row wrote a key nothing reads. The schema is 138 settings now;
+  `SettingsSchemaTest`'s counts follow (not run by the build).
+
+## Step 4: the look
+
+The palette, shapes, type weights and the focus ring were already defined
+once (`x360/app/.../ui/theme/HostTheme.kt`, `SharedLook`) and worn by both
+sides. What still differed, and what was changed:
+
+| What | Before | Now |
+|---|---|---|
+| Dimming behind in-game panels (pause menu, in-game settings, disc swap, message box, keyboard) | `Color.Black` at 60% in five places | `GameOverlayLook.Scrim`, one value: near-black with a trace of the accent's hue, 66% |
+| The frame rate counter, Xbox 360 games | white at 70% on black at 28%, 10 sp, 4 dp corner | `GameOverlayLook`: white at 90% on black at 45%, 11 sp monospace, 6 dp corner, 6 by 2 dp padding |
+| The frame rate counter, the stutter monitor and the "building shaders" line, Xbox games | white with a drop shadow on a square black box, padding in pixels | the same `GameOverlayLook` values through `boosted/Look.kt` `wearReadoutLook` (the monitor at 10 sp, the shader line at 14 sp) |
+| The highlighted option of an in-game panel | a solid accent button with a pale border | a tonal fill with a 2 dp ring in the accent, which is what focus looks like everywhere else |
+| Rows on the 360 side's own screens (per-game settings, profiles, key map, installed content, its own settings) | a divider line under every row | none, as hakuX's lists have none; the patches screen keeps its line between files |
+| "Changed from the default" on the Xbox 360 tab | the accent | amber (`tertiary`), as a changed value is marked on the 360 side's other screens; the accent stays for what can be acted on |
+| Spacing | literals | `LookSpacing` (gutter 16, section 24/4, gap 8, panel 20/12) used by the Xbox 360 tab's titles, notes and cards and the in-game panels |
+
+No image, icon, font, logo or name was added. The words on screen are
+"Xbox" and "Xbox 360" as before.
+
+### Not done, said plainly
+
+- The 360 side's screens keep XenDroid's structure: per-game settings is
+  still an index of sections that open a second page, with XenDroid's row
+  components (`SettingRows.kt`), not the rows of the Xbox 360 tab. Giving
+  it the tab's rows means teaching `HostSettingRow` the override switch;
+  not attempted blind.
+- The type scale is Material's with heavier titles and labels; no sizes
+  were changed. A larger scale for handheld distance is a judgement to
+  make with the phone in hand.
+- Dialog buttons and other Material components show focus as a 24% wash,
+  not the ring. `Modifier.focusRing()` exists for them and is on the tabs
+  only.
+- "Large tiles" in the library and the Cocoon-style home were not touched:
+  the library is upstream's screen and was not in this task.
+- New strings are English only and in code, not resources.
+
+### To see on a device before any of this is called done
+
+1. The counter in an Xbox game and in an Xbox 360 game, side by side: same
+   size, same pill, both clear of the corner. Over a bright scene and a
+   dark one.
+2. The pause menu of a 360 game with a controller: the ring moves with the
+   D-pad and is unmistakable; the dimming does not look green.
+3. Xbox 360 tab: the notice card (after test 1 of step 2), the sign-in row
+   (remove the active profile), the shader cache rows with real sizes
+   (Fable II's should be about 47 MB by the handoff's figures), clearing
+   one and the size going.
+4. Profiles, per-game settings, key map without their divider lines: does
+   the list still read as rows? If not, the lines go back in one place
+   each.
+5. Light theme: the amber "changed" label on white, the cards'
+   containers.
+
+## Upstream files touched, and why
+
+hakuX's (under `android/app`):
+
+- `NativeCoreActivity.kt`: three marked lines, one after each readout is
+  made (`wearReadoutLook`), for the shared counter look.
+
+XenDroid's (under `x360/`, all marked `hakuX-Boosted:`):
+
+- `emulator-core/src/main/java/xendroid/emulator/Emulator.java`:
+  `Config.close_config_file` writes through `ConfigFiles`.
+- `emulator-core/src/main/java/xendroid/compose/Application.java`: the
+  cached copy of the bundled defaults is written whole.
+- `app/.../settings/ConfigStore.kt`: opens go through `ConfigGuard`; the
+  two silent fallbacks to defaults are gone.
+- `app/.../settings/GameSettingsRepository.kt`: the rebuild writes whole.
+- `app/.../settings/SettingsSchema.kt`, `SettingDescriptions.kt`,
+  `TouchOverlayDefault.kt`: two fallbacks, one row removed, one renamed,
+  one accessor.
+- `app/.../core/ProfileBootstrap.kt`, `TitleDefaults.kt`, `HostApp.kt`:
+  the profile check, whole-file writes, the driver row once.
+- `app/.../ui/profile/ProfileManagerViewModel.kt`: tells the guard the
+  player's choice.
+- `app/.../EmulatorHostActivity.kt`: the guard before the core starts, the
+  toast.
+- `app/.../data/GameMetadataCache.kt`: names by title ID.
+- `app/.../FpsOverlay.kt`, `ui/pause/PauseMenuPanel.kt`,
+  `ui/disc/DiscSwapPanel.kt`, `ui/messagebox/GuestMessageBoxPanel.kt`,
+  `ui/keyboard/GuestKeyboardPanel.kt`, `ui/panel/GuestPanelOption.kt`: the
+  shared in-game look.
+- `app/.../ui/keymap/KeymapScreen.kt`, `ui/profile/ProfilesScreen.kt`,
+  `ui/content/ContentManagerScreen.kt`,
+  `ui/settings/PerGameSettingsScreen.kt`, `ui/settings/SettingsScreen.kt`:
+  divider lines removed.
+- The core, one line: `gpu/vulkan/vulkan_pipeline_cache.cc`, the default
+  literal of `vulkan_async_skip_draws`.
+
+New files (the fork's own): `emulator-core/.../compose/ConfigFiles.java`,
+`app/.../settings/ConfigGuard.kt`, `app/.../core/ShaderCaches.kt`,
+`app/src/test/.../ConfigFilesTest.kt`. Changed fork files:
+`app/.../ui/settings/HostSettingsPane.kt`, `ui/theme/HostTheme.kt`,
+`android/app/.../boosted/Look.kt`.

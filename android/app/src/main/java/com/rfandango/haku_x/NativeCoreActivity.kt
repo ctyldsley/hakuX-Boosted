@@ -520,6 +520,7 @@ class NativeCoreActivity : SDLActivity(), InputManager.InputDeviceListener {
       RelativeLayout.LayoutParams.WRAP_CONTENT,
     ).apply { addRule(RelativeLayout.CENTER_IN_PARENT) }
     mLayout?.addView(line, params)
+    com.rfandango.haku_x.boosted.wearReadoutLook(line, 14f)   // hakuX-Boosted: the readouts' one look
     val started = SystemClock.uptimeMillis()
     var seen = false
     fpsHandler.post(object : Runnable {
@@ -577,6 +578,7 @@ class NativeCoreActivity : SDLActivity(), InputManager.InputDeviceListener {
     fpsView = fps
     // hakuX-Boosted: inside the screen's cutout and rounded corner (boosted/SafeArea.kt)
     com.rfandango.haku_x.boosted.keepInSafeArea(fps)
+    com.rfandango.haku_x.boosted.wearReadoutLook(fps)   // hakuX-Boosted: the counter both consoles' games wear
 
     if (!BuildConfig.DEBUG) {
       return
@@ -604,6 +606,7 @@ class NativeCoreActivity : SDLActivity(), InputManager.InputDeviceListener {
     mLayout?.addView(hitch, hitchParams)
     hitchView = hitch
     com.rfandango.haku_x.boosted.keepInSafeArea(hitch, under = fps)   // hakuX-Boosted, as above
+    com.rfandango.haku_x.boosted.wearReadoutLook(hitch, 10f)   // hakuX-Boosted: the readouts' one look
   }
 
   /** The run's cheats in the manifest's order (nativeSetCheat's index), and the game's key; empty: none. */

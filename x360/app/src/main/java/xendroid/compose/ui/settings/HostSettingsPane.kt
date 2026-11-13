@@ -73,6 +73,7 @@ import xendroid.compose.settings.Setting
 import xendroid.compose.settings.SettingValue
 import xendroid.compose.settings.SettingsCategory
 import xendroid.compose.settings.SettingsViewModel
+import xendroid.compose.ui.theme.LookSpacing
 
 /*
  * hakuX-Boosted: this side's settings as a part of the host's settings screen (its
@@ -247,7 +248,7 @@ private fun SignInRow() {
         color = MaterialTheme.colorScheme.errorContainer,
         contentColor = MaterialTheme.colorScheme.onErrorContainer,
         shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = LookSpacing.Gutter, vertical = LookSpacing.Gap),
     ) {
         Column(
             Modifier
@@ -366,7 +367,7 @@ fun ConfigNoticeCard(loaded: Boolean) {
         color = MaterialTheme.colorScheme.secondaryContainer,
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
         shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = LookSpacing.Gutter, vertical = LookSpacing.Gap),
     ) {
         Column(Modifier.padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 4.dp)) {
             Text(shown.title, style = MaterialTheme.typography.titleMedium)
@@ -393,7 +394,10 @@ fun HostSection(title: String) {
         title,
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 4.dp),
+        modifier = Modifier.padding(
+            start = LookSpacing.Gutter, end = LookSpacing.Gutter,
+            top = LookSpacing.SectionTop, bottom = LookSpacing.SectionBottom,
+        ),
     )
 }
 
@@ -403,7 +407,7 @@ private fun HostNote(text: String) {
         text,
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier = Modifier.padding(horizontal = LookSpacing.Gutter, vertical = LookSpacing.Gap),
     )
 }
 
@@ -490,10 +494,12 @@ private fun supporting(value: String?, desc: String, modified: Boolean): (@Compo
             val line = listOfNotNull(value, desc.takeIf { it.isNotEmpty() }).joinToString(". ")
             if (line.isNotEmpty()) Text(line)
             if (modified) {
+                // amber, as a changed value is marked on this side's other screens
+                // (SettingRows.kt); the accent is for what can be acted on
                 Text(
                     "Changed from the default",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
+                    color = MaterialTheme.colorScheme.tertiary,
                 )
             }
         }

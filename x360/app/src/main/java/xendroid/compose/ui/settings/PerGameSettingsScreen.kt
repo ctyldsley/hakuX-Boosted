@@ -101,7 +101,6 @@ private fun PerGameIndex(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
-                HorizontalDivider()
             }
             items(categories, key = { it.title }) { cat ->
                 val overridden = overriddenCountOf(cat)
@@ -118,7 +117,6 @@ private fun PerGameIndex(
                     },
                     modifier = Modifier.clickable { onOpen(cat) },
                 )
-                HorizontalDivider()
             }
         }
     }
@@ -152,7 +150,6 @@ private fun PerGameCategoryDetail(
                     overrideValue = overrides[setting.key],
                     onOverrideToggle = { vm.setOverride(setting, it) },
                 )
-                HorizontalDivider()
             }
         }
     }

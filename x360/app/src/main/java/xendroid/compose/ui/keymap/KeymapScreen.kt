@@ -48,7 +48,6 @@ fun KeymapScreen(vm: KeymapViewModel, onBack: () -> Unit) {
                     },
                     modifier = Modifier.clickable { capturing = row },
                 )
-                HorizontalDivider()
             }
         }
     }

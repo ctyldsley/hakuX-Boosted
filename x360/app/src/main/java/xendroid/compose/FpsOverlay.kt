@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -16,7 +15,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -76,8 +74,9 @@ fun FpsOverlay(
     Box(modifier.fillMaxSize().screenSafePadding().onSizeChanged { boxSize = it }) {
         Text(
             text = String.format(Locale.US, "FPS %.0f  ·  %.1f ms", fps, frameMs),
-            color = Color.White.copy(alpha = 0.7f),       // soft, more transparent than the old yellow
-            fontSize = 10.sp,
+            // hakuX-Boosted: the readout both consoles' games wear (ui/theme/HostTheme.kt).
+            color = xendroid.compose.ui.theme.GameOverlayLook.ReadoutText,
+            fontSize = xendroid.compose.ui.theme.GameOverlayLook.READOUT_TEXT_SP.sp,
             fontFamily = FontFamily.Monospace,
             modifier = Modifier
                 .offset {
@@ -87,8 +86,14 @@ fun FpsOverlay(
                     )
                 }
                 .onSizeChanged { textSize = it }
-                .background(Color.Black.copy(alpha = 0.28f), RoundedCornerShape(4.dp))
-                .padding(horizontal = 5.dp, vertical = 1.dp)
+                .background(
+                    xendroid.compose.ui.theme.GameOverlayLook.ReadoutBackground,
+                    xendroid.compose.ui.theme.GameOverlayLook.ReadoutShape,
+                )
+                .padding(
+                    horizontal = xendroid.compose.ui.theme.GameOverlayLook.READOUT_PADDING_HORIZONTAL_DP.dp,
+                    vertical = xendroid.compose.ui.theme.GameOverlayLook.READOUT_PADDING_VERTICAL_DP.dp,
+                )
                 .pointerInput(boxSize) {
                     detectDragGestures(
                         onDrag = { change, drag ->

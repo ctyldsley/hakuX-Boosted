@@ -140,7 +140,6 @@ private fun ContentList(
                     }
                 },
             )
-            HorizontalDivider()
         }
     }
 }

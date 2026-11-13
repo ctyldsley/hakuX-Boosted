@@ -169,6 +169,49 @@ private val DarkColors = darkColorScheme(
     error = Color(0xFFFFA39B),
 )
 
+/**
+ * The spacing every screen of both sides is laid out on, so that a row, a section title
+ * and a card start on the same line whichever side's screen they are on. Material's own
+ * list rows already use the gutter.
+ */
+object LookSpacing {
+    /** From the screen's edge to text and cards. */
+    val Gutter = 16.dp
+    /** Above a section's title. */
+    val SectionTop = 24.dp
+    /** Between a section's title and its first row. */
+    val SectionBottom = 4.dp
+    /** Between stacked buttons or cards. */
+    val Gap = 8.dp
+    /** Inside a card or an in-game panel; the smaller one where the window is short. */
+    val Panel = 20.dp
+    val PanelCompact = 12.dp
+}
+
+/**
+ * What is drawn over a running game, the same for both consoles: the dimming behind a
+ * menu or a prompt, and the small readout (the frame rate counter). Plain values, because
+ * hakuX's counter is an Android view and this side's is Compose.
+ *
+ * The dimming is near-black with a trace of the accent's hue, as the dark surfaces are.
+ * The readout is white on a translucent dark pill with a soft corner: readable over a
+ * bright scene and a dark one, and small enough to leave on.
+ */
+object GameOverlayLook {
+    val Scrim = Color(0xFF040705).copy(alpha = 0.66f)
+
+    const val READOUT_TEXT_ARGB = 0xE6FFFFFF.toInt()
+    const val READOUT_BACKGROUND_ARGB = 0x73000000
+    const val READOUT_TEXT_SP = 11f
+    const val READOUT_CORNER_DP = 6f
+    const val READOUT_PADDING_HORIZONTAL_DP = 6f
+    const val READOUT_PADDING_VERTICAL_DP = 2f
+
+    val ReadoutText = Color(READOUT_TEXT_ARGB)
+    val ReadoutBackground = Color(READOUT_BACKGROUND_ARGB)
+    val ReadoutShape = RoundedCornerShape(READOUT_CORNER_DP.dp)
+}
+
 /** Rounder than Material's: a card, a tile and a menu have the same generous corner. */
 private val LookShapes = Shapes(
     extraSmall = RoundedCornerShape(6.dp),

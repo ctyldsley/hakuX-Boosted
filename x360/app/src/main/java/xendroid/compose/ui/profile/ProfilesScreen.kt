@@ -185,7 +185,6 @@ private fun ProfileList(
                 trailingContent = { RowMenu(p, onRename, onDelete) },
                 modifier = Modifier.clickable { onSelect(p.xuid) },
             )
-            HorizontalDivider()
         }
     }
 }

@@ -16,7 +16,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import xendroid.compose.Emulator
@@ -42,7 +41,7 @@ fun GuestMessageBoxPanel(
     BoxWithConstraints(
         modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.6f))
+            .background(xendroid.compose.ui.theme.GameOverlayLook.Scrim)  // hakuX-Boosted: one dimming for every in-game panel
             // Swallow taps meant for the game surface underneath.
             .pointerInput(request.id) { awaitPointerEventScope { while (true) awaitPointerEvent() } },
         contentAlignment = Alignment.TopCenter,
