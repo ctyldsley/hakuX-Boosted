@@ -922,9 +922,10 @@ void A64Emitter::CallNativeSafe(void* fn) {
 //   - the resolve thunk, ResolveFunction and the stack synchronisation
 //     helper are only reached from inside a guest call's sequence, after its
 //     flush.
-// The two host functions called with a bare blr (RSQRT_V128, the vector
-// helpers beside it) take their operands in registers and never see the
-// context.
+//   - the two host functions called with a bare blr (RSQRT_F64, RSQRT_V128):
+//     they never see the context, but nothing saves the vector registers a C
+//     function may use, so they are bracketed the same way
+//     (EmitPinnedSyncBeforeBareHostCall).
 // The ways in: the function's first instruction (context current, loaded by
 // the prologue), the return from any of the above (reloaded), and
 // ResolveFunction resuming a return site after a longjmp (through a stub
@@ -945,6 +946,10 @@ void A64Emitter::CallNativeSafe(void* fn) {
 // x22-x28 are callee-saved for host functions; v4-v31 are saved by the full
 // guest-to-host thunk; and after every call that does not go through it the
 // registers are reloaded anyway.
+//
+// In a64_pin_verify mode a difference found while a pinned register sits in
+// a vector register across a bare blr is not possible either: the reload
+// after it comes from the context, which that mode keeps current.
 void A64Emitter::EmitPinnedFlush() {
   if (pin_verify_) {
     // The context is written at every store in this mode and is the copy

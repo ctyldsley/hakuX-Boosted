@@ -216,6 +216,18 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   void EmitPinnedFlush();
   // Pinned registers <- context.
   void EmitPinnedReload();
+  // Round a host function called with a bare blr instead of through the
+  // guest-to-host thunk (which is where CallNativeSafe does this itself).
+  void EmitPinnedSyncBeforeBareHostCall() {
+    if (pins_live_) {
+      EmitPinnedFlush();
+    }
+  }
+  void EmitPinnedSyncAfterBareHostCall() {
+    if (pins_live_) {
+      EmitPinnedReload();
+    }
+  }
   // a64_pin_verify: compare the pinned register with the context copy and
   // report a difference. Clobbers x0, x1, v0 and nothing else.
   void EmitPinnedVerify(const PinnedGuestRegister& pin);

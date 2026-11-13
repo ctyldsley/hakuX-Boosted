@@ -4622,8 +4622,14 @@ struct RSQRT_F64 : Sequence<RSQRT_F64, I<OPCODE_RSQRT, F64Op, F64Op>> {
       e.fmov(e.d0, e.x0);
     }
     e.fmov(e.x0, src);
+    // hakuX-Boosted: this call does not go through the thunk, so nothing
+    // saves the vector registers a C function is free to use (v0-v7,
+    // v16-v31). Pinned guest registers are written back first and read
+    // again after; a no-op when nothing is pinned.
+    e.EmitPinnedSyncBeforeBareHostCall();
     e.mov(e.x9, reinterpret_cast<uint64_t>(PpcFrsqrte));
     e.blr(e.x9);
+    e.EmitPinnedSyncAfterBareHostCall();
     e.fmov(i.dest, e.x0);
   }
 };
@@ -4726,6 +4732,9 @@ struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
     e.str(QReg(src_idx),
           Xbyak_aarch64::ptr(e.sp,
                              static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
+    // hakuX-Boosted: as RSQRT_F64, round all four calls: no pinned register
+    // is read or written between them.
+    e.EmitPinnedSyncBeforeBareHostCall();
     for (int lane = 0; lane < 4; lane++) {
       e.ldr(e.w0, Xbyak_aarch64::ptr(
                       e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
@@ -4736,6 +4745,7 @@ struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
                       e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
                                 lane * 4));
     }
+    e.EmitPinnedSyncAfterBareHostCall();
     e.ldr(QReg(i.dest.reg().getIdx()),
           Xbyak_aarch64::ptr(e.sp,
                              static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
