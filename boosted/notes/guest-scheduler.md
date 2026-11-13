@@ -441,7 +441,6 @@ Everything about behaviour. In particular:
   rest of the yield path's cost.
 
 ## Build
-EOF
 
 - `b182e29` (the two lost wakes): Actions run 53, green.
 - `c55015c` (the settings and counters) with these notes (`189880e`):
