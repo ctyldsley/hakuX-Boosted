@@ -1,0 +1,155 @@
+// hakuX-Boosted: the body of the stand-in pixel shaders
+// (placeholder_stand_in_*.ps.glsl), which draw an approximation of a guest
+// pixel shader while the real pipeline compiles (vulkan_placeholder_ps_mode,
+// vulkan/vulkan_pipeline_cache.cc). Not compiled alone: each wrapper sets
+//   XE_STAND_IN_TEXTURE  0 no texture, 1 a 2D texture, 2 a cube texture
+//   XE_STAND_IN_COLOR    0 no vertex colour input, 1 one
+// and includes this file.
+//
+// What it draws: the texture the guest pixel shader fetches first, by the
+// interpolator that fetch reads, times the interpolated vertex colour if the
+// vertex shader passes one through; without a texture the vertex colour, or a
+// mid grey. Every colour output is written with the same value (outputs the
+// render pass has no attachment for are discarded, and render targets the
+// guest shader does not write have a zero write mask in the pipeline). Depth is
+// never written: the depth test and write are the pipeline's fixed-function
+// state, the same as the real pipeline's.
+//
+// Inputs: the texture coordinate at location 0 and the colour at location 1,
+// which is what the stand-in variant of the interpreter vertex shader
+// (ucode_interpreter_stand_in.vs.glsl) outputs. With a translated guest vertex
+// shader the interpolators are at packed locations instead, and the pipeline
+// cache rewrites the two Location decorations of a copy of the module
+// (VulkanPipelineCache::GetStandInPixelShader), so keep these two the only
+// inputs.
+//
+// Per-draw parameters are in the two padding words after the interpreter's
+// fields in the system constants (std140 uvec4 [34].zw), written by
+// VulkanCommandProcessor::IssueDraw. Bits of [34].z:
+//    0:3   interpolator holding the texture coordinate (vertex interpreter)
+//    4:7   interpolator holding the vertex colour (vertex interpreter)
+//    8     sample the texture
+//    9     use the vertex colour
+//   10:15  source component of U, V and W in the interpolator, 2 bits each
+//   16     the coordinates are in texels (unnormalised)
+//   17     keep alpha (texture times colour) and apply the guest alpha test;
+//          otherwise alpha is 1
+//   18:22  the texture's fetch constant
+//   23     the texture is gamma-encoded (TextureSign::kGamma)
+
+layout(std140, set = 1, binding = 0) uniform xe_system_constants_block {
+  uvec4 xe_sys[35];
+};
+
+#define XE_SI_USE_TEXTURE 0x100u
+#define XE_SI_USE_COLOR 0x200u
+#define XE_SI_UNNORMALIZED 0x10000u
+#define XE_SI_ALPHA 0x20000u
+#define XE_SI_GAMMA 0x800000u
+
+// SpirvShaderTranslator kSysFlag_* bit values.
+#define XE_SYS_FLAG_ALPHA_PASS_IF_LESS 0x800u
+#define XE_SYS_FLAG_ALPHA_PASS_IF_EQUAL 0x1000u
+#define XE_SYS_FLAG_ALPHA_PASS_IF_GREATER 0x2000u
+#define XE_SYS_FLAG_CONVERT_COLOR_0_TO_GAMMA 0x4000u
+
+#if XE_STAND_IN_TEXTURE
+layout(std140, set = 1, binding = 4) uniform xe_fetch_constants_block {
+  uvec4 xe_fetch[48];  // 32 * 6 dwords
+};
+#if XE_STAND_IN_TEXTURE == 2
+layout(set = 3, binding = 0) uniform textureCube xe_stand_in_texture;
+#else
+// Guest 1D and 2D textures are 2D array views on the host.
+layout(set = 3, binding = 0) uniform texture2DArray xe_stand_in_texture;
+#endif
+layout(set = 3, binding = 1) uniform sampler xe_stand_in_sampler;
+layout(location = 0) in vec4 xe_in_stand_in_texcoord;
+#endif
+
+#if XE_STAND_IN_COLOR
+layout(location = 1) in vec4 xe_in_stand_in_color;
+#endif
+
+layout(location = 0) out vec4 xe_out_color_0;
+layout(location = 1) out vec4 xe_out_color_1;
+layout(location = 2) out vec4 xe_out_color_2;
+layout(location = 3) out vec4 xe_out_color_3;
+
+float XeStandInComp(vec4 v, uint c) {
+  return c == 0u ? v.x : (c == 1u ? v.y : (c == 2u ? v.z : v.w));
+}
+
+// What the translated shaders do to a colour before writing it: the render
+// target's exponent bias, then gamma if the target is gamma-encoded (a plain
+// power here, the real shaders use the console's piecewise-linear curve).
+vec4 XeStandInTarget(vec4 color, uint index, uint flags) {
+  color *= uintBitsToFloat(xe_sys[13][index]);
+  if ((flags & (XE_SYS_FLAG_CONVERT_COLOR_0_TO_GAMMA << index)) != 0u) {
+    color.rgb = pow(max(color.rgb, vec3(0.0)), vec3(1.0 / 2.2));
+  }
+  return color;
+}
+
+void main() {
+  uint flags = xe_sys[0].x;
+  uint si = xe_sys[34].z;
+  vec4 color = vec4(0.5, 0.5, 0.5, 1.0);
+  bool have_color = false;
+
+#if XE_STAND_IN_TEXTURE
+  if ((si & XE_SI_USE_TEXTURE) != 0u) {
+    vec4 tc = xe_in_stand_in_texcoord;
+    vec3 uvw = vec3(XeStandInComp(tc, (si >> 10) & 3u),
+                    XeStandInComp(tc, (si >> 12) & 3u),
+                    XeStandInComp(tc, (si >> 14) & 3u));
+#if XE_STAND_IN_TEXTURE == 2
+    color = texture(samplerCube(xe_stand_in_texture, xe_stand_in_sampler), uvw);
+#else
+    vec2 uv = uvw.xy;
+    if ((si & XE_SI_UNNORMALIZED) != 0u) {
+      // The guest's size of the texture (not the host's, which may be scaled).
+      uint size_index = ((si >> 18) & 31u) * 6u + 2u;
+      uint size = xe_fetch[size_index >> 2][size_index & 3u];
+      uv /= vec2(float((size & 0x1FFFu) + 1u),
+                 float(((size >> 13) & 0x1FFFu) + 1u));
+    }
+    color = texture(sampler2DArray(xe_stand_in_texture, xe_stand_in_sampler),
+                    vec3(uv, 0.0));
+#endif
+    if ((si & XE_SI_GAMMA) != 0u) {
+      color.rgb = pow(max(color.rgb, vec3(0.0)), vec3(2.2));
+    }
+    have_color = true;
+  }
+#endif
+
+#if XE_STAND_IN_COLOR
+  if ((si & XE_SI_USE_COLOR) != 0u) {
+    vec4 vertex_color = clamp(xe_in_stand_in_color, vec4(0.0), vec4(1.0));
+    color = have_color ? color * vertex_color : vertex_color;
+    have_color = true;
+  }
+#endif
+
+  if ((si & XE_SI_ALPHA) != 0u) {
+    // The guest alpha test, as the translated shaders apply it to the alpha of
+    // render target 0. All three pass bits are set when the test is off.
+    float reference = uintBitsToFloat(xe_sys[11].y);
+    uint pass_bit = color.a < reference
+                        ? XE_SYS_FLAG_ALPHA_PASS_IF_LESS
+                        : (color.a > reference
+                               ? XE_SYS_FLAG_ALPHA_PASS_IF_GREATER
+                               : XE_SYS_FLAG_ALPHA_PASS_IF_EQUAL);
+    if ((flags & pass_bit) == 0u) {
+      discard;
+    }
+  } else {
+    color.a = 1.0;
+  }
+
+  xe_out_color_0 = XeStandInTarget(color, 0u, flags);
+  xe_out_color_1 = XeStandInTarget(color, 1u, flags);
+  xe_out_color_2 = XeStandInTarget(color, 2u, flags);
+  xe_out_color_3 = XeStandInTarget(color, 3u, flags);
+}
