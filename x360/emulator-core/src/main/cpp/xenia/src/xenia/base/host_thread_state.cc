@@ -80,7 +80,8 @@ XE_NOINLINE HostThreadState* Register() {
     return state;
   }
   state = &thread_state_storage_;
-  state->verify.store(cvars::host_thread_state_verify ? 1 : 0,
+  // As decided with the mode, not as the setting may read now.
+  state->verify.store(unregistered.verify.load(std::memory_order_relaxed),
                       std::memory_order_relaxed);
   WriteSlot(state);
   uint32_t count =
@@ -143,9 +144,8 @@ XE_NOINLINE HostThreadState* DecideAndAcquire() {
 
 }  // namespace host_thread_state_internal
 
-XE_NOINLINE XE_COLD void HostThreadStateMismatch(const char* what,
-                                                 uint64_t state_value,
-                                                 uint64_t thread_local_value) {
+XE_NOINLINE void HostThreadStateMismatch(const char* what, uint64_t state_value,
+                                         uint64_t thread_local_value) {
   static std::atomic<uint32_t> total{0};
   static std::atomic<bool> unregistered_busy{false};
   uint32_t count = total.fetch_add(1, std::memory_order_relaxed) + 1;
