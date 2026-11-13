@@ -11,8 +11,9 @@ say nothing yet about Turnip's compile time.
   SPIRV-Tools optimiser linked into the 360 core), a Linux harness that
   builds the translator and counts words on hand-written test microcode
   (`boosted/tools/spirv-harness`), step 3's analysis (below).
-- **In progress:** waiting for a green Actions build. State of the build:
-  see "What the build verified" at the end, updated last.
+- **Build:** run 49 built the first commit (`cf5cbf3`) green, which is the
+  one that adds SPIRV-Tools to the Android build. See "What the build
+  verified" at the end for the commits after it.
 - **Next (for whoever picks this up):** measure on the phone (steps below);
   then the translator rewrites in "What to build next", in that order.
 
@@ -20,13 +21,13 @@ say nothing yet about Turnip's compile time.
 
 - Both settings default to today's output. With them untouched the module
   handed to the driver is byte for byte what `7648e9c` produces.
-- `spirv_optimize = 1` shrinks arithmetic-heavy shaders by about a third and
-  texture-heavy ones by about 4%, and costs about 0.3 ms per KB of module on
-  the translating thread (cloud machine; the phone will differ). A 300 KB
-  shader is about 90 ms of optimiser. Run 37's largest quartile took the
-  driver a median 371 ms, so level 1 only pays there if the driver gets more
-  than about a quarter faster. **I expect it to pay on arithmetic-heavy
-  shaders and to lose on texture-heavy ones; tomorrow's log decides.**
+- `spirv_optimize = 1` shrinks arithmetic-heavy shaders by about 30% and
+  texture-heavy ones by about 4%, and costs 0.3 to 0.5 ms per KB of module
+  on the translating thread (a shared cloud core; the phone will differ). A
+  300 KB shader is 90 to 150 ms of optimiser. Run 37's largest quartile took
+  the driver a median 371 ms, so level 1 only pays there if the driver gets
+  a quarter to 40% faster. **I expect it to pay on arithmetic-heavy shaders,
+  if anywhere, and to lose on texture-heavy ones; the phone's log decides.**
 - The optimiser cannot remove the bulk of a texture fetch: it is real code
   that switches on run-time state. That needs a translator change (step 3,
   (b)), and by the harness it is the largest single saving available.
@@ -276,8 +277,8 @@ Nothing blocked it. The sources are portable; the stubs are a logging
 sink, three cvars defined in files it does not build, and a few symbols
 (`stubs.cc`).
 
-Sizes in bytes; times on the cloud machine (4 shared x86-64 cores, they
-vary by a third between runs).
+Sizes in bytes; times on the cloud machine (4 shared x86-64 cores; they
+vary by up to half between runs, so read them as an order of size).
 
 | Test shader | guest instr | today | no names | level 1 | level 2 | L1 ms | L2 ms |
 |---|---|---|---|---|---|---|---|
@@ -288,28 +289,31 @@ vary by a third between runs).
 | `ps_tex2d_chained_44` | 90 | 227,120 | 223,280 | 214,212 | 187,040 | 68 | 398 |
 | `ps_tex3d_4` | 10 | 40,888 | 37,808 | 35,848 | 35,036 | 8 | 24 |
 | `ps_texcube_4` | 10 | 33,920 | 31,064 | 29,104 | 27,992 | 7 | 18 |
-| `ps_alu_64` | 80 | 44,232 | 41,696 | 29,796 | 25,656 | 8 | 17 |
-| `ps_alu_256` | 272 | 136,776 | 134,240 | 91,924 | 57,056 | 33 | 74 |
-| `ps_alu_600` | 616 | 302,584 | 300,048 | 203,412 | 105,020 | 97 | 222 |
-| `ps_alu_predicated_256` | 272 | 129,592 | 127,056 | 101,572 | 96,620 | 35 | 77 |
+| `ps_alu_64` | 80 | 45,512 | 42,976 | 30,964 | 29,480 | 8 | 22 |
+| `ps_alu_256` | 272 | 141,896 | 139,360 | 96,492 | 90,844 | 43 | 117 |
+| `ps_alu_600` | 616 | 314,584 | 312,048 | 214,064 | 200,852 | 116 | 304 |
+| `ps_alu_predicated_256` | 272 | 134,712 | 132,176 | 106,680 | 103,744 | 37 | 79 |
 | `vs_minimal` | 2 | 8,456 | 6,176 | 5,256 | 5,164 | 1 | 3 |
-| `vs_alu_256` | 275 | 136,728 | 134,292 | 92,336 | 56,736 | 33 | 66 |
-| `vs_alu_800` | 819 | 398,936 | 396,500 | 268,604 | 130,220 | 143 | 268 |
+| `vs_alu_256` | 275 | 141,848 | 139,412 | 96,884 | 90,436 | 34 | 70 |
+| `vs_alu_800` | 819 | 414,936 | 412,500 | 282,776 | 264,404 | 208 | 338 |
 
 How these compare with the phone: the 44-fetch test shader is 227 KB
 against 282 KB for the title's 44-fetch, 636-line pixel shader; the
-819-instruction vertex test is 399 KB against 281 KB for the title's
+819-instruction vertex test is 415 KB against 281 KB for the title's
 822-line one. Same order, so the per-instruction figures below are usable;
 the title's real mix differs. (The brief's "about 340 words per guest
 instruction" for that vertex shader is 342 bytes, about 85 words. The test
-mix is 120 words, 480 bytes, an instruction.)
+mix is 126 words, about 500 bytes, an instruction.)
 
-**Caveat on the level 2 column for the `alu` shaders.** Level 2 removes
-unused vector components, and my arithmetic mix leaves some components
-unread (a register written `xyzw` whose reader takes `xyz`). A compiled
-game shader has almost none, so level 2's extra gain over level 1 there is
-flattered. Level 1's is not: it only removes whole unused instructions and
-every instruction's result is read.
+**A lesson about test shaders, kept here so it is not repeated.** The
+first version of the arithmetic mix left some vector components unread (a
+register written `xyzw` whose reader took `xyz`). Level 2 removes unused
+components, and appeared to shrink those shaders by 65%. A compiled game
+shader has almost no dead code. With every component read (the mix above),
+level 2 gains five points over level 1 on arithmetic. Its larger gain on
+the texture shaders is function-wide redundancy elimination across fetches
+(the same fetch constants and system constants decoded again for each
+fetch), which is real, and is also where its time goes.
 
 ## Step 3: where the bulk comes from
 
@@ -321,44 +325,44 @@ are run 37's histogram of 169 dumped modules. What a module is made of,
 |---|---|---|---|---|
 | `ps_minimal` | 1,013 | 177 | 47 | 804 |
 | `ps_tex2d_44` | 7,780 | 258 | 46,977 | 804 |
-| `ps_alu_600` | 5,179 | 306 | 68,722 | 804 |
+| `ps_alu_600` | 5,629 | 306 | 71,272 | 804 |
 | `vs_minimal` | 818 | 249 | 333 | 143 |
-| `vs_alu_800` | 6,345 | 319 | 92,317 | 143 |
+| `vs_alu_800` | 6,945 | 319 | 95,717 | 143 |
 
 Declarations grow with the body because every `NoContraction` is an
 `OpDecorate` up there. The fixed part is about 1,000 words: types, and the
 system constants block with its 47 member offsets.
 
-One arithmetic instruction of the test mix is 120 words:
+One arithmetic instruction of the test mix is 126 words:
 
 | Part | Words | Share | Removed by level 1 |
 |---|---|---|---|
-| Multiply's zero rule: `FAbs`, `FAbs`, `NMin`, compare, select | 40 | 34% | 4 (shared `FAbs`) |
-| Registers in memory: `OpAccessChain`, `OpLoad`, `OpStore` | 30 | 25% | 29 |
-| Swizzle and write mask: extract, shuffle, insert | 24 | 20% | 5 |
-| The arithmetic itself: `FMul`, `FAdd` | 11 | 9% | 0 |
-| `NoContraction` decorations | 7 | 6% | 0 |
-| Rest (scalar ops' bit tests, constants) | 8 | 6% | 1 |
+| Multiply's zero rule: `FAbs`, `FAbs`, `NMin`, compare, select | 44 | 35% | 5 (shared `FAbs`) |
+| Registers in memory: `OpAccessChain`, `OpLoad`, `OpStore` | 30 | 24% | 29 |
+| Swizzle and write mask: extract, shuffle, insert | 23 | 18% | 5 |
+| The arithmetic itself: `FMul`, `FAdd` | 12 | 9% | 0 |
+| `NoContraction` decorations | 8 | 6% | 0 |
+| Rest (scalar ops' bit tests, constants) | 9 | 7% | 2 |
 
-After level 1 an instruction is 81 words.
+After level 1 an instruction is 85 words.
 
 ### (a) Registers in function-local memory
 
 - **Today:** `xe_var_registers` is one local `float4[register_count]`.
   Every operand is `OpAccessChain` + `OpLoad` (`LoadOperandStorage`), every
   result `OpAccessChain` + `OpStore`, and a partial write mask adds a load
-  of the old value (`StoreResult`). Test: 25% of an arithmetic instruction.
+  of the old value (`StoreResult`). Test: 24% of an arithmetic instruction.
   Phone: `OpAccessChain` 9.7% + `OpLoad` 7.7% + stores, so 18 to 20% of all
   words (texture-heavy shaders dilute it).
 - **What level 1 already does:** removes it (30 words to 1). Scalar
-  replacement is its most expensive pass (30 to 40 ms of 140 on
-  `vs_alu_800`), and it is there only to undo the array.
+  replacement is its most expensive pass (30 to 40 ms of about 150
+  on `vs_alu_800`), and it is there only to undo the array.
 - **What a rewrite would emit, cheapest first:**
   1. One `vec4` variable per register instead of an array, when the shader
      has no `a0`/`aL` relative register addressing
      (`dynamic_addressable_register_count` is 0 and no operand uses a
      relative mode). Removes every `OpAccessChain` on registers at once
-     (15 words an instruction, 13%) with a change of a few lines in
+     (15 words an instruction, 12%) with a change of a few lines in
      `LoadOperandStorage`, `StoreResult` and the variable's creation, and
      makes scalar replacement unnecessary.
   2. On top of that, a per-block cache in the translator: the current
@@ -438,7 +442,7 @@ fetches are about 28,000 of its 70,500 words, 40%.
   also minimal once (a) removes the load. The expensive forms are the dot
   products, which extract every component of both operands to apply the
   zero rule per component, and scalar results smeared across a mask with
-  one `OpCompositeInsert` per component. Test: 20% of an arithmetic
+  one `OpCompositeInsert` per component. Test: 18% of an arithmetic
   instruction; phone: `OpVectorShuffle` 6.7% plus extracts and inserts.
 - **What a rewrite would emit:** for `dp3`/`dp4`, one vector multiply and
   one vector zero test, then the extracts and adds, instead of per
@@ -448,7 +452,7 @@ fetches are about 28,000 of its 70,500 words, 40%.
 - **The part the brief did not list, and the largest:** the Shader Model 3
   rule that zero times anything is zero (`ZeroIfAnyOperandIsZero`): for
   every multiply whose operands differ, `FAbs`, `FAbs`, `NMin`, a compare
-  with zero and an `OpSelect`. 34% of an arithmetic instruction on the
+  with zero and an `OpSelect`. 35% of an arithmetic instruction on the
   test; on the phone it is most of the `OpExtInst` 9.7% and `OpSelect`
   6.5% outside texture fetches. It cannot be dropped without changing
   results (0 x Inf). Level 1 shares the repeated `FAbs`. According to the
@@ -476,7 +480,7 @@ depth conversion; a vertex shader's is 143.
 | Alpha to coverage | about 330 | Run-time on the `alpha_to_mask` constant, with a branch per MSAA sample count (1, 2, 4) and the dither pattern for each |
 | Colour written check, exponent bias, gamma on output, blend factor premultiply, the store | about 300 | Per render target; the gamma conversion is a run-time flag (already in vector form) |
 
-- **How much:** nothing on the large shaders (0.4% of `ps_alu_600`). On a
+- **How much:** nothing on the large shaders (1% of `ps_alu_600`). On a
   median module (run 37: 39 KB for a vertex and pixel pair, about 10,000
   words) the tail is 8% and the fixed declarations of the two modules
   another 20%. So this is about the many small pipelines, where the driver
@@ -546,4 +550,29 @@ includes the optimiser.
 
 ## What the build verified
 
-(Updated last; see the top of the file for the state when you read this.)
+- **Run 49, commit `cf5cbf3`: green.** That commit adds the two settings,
+  the optimiser call and the `SPIRV-Tools-opt` link. So: SPIRV-Tools
+  compiles with the NDK and links into `libe.so`, the translator's changes
+  compile under the Android build's `-Werror`, and the job's own checks
+  (`-O3`, ThinLTO, signing, what the APK holds) pass. The "Build the debug
+  APK" step took 25 minutes against about 10: that is SPIRV-Tools compiling
+  for the first time, and ccache has it from now on.
+- The commits after it change `spirv_shader_translator_optimize.cc` (the
+  float controls workaround, one more pass at level 1), a description
+  string in `gpu_flags.cc`, the harness (not built by Actions) and this
+  file. **Install the APK of the newest green run on the branch, not run
+  49's:** in run 49's build `spirv_optimize` is caught by the float
+  controls trap and does almost nothing.
+- What no build can tell: whether the optimised modules render the same on
+  Turnip (the harness says they are valid SPIR-V with the same interface,
+  and the pass list is argued to be exact, but nothing executed them),
+  whether the driver compiles them faster, how long the optimiser takes on
+  the phone, and how much larger the APK is (read `lib/arm64-v8a/libe.so`
+  in the job's "What the APK holds" step against run 44's).
+- What the cloud machine verified instead: every source this branch
+  touches compiles with clang 18 under xenia's own flags and `-Werror`;
+  88 modules translated from test microcode at four configurations all
+  pass `spirv-val`; bindings, interface variables, execution modes,
+  capabilities and `NoContraction` are identical before and after both
+  levels, with and without float controls and at SPIR-V 1.0 and 1.5; a
+  module the optimiser refuses comes back untouched.

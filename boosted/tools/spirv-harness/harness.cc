@@ -265,7 +265,7 @@ Instruction MixedAlu(uint32_t i) {
     case 1:
       return Alu(kMad, a, "xyzw", R(b), R(c, "xxxx"), R(a));
     case 2:
-      return Alu(kDp3, a, "x___", R(b), R(c));
+      return Alu(kDp4, a, "x___", R(b), R(c));
     case 3:
       return Alu(kAdd, a, "xy__", R(b, "yzyz"), R(c, "xyxy", true));
     case 4:
