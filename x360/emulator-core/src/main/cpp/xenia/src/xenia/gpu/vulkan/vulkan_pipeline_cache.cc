@@ -86,7 +86,7 @@ DEFINE_int32(
     "0 to disable multithreaded pipeline creation.",
     "Vulkan");
 DEFINE_bool(
-    vulkan_async_skip_draws, false,
+    vulkan_async_skip_draws, true,
     "With asynchronous shader compilation: don't wait for pipeline creation "
     "at the submission boundary - draws whose pipeline hasn't finished "
     "compiling yet are dropped for that submission (brief pop-in of new "

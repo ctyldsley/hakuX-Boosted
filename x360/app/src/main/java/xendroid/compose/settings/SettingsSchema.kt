@@ -40,7 +40,8 @@ object SettingsSchema {
                 "" to "None (no TU_DEBUG flags, GMEM)", "sysmem" to "sysmem (untiled, slower)",
                 "sysmem,nolrz" to "sysmem + nolrz (LRZ off, perf diagnostic)",
                 "sysmem,noubwc" to "sysmem + noubwc (UBWC off, perf diagnostic)"),
-            b("Vulkan", "vulkan_in_pass_resolve", "In-pass EDRAM resolve", true),
+            // hakuX-Boosted: off, as the core has it (the row showed On for a setting the core ran Off).
+            b("Vulkan", "vulkan_in_pass_resolve", "In-pass EDRAM resolve", false),
             b("Vulkan", "vulkan_resolve_to_texture_promote", "Resolve-to-texture: promote", true),
             b("Vulkan", "vulkan_resolve_to_texture", "Resolve-to-texture: store", true),
             b("Vulkan", "vulkan_resolve_to_texture_serve", "Resolve-to-texture: skip upload", true),
@@ -144,7 +145,8 @@ object SettingsSchema {
         SettingsCategory("GPU", listOf(
             // A dropdown, not a slider: only a few values are meaningful, and "unlimited"
             // needs to be an explicit choice rather than the bottom of a range.
-            l("GPU", "framerate_limit", "Frame rate limit", "60",
+            // hakuX-Boosted: unlimited, as the bundled config has it (the title paces itself).
+            l("GPU", "framerate_limit", "Frame rate limit", "0",
                 "60" to "60 FPS", "30" to "30 FPS", "45" to "45 FPS",
                 "90" to "90 FPS", "120" to "120 FPS", "0" to "Unlimited"),
             b("GPU", "guest_display_refresh_cap", "Cap guest display refresh (VSync)", true),
