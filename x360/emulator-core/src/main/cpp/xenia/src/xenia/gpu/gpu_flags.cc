@@ -329,6 +329,6 @@ DEFINE_int32(
     " 0 = off (the module is what the translator emitted)\n"
     " 1 = a short list that does not change any floating-point result: local "
     "variables to SSA values, constant propagation, dead branch and dead "
-    "code elimination, block merging\n"
+    "code elimination, block merging, repeated instructions within a block\n"
     " 2 = SPIRV-Tools' full performance list (as spirv-opt -O)",
     "GPU");
