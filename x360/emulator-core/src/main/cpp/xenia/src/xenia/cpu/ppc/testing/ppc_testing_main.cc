@@ -51,6 +51,15 @@ DEFINE_path(test_bin_path, "src/xenia/cpu/ppc/testing/bin/",
 DEFINE_path(test_skip_file, "src/xenia/cpu/ppc/testing/skip.txt",
             "File containing test case names to skip (one per line).", "Other");
 DEFINE_transient_string(test_name, "", "Test suite name.", "General");
+// hakuX-Boosted: the state every test leaves behind, one line a test, so
+// that two runs of the same tests with different translator settings can be
+// compared (ci/run-tests.sh does). The upstream tests assert a register or
+// two each; this covers everything a wrong translation could disturb.
+DEFINE_path(test_state_dump, "",
+            "Append one line per test to this file: its name and a hash of "
+            "the integer, float, vector and flag registers and of the "
+            "scratch and stack memory after it ran.",
+            "Other");
 
 namespace xe {
 namespace cpu {
@@ -373,6 +382,9 @@ class TestRunner {
     ctx->lr = 0xBCBCBCBC;
     fn->Call(thread_state_.get(), uint32_t(ctx->lr));
 
+    // hakuX-Boosted: the whole state, for comparing two runs.
+    DumpState(test_case);
+
     // Assert test state expectations.
     bool result = CheckTestResults(test_case);
     if (!result) {
@@ -383,6 +395,54 @@ class TestRunner {
     }
 
     return result;
+  }
+
+  // hakuX-Boosted: FNV-1a over a byte range.
+  static uint64_t Hash(const void* data, size_t length,
+                       uint64_t h = 0xCBF29CE484222325ull) {
+    auto p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < length; ++i) {
+      h = (h ^ p[i]) * 0x100000001B3ull;
+    }
+    return h;
+  }
+
+  // hakuX-Boosted: one line with the state the test left: the general
+  // registers with CTR (LR is left out: the runner sets it), the float
+  // registers, the vector registers, the condition, XER, FPSCR and VSCR
+  // state, the scratch memory tests write to and the 64 KiB of stack.
+  void DumpState(TestCase& test_case) {
+    if (cvars::test_state_dump.empty()) {
+      return;
+    }
+    if (!state_dump_file_) {
+      state_dump_file_ = filesystem::OpenFile(cvars::test_state_dump, "a");
+      if (!state_dump_file_) {
+        return;
+      }
+    }
+    auto ctx = thread_state_->context();
+    uint64_t gpr = Hash(ctx->r, sizeof(ctx->r));
+    gpr = Hash(&ctx->ctr, sizeof(ctx->ctr), gpr);
+    uint64_t fpr = Hash(ctx->f, sizeof(ctx->f));
+    uint64_t vr = Hash(ctx->v, sizeof(ctx->v));
+    uint64_t flags = Hash(&ctx->cr0, 32);
+    flags = Hash(&ctx->xer_ca, 3, flags);
+    flags = Hash(&ctx->fpscr, sizeof(ctx->fpscr), flags);
+    flags = Hash(&ctx->vscr_sat, 1, flags);
+    flags = Hash(&ctx->vscr_vec, sizeof(ctx->vscr_vec), flags);
+    uint64_t mem = Hash(memory_->TranslateVirtual(0x10001000), 0xEFFF);
+    mem = Hash(memory_->TranslateVirtual(START_ADDRESS - 64 * 1024),
+               64 * 1024, mem);
+    fprintf(state_dump_file_,
+            "%s gpr=%016llx fpr=%016llx vr=%016llx flags=%016llx "
+            "mem=%016llx\n",
+            test_case.name.c_str(), static_cast<unsigned long long>(gpr),
+            static_cast<unsigned long long>(fpr),
+            static_cast<unsigned long long>(vr),
+            static_cast<unsigned long long>(flags),
+            static_cast<unsigned long long>(mem));
+    fflush(state_dump_file_);
   }
 
   bool SetupTestState(TestCase& test_case) {
@@ -493,6 +553,7 @@ class TestRunner {
   TestSuite* current_suite_ = nullptr;
   std::vector<uint8_t> bin_cache_;
   uint32_t bin_size_ = 0;
+  FILE* state_dump_file_ = nullptr;  // hakuX-Boosted
 };
 
 bool DiscoverTests(const std::filesystem::path& test_path,
@@ -503,7 +564,9 @@ bool DiscoverTests(const std::filesystem::path& test_path,
     if (file_info.name.extension() == ".s") {
       // Only include test files (instr_*.s), not helper files
       auto filename = file_info.name.filename().string();
-      if (filename.find("instr_") == 0) {
+      // hakuX-Boosted: the seq_ files too (sequences of instructions:
+      // loops, calls, branches on flags set in another block).
+      if (filename.find("instr_") == 0 || filename.find("seq_") == 0) {
         test_files.push_back(test_path / file_info.name);
       }
     }

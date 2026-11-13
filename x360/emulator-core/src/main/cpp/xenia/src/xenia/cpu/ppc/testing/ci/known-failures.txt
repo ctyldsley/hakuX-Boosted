@@ -1,0 +1,9 @@
+# hakuX-Boosted: tests that fail on the ARM64 back end as it is on
+# claude/integration-1113, with every translator setting at its default.
+# They are skipped in CI so that a red run always means a new difference.
+# One test name a line, as in ../skip.txt.
+
+# stwcx. to an address other than the one lwarx reserved must fail without
+# storing. With a64_native_reserved_ops (the default) the store-conditional
+# does not compare addresses and stores. Titles pair the two on one address.
+stwcx_address_mismatch

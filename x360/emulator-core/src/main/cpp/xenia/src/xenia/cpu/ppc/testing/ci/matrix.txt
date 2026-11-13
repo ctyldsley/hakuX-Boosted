@@ -1,0 +1,20 @@
+# hakuX-Boosted: the translator settings the instruction tests run with.
+#
+#   label | suites (a regular expression over file names, . for all) | flags
+#
+# Every line is run after the reference (all defaults) and compared with it.
+# "." runs all 142 thousand tests; the narrower expressions keep the job's
+# length down where a setting touches only part of the translator. The seq_
+# suites (loops, calls, flags over blocks) run with every line.
+#
+# Settings that already existed on claude/integration-1113:
+short backward branches     | . | --a64_short_backward_branches=true
+compact stackpoint push     | ^(seq_|instr_(b|add|cmp|l|st)) | --a64_compact_stackpoint_push=true
+thunk fpcr compare          | ^(seq_|instr_(f|v|l|st|mt|mf)) | --a64_thunk_fpcr_compare=true
+simplify skip (verify)      | . | --simplification_skip_unchanged_blocks=true --simplification_skip_verify=true
+simplify skip               | . | --simplification_skip_unchanged_blocks=true
+pinning (verify)            | . | --pin_guest_registers=true --a64_pin_verify=true
+pinning                     | . | --pin_guest_registers=true
+pinning, 3 integer          | ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|v)) | --pin_guest_registers=true --pin_guest_registers_max_int=3 --pin_guest_registers_max_vec=12
+preempt checks              | ^(seq_|instr_(b|add|cmp|l|st)) | --guest_scheduler=true
+preempt checks, pinning     | ^(seq_|instr_(b|add|cmp|l|st)) | --guest_scheduler=true --pin_guest_registers=true
