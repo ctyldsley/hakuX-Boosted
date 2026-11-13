@@ -429,5 +429,18 @@ touched, and nothing in `kernel/` or `gpu/`.
 
 ## Build state
 
-See the end of this file's history in git for the run of the branch tip; the
-commit that added the code is `a5eaac1`.
+- `7b8b1fd` (all the code, and this file without this section's run):
+  Actions run 84, green, both jobs
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43486285850).
+  The 360 core took about 25 minutes to compile in it: the change to
+  `hir/block.h` and `hir/hir_builder.h` rebuilds most of the CPU sources.
+- The commit after it changes only this section. If the branch tip's run is
+  not green, `7b8b1fd` is the last known good commit and holds everything
+  else.
+
+Local check before each push: every changed file passed `clang++
+-fsyntax-only` against the pinned xbyak_aarch64, fmt, date, cxxopts,
+tomlplusplus and utfcpp sources (arm64 target, host C library headers, so
+pointer-size noise from those was ignored), and showed no warning under the
+compiler's default warnings. Run 82, of the first code commit `a5eaac1`, was
+cancelled by the next push, not failed.
