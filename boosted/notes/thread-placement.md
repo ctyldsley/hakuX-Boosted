@@ -126,6 +126,13 @@ of Fable II and two minutes on:
      where the helpers are busy, and how long the cold cache takes to
      settle.
 
+`boosted/notes/thread-placement-summary.py xe.log [other.log ...]` adds the
+lines up: per thread the time on a core and waiting, overall and in the
+seconds where the compile threads were busy, the worst second, the cores
+each thread was seen on, each core's mean frequency and how often it was
+limited, the thermal states, frames and the hint session's reports. Give
+it two runs' logs to read them one under the other.
+
 For each run the scheduler's own lines stay the yardstick: the worker's
 `late wake` lines, `waited ... for critical section`, and whether the title
 stalls.
@@ -207,7 +214,9 @@ created again is found on the next tick; masks and the session follow.
     frame time; when the frame was more than 10% late, the whole interval
     instead. Reasoning: a guest that waits for the vertical blank shows
     the same present interval whether its threads were 50% or 99% busy,
-    and only the second needs more speed.
+    and only the second needs more speed. PPSSPP's session does the
+    same with one thread: its emulation thread's CPU time against half a
+    frame (appendix B).
   - mode 1: always the interval, against the frame time itself.
   - Caveat for both: a guest thread that spins (the profile's
     `sub_82B9BF90`, 52.7% of guest CPU 3) is "busy" to the kernel. In
@@ -497,7 +506,7 @@ already on the base; nothing in the last column is a result.
 | 3 | **The per-second log, kept.** | Nothing surveyed watches frequency limits or thermal state, and on this phone they decide the result (1.44 of 3.63 GHz, 39 C). Every other item here is judged from this line | Built: `host_perf_log` | It is the instrument |
 | 4 | **An ADPF session over the guest's threads with the frame as its target.** | The cores were far below their top frequency while the title missed its pace. PPSSPP ships this on by default; Eden prefers it to masks. Unknown: whether this phone's power HAL acts on it, and how it combines with the audio session already there | Built: `host_perf_hint` | Run D: `MHz now` and `late` against run A at the same thermal status; headroom over time |
 | 5 | **Compile threads kept to their own cores (policy 1).** | Only if queueing remains after 1 and 2. Nobody surveyed does this (they rely on nice), Google advises against masks, and on this SoC it costs compile throughput. Its case is that nice changes who wins a core, not how long a waking thread waits for one | Built: `host_perf_core_policy = 1` | Run B |
-| 6 | **One core per dispatch thread (policy 2).** | The console's own arrangement and what `HANDOFF.md` named as the next step, but against the evidence: ARMSX2 measured pinning as slower and upstream PCSX2 leaves it off. Kept as an experiment because Fable II's stall is a race the console's exclusive cores always win | Built: `host_perf_core_policy = 2` | Run C |
+| 6 | **One core per dispatch thread (policy 2).** | The console's own arrangement and what `HANDOFF.md` named as the next step, but against the evidence: ARMSX2 measured pinning as slower and upstream PCSX2 leaves it off. What ARMSX2 measured was a fixed order that locked its busiest thread to a middle core; here the busiest threads get the best cores and are re-ranked, which answers that case but not the general one. Kept as an experiment because Fable II's stall is a race the console's exclusive cores always win | Built: `host_perf_core_policy = 2` | Run C |
 | 7 | **Compile on every core only while the guest is not running** (the stored pipelines at boot), two at run time | RPCS3 does exactly this. The fork's `pipeline_storage_precreate` is the boot phase | Not built; `gpu/vulkan/vulkan_pipeline_cache.cc` is another session's | After 2 |
 
 Not worth adopting, with reasons: Swappy or Choreographer pacing (the
@@ -513,7 +522,8 @@ listeners (polling once a second is enough and simpler).
 | `xenia/base/frame_stats.h` | `#include "xenia/base/host_perf.h"` and a call to `host_perf::OnGuestFramePresented()` at the top of `RecordGuestPresent()` | The one place that already runs once per presented guest frame and that no other session owns |
 
 New files (not upstream's): `xenia/base/host_perf.h`,
-`xenia/base/host_perf.cc`, this file. `boosted/docs/ARCHITECTURE.md` and
+`xenia/base/host_perf.cc`, this file and
+`boosted/notes/thread-placement-summary.py`. `boosted/docs/ARCHITECTURE.md` and
 the settings table in `boosted/HANDOFF.md` need the row above and the seven
 settings of section 1 added at merge; this branch does not touch them.
 
@@ -621,8 +631,15 @@ worth. None was built.
   core with the NDK's clang and warnings as errors and linking `libe.so`.
   The link is the proof that `host_perf.cc` is in the build: the call in
   `frame_stats.h` would not resolve otherwise.
-- The commit after it (inherited masks freed, the `other threads` line,
-  this file completed): BUILD_PENDING
+- `21673a5` (inherited masks freed, the `other threads` line): its run,
+  67, was still compiling when the commit after it was pushed, and a
+  newer push cancels the run before it. That later commit changes only
+  this file and adds the summary script, so the run of the branch's tip
+  builds the same code as `21673a5`. **Read the newest run of
+  `claude/thread-placement` in Actions before taking the branch**: it had
+  not finished when this was written. The second version of the code was
+  compiled here only with clang 18 and gcc 13 on Linux, warnings as
+  errors, like the first before run 56 passed it.
 
 ## Appendix A: RPCS3, Vita3K, Xenia (upstream)
 
