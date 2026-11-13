@@ -53,3 +53,8 @@ fun seedTouchOverlayDefault(context: Context, store: ConfigStore) {
 }
 
 private const val KEY_SEEDED = "touch_overlay_default_seeded"
+
+/** hakuX-Boosted: the once-per-install choice above was made, so a config rebuilt from
+ *  defaults (settings/ConfigGuard.kt) must make it again itself. */
+fun touchOverlayWasSeeded(context: Context): Boolean =
+    PreferenceManager.getDefaultSharedPreferences(context).getBoolean(KEY_SEEDED, false)

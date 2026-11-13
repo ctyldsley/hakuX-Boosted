@@ -28,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -62,6 +63,7 @@ import kotlinx.coroutines.withContext
 import xendroid.compose.Utils
 import xendroid.compose.core.BundledDriver
 import xendroid.compose.core.SessionLogs
+import xendroid.compose.settings.ConfigGuard
 import xendroid.compose.settings.Setting
 import xendroid.compose.settings.SettingValue
 import xendroid.compose.settings.SettingsCategory
@@ -145,6 +147,7 @@ fun HostSettingsPane(
     if (vm == null) {
         LazyColumn(modifier.fillMaxSize(), state = listState) {
             header()
+            item(key = "x360.notice") { ConfigNoticeCard(loaded = false) }
             item(key = "x360.state") {
                 HostNote(
                     if (failed) "The Xbox 360 core's settings could not be read on this phone."
@@ -164,6 +167,7 @@ fun HostSettingsPane(
     }
     LazyColumn(modifier.fillMaxSize(), state = listState) {
         header()
+        item(key = "x360.notice") { ConfigNoticeCard(loaded = true) }
         item(key = "x360.title") { HostSection("Emulation settings") }
         item(key = "x360.hint") {
             HostNote(
@@ -190,6 +194,40 @@ fun HostSettingsPane(
             }
         }
         footer()
+    }
+}
+
+/**
+ * hakuX-Boosted: what the config guard had to do (settings restored from the backup, or
+ * reset to defaults, and whether the profile was signed in again), shown until the
+ * player dismisses it. Nothing when there is nothing to say. [loaded] changes once the
+ * core's settings are read, which is when the guard has run: the notice is read again.
+ */
+@Composable
+fun ConfigNoticeCard(loaded: Boolean) {
+    var notice by remember(loaded) { mutableStateOf(runCatching { ConfigGuard.pendingNotice() }.getOrNull()) }
+    val shown = notice ?: return
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Column(Modifier.padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 4.dp)) {
+            Text(shown.title, style = MaterialTheme.typography.titleMedium)
+            Text(
+                shown.body,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 4.dp, end = 8.dp),
+            )
+            TextButton(
+                onClick = {
+                    runCatching { ConfigGuard.dismissNotice() }
+                    notice = null
+                },
+                modifier = Modifier.align(Alignment.End),
+            ) { Text("OK") }
+        }
     }
 }
 

@@ -168,6 +168,9 @@ class ProfileManagerViewModel(
         } finally {
             h.closeFile()
         }
+        // hakuX-Boosted: so a lost config signs this profile in again, and an
+        // empty choice (the active profile was removed) is not undone.
+        xendroid.compose.settings.ConfigGuard.notePlayerChoseProfile(xuid)
     }
 
     private fun writeAvatar(xuid: String, uri: Uri) {

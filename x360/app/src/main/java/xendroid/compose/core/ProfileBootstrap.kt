@@ -14,7 +14,16 @@ object ProfileBootstrap {
         if (ensured) return
         val emu = EmulatorRuntime.emulator ?: return
         val root = ContentPaths.contentRoot().absolutePath
-        if (emu.list_profiles(root)?.isNotEmpty() == true) { ensured = true; return }
+        if (emu.list_profiles(root)?.isNotEmpty() == true) {
+            // hakuX-Boosted: profiles exist. If none is signed in (a config rebuilt
+            // from defaults, a profile installed as content) and the player did not
+            // sign out, the guard signs one in: saves need a signed-in profile.
+            runCatching {
+                xendroid.compose.settings.ConfigGuard.recheck(appContext, ConfigStore(appContext))
+            }
+            ensured = true
+            return
+        }
         val xuid = emu.create_profile(root, DEFAULT_GAMERTAG, defaultLanguage(), defaultCountry())
             ?: return
         val h = ConfigStore(appContext).openLive()

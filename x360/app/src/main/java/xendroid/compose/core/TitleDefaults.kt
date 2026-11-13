@@ -79,7 +79,7 @@ object TitleDefaults {
                         }
                         if (enabled > 0) {
                             patchesDir.mkdirs()
-                            target.writeText(edited)
+                            xendroid.compose.ConfigFiles.writeAtomic(target, edited.toByteArray(Charsets.UTF_8), false)  // hakuX-Boosted: whole or not at all
                             Log.i(TAG, "seeded patches/$name with $enabled patch(es) on")
                         }
                     }
@@ -105,7 +105,7 @@ object TitleDefaults {
                 // An empty file is the settings screen's placeholder, not a choice.
                 if (!target.exists() || target.length() == 0L) {
                     targetDir.mkdirs()
-                    target.writeBytes(text)
+                    xendroid.compose.ConfigFiles.writeAtomic(target, text, false)  // hakuX-Boosted: whole or not at all
                     Log.i(TAG, "seeded $kind/${target.name}")
                 }
                 prefs.edit().putInt(key, revision).apply()

@@ -65,11 +65,24 @@ public class Emulator {
         {
             native_save_config_entry_ty_arr(n_handle,tag,val);
         }
-        public void close_config_file()
+        /**
+         * hakuX-Boosted: serialises the table and writes it through ConfigFiles
+         * (beside, synced, renamed, the old file kept as a backup) instead of the
+         * native writer, which truncated the file in place. False: nothing was
+         * written and the file on disc is as it was.
+         */
+        public boolean close_config_file()
         {
             if(config_path==null)
                 throw new RuntimeException("should use method close_config");
-            native_close_config_file(n_handle,config_path);
+            String text=native_close_config(n_handle);
+            try {
+                xendroid.compose.ConfigFiles.writeAtomic(new File(config_path),text);
+                return true;
+            } catch (java.io.IOException e) {
+                android.util.Log.e("ConfigFiles","writing "+config_path+" failed",e);
+                return false;
+            }
         }
 
         public String close_config()
