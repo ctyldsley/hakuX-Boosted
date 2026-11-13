@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/vulkan/vulkan_pipeline_cache.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -57,6 +58,15 @@ namespace shaders {
 // Ucode interpreter VS placeholder + its debug color pixel shader.
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_color_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_interpreter_vs.h"
+// hakuX-Boosted: the stand-in pixel shaders and the interpreter vertex shader
+// that feeds them (vulkan_placeholder_ps_mode).
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_2d_color_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_2d_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_cube_color_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_cube_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_color_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_interpreter_stand_in_vs.h"
 }  // namespace shaders
 
 DECLARE_bool(guest_threads_above_helpers);
@@ -118,6 +128,57 @@ DEFINE_bool(
     "async_shader_compilation master switch and the creation threads.",
     "Vulkan");
 
+// hakuX-Boosted: the stand-in pixel shader and what else decides which draws
+// get a placeholder. All three only matter with vulkan_placeholder_pipelines.
+DEFINE_int32(
+    vulkan_placeholder_ps_mode, 0,
+    "With vulkan_placeholder_pipelines: what a placeholder pipeline draws "
+    "while the real one compiles. 0: nothing but depth (the no-op pixel "
+    "shader). 1: an approximation - the texture the guest pixel shader "
+    "fetches first, by the interpolator that fetch reads, times the vertex "
+    "colour if the vertex shader passes one through, alpha 1; without a "
+    "usable texture the vertex colour or a mid grey. 2: as 1, but alpha is "
+    "the texture's times the vertex colour's and the guest alpha test is "
+    "applied, so blended and cut-out surfaces keep their shape. Depth test "
+    "and write are the real pipeline's; depth is never written from the "
+    "stand-in. Host render target path only.",
+    "Vulkan");
+DEFINE_bool(
+    vulkan_placeholder_real_vs, true,
+    "With vulkan_placeholder_pipelines: when the ucode interpreter cannot "
+    "stand in for a vertex shader that is already translated, make the "
+    "placeholder from the translated vertex shader. That is a driver compile "
+    "of the vertex shader on the GPU command thread (a hitch as long as the "
+    "compile). Off: such a draw has no placeholder and is dropped until its "
+    "real pipeline is ready.",
+    "Vulkan");
+DEFINE_bool(
+    vulkan_placeholder_interpreter_translated_vs, false,
+    "With vulkan_placeholder_pipelines and async_shader_vs_interpreter: use "
+    "the ucode interpreter for a new pipeline's placeholder even when its "
+    "vertex shader is already translated (a known vertex shader with a new "
+    "pixel shader or new state), instead of compiling a placeholder from the "
+    "translated vertex shader on the GPU command thread.",
+    "Vulkan");
+
+DEFINE_bool(
+    vulkan_placeholder_depth_only_interpreter, false,
+    "With vulkan_placeholder_pipelines and async_shader_vs_interpreter: a "
+    "draw without a pixel shader (a depth-only pass: shadow maps, depth "
+    "pre-passes) whose vertex shader the ucode interpreter can run gets an "
+    "interpreter placeholder and its real pipeline is compiled in the "
+    "background. Off: such a pipeline is translated and compiled on the GPU "
+    "command thread when first drawn, a hitch as long as the compile.",
+    "Vulkan");
+DEFINE_bool(
+    vulkan_placeholder_interpreter_geometry, false,
+    "With vulkan_placeholder_pipelines and async_shader_vs_interpreter: let "
+    "the ucode interpreter stand in for the vertex shader of rectangle lists "
+    "(how titles draw full-screen passes) and quad lists too, through a "
+    "geometry shader built for what the interpreter outputs. Off: such a "
+    "draw has no interpreter placeholder.",
+    "Vulkan");
+
 DEFINE_bool(
     vulkan_dynamic_pipeline_state, true,
     "Use VK_EXT_extended_dynamic_state (and state 2/3 where available) to move "
@@ -134,6 +195,80 @@ DECLARE_bool(precise_interpolation);
 namespace xe {
 namespace gpu {
 namespace vulkan {
+
+// hakuX-Boosted: the stand-in pixel shaders as compiled, by
+// [VulkanPipelineCache::StandInPixelShader - 1][has a colour input].
+namespace {
+
+struct StandInPixelShaderCode {
+  const uint32_t* words;
+  size_t size_bytes;
+};
+const StandInPixelShaderCode kStandInPixelShaderCode[3][2] = {
+    {{shaders::placeholder_stand_in_flat_ps,
+      sizeof(shaders::placeholder_stand_in_flat_ps)},
+     {shaders::placeholder_stand_in_flat_color_ps,
+      sizeof(shaders::placeholder_stand_in_flat_color_ps)}},
+    {{shaders::placeholder_stand_in_2d_ps,
+      sizeof(shaders::placeholder_stand_in_2d_ps)},
+     {shaders::placeholder_stand_in_2d_color_ps,
+      sizeof(shaders::placeholder_stand_in_2d_color_ps)}},
+    {{shaders::placeholder_stand_in_cube_ps,
+      sizeof(shaders::placeholder_stand_in_cube_ps)},
+     {shaders::placeholder_stand_in_cube_color_ps,
+      sizeof(shaders::placeholder_stand_in_cube_color_ps)}},
+};
+
+// Moves the two inputs of a stand-in pixel shader (the texture coordinate,
+// compiled at location 0, and the vertex colour, at location 1) to the
+// locations a translated guest vertex shader writes those interpolators to.
+// The module declares no other input with a location, and a variant without
+// one of the two simply has no decoration to rewrite. False, with the words
+// possibly half rewritten, if the module is not what was expected.
+bool MoveStandInPixelShaderInputs(std::vector<uint32_t>& words,
+                                  uint32_t texcoord_location,
+                                  uint32_t color_location) {
+  constexpr size_t kHeaderWords = 5;
+  if (words.size() < kHeaderWords || words[0] != uint32_t(spv::MagicNumber)) {
+    return false;
+  }
+  // The decorations come before the variables they decorate: first find which
+  // ids are inputs.
+  std::vector<uint32_t> input_ids;
+  for (size_t i = kHeaderWords; i < words.size();) {
+    uint32_t word_count = words[i] >> 16;
+    uint32_t opcode = words[i] & 0xFFFF;
+    if (!word_count || i + word_count > words.size()) {
+      return false;
+    }
+    if (opcode == uint32_t(spv::OpVariable) && word_count >= 4 &&
+        words[i + 3] == uint32_t(spv::StorageClassInput)) {
+      input_ids.push_back(words[i + 2]);
+    }
+    i += word_count;
+  }
+  for (size_t i = kHeaderWords; i < words.size();) {
+    uint32_t word_count = words[i] >> 16;
+    uint32_t opcode = words[i] & 0xFFFF;
+    if (opcode == uint32_t(spv::OpDecorate) && word_count >= 4 &&
+        words[i + 2] == uint32_t(spv::DecorationLocation) &&
+        std::find(input_ids.begin(), input_ids.end(), words[i + 1]) !=
+            input_ids.end()) {
+      uint32_t& location = words[i + 3];
+      if (location == 0) {
+        location = texcoord_location;
+      } else if (location == 1) {
+        location = color_location;
+      } else {
+        return false;
+      }
+    }
+    i += word_count;
+  }
+  return true;
+}
+
+}  // namespace
 
 VulkanPipelineCache::VulkanPipelineCache(
     VulkanCommandProcessor& command_processor,
@@ -349,6 +484,25 @@ bool VulkanPipelineCache::Initialize() {
       vulkan_device, shaders::placeholder_color_ps,
       sizeof(shaders::placeholder_color_ps));
 
+  // hakuX-Boosted: the stand-in pixel shaders and their interpreter vertex
+  // shader. Made whatever vulkan_placeholder_ps_mode says (it can be changed
+  // while running); a failure only means no stand-in.
+  ucode_interpreter_stand_in_vs_ = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::ucode_interpreter_stand_in_vs,
+      sizeof(shaders::ucode_interpreter_stand_in_vs));
+  for (uint32_t i = 0; i < 3; ++i) {
+    for (uint32_t j = 0; j < 2; ++j) {
+      const StandInPixelShaderCode& code = kStandInPixelShaderCode[i][j];
+      stand_in_pixel_shaders_[i][j] = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, code.words, code.size_bytes);
+      if (stand_in_pixel_shaders_[i][j] == VK_NULL_HANDLE) {
+        XELOGW(
+            "VulkanPipelineCache: Failed to create a stand-in pixel shader - "
+            "placeholders that need it will draw nothing");
+      }
+    }
+  }
+
   // Create Vulkan pipeline cache for faster pipeline creation.
   VkPipelineCacheCreateInfo pipeline_cache_create_info = {};
   pipeline_cache_create_info.sType =
@@ -468,6 +622,21 @@ void VulkanPipelineCache::Shutdown() {
                                          ucode_interpreter_vs_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          placeholder_color_pixel_shader_);
+  // hakuX-Boosted: the stand-in's modules.
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         ucode_interpreter_stand_in_vs_);
+  for (uint32_t i = 0; i < 3; ++i) {
+    for (uint32_t j = 0; j < 2; ++j) {
+      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                             stand_in_pixel_shaders_[i][j]);
+    }
+  }
+  for (const auto& stand_in_pair : stand_in_pixel_shaders_moved_) {
+    if (stand_in_pair.second != VK_NULL_HANDLE) {
+      dfn.vkDestroyShaderModule(device, stand_in_pair.second, nullptr);
+    }
+  }
+  stand_in_pixel_shaders_moved_.clear();
   // Destroy tessellation shaders.
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          tessellation_indexed_vs_);
@@ -600,9 +769,17 @@ bool VulkanPipelineCache::EnsureShadersTranslated(
   return true;
 }
 
-bool VulkanPipelineCache::CanCreatePipelineAsync(bool has_pixel_shader) const {
+bool VulkanPipelineCache::CanCreatePipelineAsync(bool has_pixel_shader,
+                                                 bool use_interpreter) const {
+  // hakuX-Boosted: a draw without a pixel shader has nothing to stand in for
+  // but its vertex shader, so with the interpreter its placeholder is exact
+  // (vulkan_placeholder_depth_only_interpreter).
   return cvars::async_shader_compilation && !creation_threads_.empty() &&
-         has_pixel_shader && placeholder_pixel_shader_ != VK_NULL_HANDLE;
+         (has_pixel_shader ||
+          (use_interpreter && cvars::vulkan_placeholder_pipelines &&
+           cvars::vulkan_placeholder_depth_only_interpreter &&
+           ucode_interpreter_vs_ != VK_NULL_HANDLE)) &&
+         placeholder_pixel_shader_ != VK_NULL_HANDLE;
 }
 
 const VulkanPipelineCache::PipelineLayoutProvider*
@@ -836,7 +1013,8 @@ bool VulkanPipelineCache::ConfigurePipeline(
     // Create a fast placeholder pipeline immediately (fast compile) and queue
     // the real pipeline creation in the background. This reduces stutter from
     // pipeline compilation.
-    bool use_async = CanCreatePipelineAsync(pixel_shader != nullptr);
+    bool use_async =
+        CanCreatePipelineAsync(pixel_shader != nullptr, use_interpreter);
 
     // The interpreter can only stand in via the async placeholder path.
     use_interpreter =
@@ -853,7 +1031,13 @@ bool VulkanPipelineCache::ConfigurePipeline(
       // shaders) and is upgraded to the real one on the creation thread.
       pipeline_pair.second.uses_interpreter.store(use_interpreter,
                                                   std::memory_order_release);
-      bool make_placeholder = use_interpreter || vertex_shader->is_translated();
+      // hakuX-Boosted: vulkan_placeholder_real_vs off leaves a draw the
+      // interpreter cannot stand in for without a placeholder (dropped until
+      // the real pipeline is ready) instead of compiling its translated vertex
+      // shader into one here, on the draw thread.
+      bool make_placeholder =
+          use_interpreter || (vertex_shader->is_translated() &&
+                              cvars::vulkan_placeholder_real_vs);
       if (make_placeholder) {
         // Set is_placeholder BEFORE creating the pipeline to avoid a race with
         // the creation thread checking this flag.
@@ -869,13 +1053,80 @@ bool VulkanPipelineCache::ConfigurePipeline(
             tessellation_control_shader;
         placeholder_args.render_pass = render_pass;
         placeholder_args.render_pass_key = render_pass_key;
-        bool placeholder_created =
-            use_interpreter
-                ? EnsurePipelineCreatedWithInterpreterPlaceholder(
-                      placeholder_args)
-                : EnsurePipelineCreatedWithPlaceholder(placeholder_args);
+        // hakuX-Boosted: a stand-in pixel shader instead of the no-op one, with
+        // the layout that has room for its texture (and the variant of the
+        // interpreter that outputs what it reads).
+        StandIn stand_in;
+        VkShaderModule stand_in_pixel_shader = VK_NULL_HANDLE;
+        const PipelineLayoutProvider* stand_in_layout = nullptr;
+        bool use_stand_in =
+            GetStandIn(vertex_shader, pixel_shader, use_interpreter, stand_in,
+                       stand_in_pixel_shader, stand_in_layout);
+        pipeline_pair.second.placeholder_created_ms =
+            xe::Clock::QueryHostUptimeMillis();
+        // hakuX-Boosted: the geometry shader of a rectangle or quad list
+        // passes on as many interpolators as the translated vertex shader
+        // writes. The interpreter writes the stand-in's two, or none, so its
+        // placeholder gets a geometry shader built for that
+        // (vulkan_placeholder_interpreter_geometry lets such draws get here).
+        bool placeholder_possible = true;
+        if (use_interpreter &&
+            description.geometry_shader != PipelineGeometryShader::kNone) {
+          GeometryShaderKey placeholder_geometry_shader_key;
+          placeholder_geometry_shader_key.type = description.geometry_shader;
+          placeholder_geometry_shader_key.interpolator_count =
+              use_stand_in ? 2 : 0;
+          placeholder_args.geometry_shader =
+              GetGeometryShader(placeholder_geometry_shader_key);
+          placeholder_possible =
+              placeholder_args.geometry_shader != VK_NULL_HANDLE;
+        }
+        bool placeholder_created;
+        if (!placeholder_possible) {
+          placeholder_created = false;
+        } else if (use_stand_in) {
+          pipeline_pair.second.placeholder_pipeline_layout.store(
+              stand_in_layout, std::memory_order_release);
+          pipeline_pair.second.placeholder_stand_in.store(
+              stand_in.Pack(), std::memory_order_release);
+          placeholder_created = EnsurePipelineCreated(
+              placeholder_args, stand_in_pixel_shader,
+              use_interpreter ? ucode_interpreter_stand_in_vs_ : VK_NULL_HANDLE,
+              stand_in_layout);
+          if (!placeholder_created) {
+            pipeline_pair.second.placeholder_stand_in.store(
+                0, std::memory_order_release);
+            pipeline_pair.second.placeholder_pipeline_layout.store(
+                nullptr, std::memory_order_release);
+          } else if (cvars::shader_profiling) {
+            XELOGI(
+                "shader_profiling: stand-in made for VS {:016X}, PS {:016X}: "
+                "{} vertex shader, {} pixel shader, texture coordinate {}, "
+                "vertex colour {}",
+                vertex_shader->shader().ucode_data_hash(),
+                pixel_shader->shader().ucode_data_hash(),
+                use_interpreter ? "interpreter" : "translated",
+                GetStandInPixelShaderName(stand_in.shader),
+                stand_in.shader == StandInPixelShader::kFlat
+                    ? "none"
+                    : (use_interpreter
+                           ? "chosen per draw"
+                           : fmt::format("interpolator {}",
+                                         stand_in.texcoord_interpolator)),
+                stand_in.color_interpolator == StandIn::kNoInterpolator
+                    ? "none"
+                    : fmt::format("interpolator {}",
+                                  stand_in.color_interpolator));
+          }
+        } else {
+          placeholder_created =
+              use_interpreter
+                  ? EnsurePipelineCreatedWithInterpreterPlaceholder(
+                        placeholder_args, pixel_shader == nullptr)
+                  : EnsurePipelineCreatedWithPlaceholder(placeholder_args);
+        }
         if (placeholder_created) {
-          if (use_interpreter) {
+          if (use_interpreter && !use_stand_in) {
             XELOGI(
                 "VS interpreter placeholder created (interpreter VS + no-op "
                 "PS): VS {:016X}, PS {:016X}",
@@ -2227,13 +2478,205 @@ VkShaderModule VulkanPipelineCache::GetTessellationVertexShader(
              : tessellation_indexed_vs_;
 }
 
+// hakuX-Boosted: for the logs.
+const char* VulkanPipelineCache::GetStandInPixelShaderName(
+    StandInPixelShader shader) {
+  switch (shader) {
+    case StandInPixelShader::kFlat:
+      return "flat";
+    case StandInPixelShader::k2D:
+      return "2D texture";
+    case StandInPixelShader::kCube:
+      return "cube texture";
+    default:
+      return "no-op";
+  }
+}
+
+// hakuX-Boosted: see the declaration.
+bool VulkanPipelineCache::GetStandIn(
+    VulkanShader::VulkanTranslation* vertex_shader,
+    VulkanShader::VulkanTranslation* pixel_shader, bool use_interpreter,
+    StandIn& stand_in_out, VkShaderModule& pixel_shader_module_out,
+    const PipelineLayoutProvider*& pipeline_layout_out) {
+  if (cvars::vulkan_placeholder_ps_mode <= 0 || !pixel_shader ||
+      render_target_cache_.GetPath() ==
+          RenderTargetCache::Path::kPixelShaderInterlock) {
+    return false;
+  }
+  VulkanShader& guest_vertex_shader =
+      static_cast<VulkanShader&>(vertex_shader->shader());
+  VulkanShader& guest_pixel_shader =
+      static_cast<VulkanShader&>(pixel_shader->shader());
+  if (!guest_pixel_shader.writes_color_targets()) {
+    // Depth only: the no-op pixel shader already draws all there is.
+    return false;
+  }
+  if (use_interpreter && ucode_interpreter_stand_in_vs_ == VK_NULL_HANDLE) {
+    return false;
+  }
+
+  // The interpolators that reach the pixel shader: written by the vertex
+  // shader, read by the pixel shader, and not replaced by PsParamGen.
+  uint32_t interpolator_mask =
+      SpirvShaderTranslator::Modification(vertex_shader->modification())
+          .vertex.interpolator_mask;
+  const VulkanShader::StandInInfo& pixel_info =
+      guest_pixel_shader.GetStandInInfo();
+  const VulkanShader::StandInInfo& vertex_info =
+      guest_vertex_shader.GetStandInInfo();
+
+  // The kind of the first usable texture decides the pixel shader module.
+  // With the interpreter the texture and its interpolator are chosen again
+  // for each draw among the candidates of that kind (see the draw path); with
+  // the translated vertex shader the interpolator is baked into the module.
+  StandIn stand_in;
+  stand_in.shader = StandInPixelShader::kFlat;
+  uint32_t texcoord_interpolators = 0;
+  for (uint32_t i = 0; i < pixel_info.texture_count; ++i) {
+    const VulkanShader::StandInTexture& texture = pixel_info.textures[i];
+    if (!(interpolator_mask & (uint32_t(1) << texture.interpolator))) {
+      continue;
+    }
+    StandInPixelShader texture_shader =
+        texture.dimension == xenos::FetchOpDimension::kCube
+            ? StandInPixelShader::kCube
+            : StandInPixelShader::k2D;
+    if (stand_in.shader == StandInPixelShader::kFlat) {
+      stand_in.shader = texture_shader;
+      if (!use_interpreter) {
+        stand_in.texcoord_interpolator = texture.interpolator;
+      }
+    }
+    if (texture_shader == stand_in.shader &&
+        (use_interpreter ||
+         texture.interpolator == stand_in.texcoord_interpolator)) {
+      texcoord_interpolators |= uint32_t(1) << texture.interpolator;
+    }
+  }
+  uint32_t color_interpolators = vertex_info.color_interpolators &
+                                 interpolator_mask & ~texcoord_interpolators;
+  if (color_interpolators) {
+    stand_in.color_interpolator = xe::tzcnt(color_interpolators);
+  }
+  bool has_texture = stand_in.shader != StandInPixelShader::kFlat;
+  bool has_color = stand_in.color_interpolator != StandIn::kNoInterpolator;
+
+  VkShaderModule pixel_shader_module;
+  size_t texture_count_vertex = 0, sampler_count_vertex = 0;
+  if (use_interpreter) {
+    // Always the variant with a colour input: the interpreter outputs 1 when
+    // there is no colour, and every interpreter placeholder of a kind then
+    // shares one pair of modules, which the driver's cache can answer.
+    pixel_shader_module =
+        stand_in_pixel_shaders_[uint32_t(stand_in.shader) - 1][1];
+  } else {
+    if (!guest_vertex_shader.bindings_ready()) {
+      return false;
+    }
+    texture_count_vertex =
+        guest_vertex_shader.GetTextureBindingsAfterTranslation().size();
+    sampler_count_vertex =
+        guest_vertex_shader.GetSamplerBindingsAfterTranslation().size();
+    // The translated vertex shader writes its interpolators to consecutive
+    // locations, in the order of their indices.
+    auto location = [interpolator_mask](uint32_t interpolator) {
+      return xe::bit_count(interpolator_mask &
+                           ((uint32_t(1) << interpolator) - 1));
+    };
+    pixel_shader_module = GetStandInPixelShader(
+        stand_in.shader, has_color,
+        has_texture ? location(stand_in.texcoord_interpolator) : 0,
+        has_color ? location(stand_in.color_interpolator) : 1);
+  }
+  if (pixel_shader_module == VK_NULL_HANDLE) {
+    return false;
+  }
+  const PipelineLayoutProvider* pipeline_layout =
+      command_processor_.GetPipelineLayout(has_texture ? 1 : 0,
+                                           has_texture ? 1 : 0,
+                                           texture_count_vertex,
+                                           sampler_count_vertex);
+  if (!pipeline_layout) {
+    return false;
+  }
+  stand_in_out = stand_in;
+  pixel_shader_module_out = pixel_shader_module;
+  pipeline_layout_out = pipeline_layout;
+  return true;
+}
+
+// hakuX-Boosted: see the declaration.
+VkShaderModule VulkanPipelineCache::GetStandInPixelShader(
+    StandInPixelShader shader, bool has_color, uint32_t texcoord_location,
+    uint32_t color_location) {
+  if (shader == StandInPixelShader::kNone) {
+    return VK_NULL_HANDLE;
+  }
+  uint32_t shader_index = uint32_t(shader) - 1;
+  bool has_texture = shader != StandInPixelShader::kFlat;
+  if ((!has_texture || texcoord_location == 0) &&
+      (!has_color || color_location == 1)) {
+    return stand_in_pixel_shaders_[shader_index][has_color ? 1 : 0];
+  }
+  uint32_t key = shader_index | (uint32_t(has_color) << 2) |
+                 (texcoord_location << 4) | (color_location << 12);
+  auto it = stand_in_pixel_shaders_moved_.find(key);
+  if (it != stand_in_pixel_shaders_moved_.end()) {
+    return it->second;
+  }
+  const StandInPixelShaderCode& code =
+      kStandInPixelShaderCode[shader_index][has_color ? 1 : 0];
+  std::vector<uint32_t> words(code.words,
+                              code.words + code.size_bytes / sizeof(uint32_t));
+  VkShaderModule shader_module = VK_NULL_HANDLE;
+  if (MoveStandInPixelShaderInputs(words, texcoord_location, color_location)) {
+    shader_module = ui::vulkan::util::CreateShaderModule(
+        command_processor_.GetVulkanDevice(), words.data(),
+        words.size() * sizeof(uint32_t));
+  }
+  if (shader_module == VK_NULL_HANDLE) {
+    XELOGW(
+        "VulkanPipelineCache: Failed to make the {} stand-in pixel shader with "
+        "its inputs at locations {} and {}",
+        GetStandInPixelShaderName(shader), texcoord_location, color_location);
+  }
+  // A failure is stored too, so it is not tried again for every pipeline.
+  stand_in_pixel_shaders_moved_.emplace(key, shader_module);
+  return shader_module;
+}
+
 bool VulkanPipelineCache::EnsurePipelineCreatedWithInterpreterPlaceholder(
-    const PipelineCreationArguments& creation_arguments) {
+    const PipelineCreationArguments& creation_arguments, bool depth_only) {
   VkShaderModule placeholder_ps =
       (cvars::async_shader_vs_interpreter_debug_color &&
        placeholder_color_pixel_shader_ != VK_NULL_HANDLE)
           ? placeholder_color_pixel_shader_
           : placeholder_pixel_shader_;
+  if (depth_only) {
+    // hakuX-Boosted: the placeholder of a draw without a pixel shader
+    // (vulkan_placeholder_depth_only_interpreter) writes depth as the real
+    // pipeline will: with the same float24 conversion where that applies (the
+    // condition is EnsurePipelineCreated's for a draw without a pixel shader),
+    // otherwise with the no-op pixel shader, which is no pixel shader.
+    const PipelineDescription& description = creation_arguments.pipeline->first;
+    placeholder_ps = placeholder_pixel_shader_;
+    if (render_target_cache_.GetPath() !=
+            RenderTargetCache::Path::kPixelShaderInterlock &&
+        render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+        (description.depth_write_enable ||
+         description.depth_compare_op != xenos::CompareFunction::kAlways) &&
+        (description.render_pass_key.depth_and_color_used & 0b1) &&
+        description.render_pass_key.depth_format ==
+            xenos::DepthRenderTargetFormat::kD24FS8) {
+      VkShaderModule float24_ps = render_target_cache_.depth_float24_round()
+                                      ? float24_round_fragment_shader_
+                                      : float24_truncate_fragment_shader_;
+      if (float24_ps != VK_NULL_HANDLE) {
+        placeholder_ps = float24_ps;
+      }
+    }
+  }
   return EnsurePipelineCreated(creation_arguments, placeholder_ps,
                                ucode_interpreter_vs_);
 }
@@ -2241,7 +2684,8 @@ bool VulkanPipelineCache::EnsurePipelineCreatedWithInterpreterPlaceholder(
 bool VulkanPipelineCache::EnsurePipelineCreated(
     const PipelineCreationArguments& creation_arguments,
     VkShaderModule fragment_shader_override,
-    VkShaderModule vertex_shader_override) {
+    VkShaderModule vertex_shader_override,
+    const PipelineLayoutProvider* layout_override) {
   // Check if we already have a pipeline.
   // If it's a placeholder and we're not creating another placeholder,
   // we need to replace it with the real pipeline.
@@ -2877,10 +3321,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   pipeline_create_info.pDepthStencilState = &depth_stencil_state;
   pipeline_create_info.pColorBlendState = &color_blend_state;
   pipeline_create_info.pDynamicState = &dynamic_state;
+  // hakuX-Boosted: a stand-in placeholder brings its own layout.
   pipeline_create_info.layout =
-      creation_arguments.pipeline->second.pipeline_layout
-          .load(std::memory_order_acquire)
-          ->GetPipelineLayout();
+      layout_override ? layout_override->GetPipelineLayout()
+                      : creation_arguments.pipeline->second.pipeline_layout
+                            .load(std::memory_order_acquire)
+                            ->GetPipelineLayout();
   pipeline_create_info.renderPass =
       use_dynamic_rendering ? VK_NULL_HANDLE : creation_arguments.render_pass;
   pipeline_create_info.subpass = 0;
@@ -2964,6 +3410,33 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
 
   // Mark as no longer a placeholder (for the case where we just created real).
   if (!creating_placeholder) {
+    // hakuX-Boosted: when a placeholder gives way to the real pipeline.
+    if (cvars::shader_profiling && old_pipeline != VK_NULL_HANDLE &&
+        old_pipeline ==
+            creation_arguments.pipeline->second.placeholder_pipeline.load(
+                std::memory_order_acquire)) {
+      XELOGI(
+          "shader_profiling: placeholder swapped for the real pipeline: VS "
+          "{:016X}, PS {:016X}, {} vertex shader, {} pixel shader, {} ms after "
+          "it was made, {} draw(s) recorded with it",
+          creation_arguments.vertex_shader->shader().ucode_data_hash(),
+          creation_arguments.pixel_shader
+              ? creation_arguments.pixel_shader->shader().ucode_data_hash()
+              : 0,
+          creation_arguments.pipeline->second.uses_interpreter.load(
+              std::memory_order_acquire)
+              ? "interpreter"
+              : "translated",
+          GetStandInPixelShaderName(
+              StandIn::Unpack(
+                  creation_arguments.pipeline->second.placeholder_stand_in
+                      .load(std::memory_order_acquire))
+                  .shader),
+          xe::Clock::QueryHostUptimeMillis() -
+              creation_arguments.pipeline->second.placeholder_created_ms,
+          creation_arguments.pipeline->second.placeholder_draws.load(
+              std::memory_order_relaxed));
+    }
     creation_arguments.pipeline->second.is_placeholder.store(
         false, std::memory_order_release);
     XELOGI("Pipeline created for VS {:016X}, PS {:016X}",
