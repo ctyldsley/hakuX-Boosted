@@ -444,5 +444,5 @@ Everything about behaviour. In particular:
 EOF
 
 - `b182e29` (the two lost wakes): Actions run 53, green.
-- `c55015c` (the settings and counters) and this file: built by the run of
-  the commit that carries this file; its result is added below when known.
+- `c55015c` (the settings and counters) with these notes (`189880e`):
+  Actions run 66, green. The commit after it only records this result.
