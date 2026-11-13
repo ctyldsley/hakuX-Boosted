@@ -162,7 +162,23 @@ void XEvent::WaitCallback() {
 
 void XEvent::CooperativeWaitBegin(XThread* thread) { waiters_.Add(thread); }
 
-void XEvent::CooperativeWaitEnd(XThread* thread) { waiters_.Remove(thread); }
+// hakuX-Boosted: a waiter that leaves the front of an auto-reset event's
+// queue wakes the one behind it, as the semaphore and the mutant do. Without
+// it a set could sit unclaimed until the scheduler's 64 ms backstop:
+//   1. A is first in the queue and has taken set 1; it has not left yet.
+//   2. Set 2 arrives. B, behind A, is re-readied and polls: A is still first,
+//      so B may not take it, and B parks with the epoch of set 2.
+//   3. A leaves. Nothing moved the epoch or poked B's CPU: the event is
+//      signalled, B is first in line and parked.
+// The same when the front waiter leaves on a timeout or an APC without
+// taking the set. A title's critical section waits on such an event, so the
+// thread kept waiting is one queueing for a lock that is free.
+void XEvent::CooperativeWaitEnd(XThread* thread) {
+  bool was_front = false;
+  if (waiters_.Remove(thread, &was_front) && was_front && !manual_reset_) {
+    WakeCooperativeWaitersForHandOn();
+  }
+}
 
 // An auto-reset set with a parked waiter belongs to the front of the queue.
 // NT wakes the first waiter directly, so a later poller must not steal it.

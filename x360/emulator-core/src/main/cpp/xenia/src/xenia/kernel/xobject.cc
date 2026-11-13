@@ -266,6 +266,13 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
                          XObject* wait_object, bool alertable,
                          uint64_t deadline_ms, PollFn&& poll) {
   uint64_t first_block_us = 0;
+  // hakuX-Boosted: the gate's epoch as sampled before the poll that failed
+  // and parked this fiber. A later poll that succeeds with the epoch where
+  // it was means the object became takeable without any wake being sent:
+  // the kind of missed wake the scheduler's own rescue counter cannot see,
+  // since it only looks for an epoch that moved.
+  bool parked_once = false;
+  uint32_t parked_epoch = 0;
   while (true) {
     // Alertable waits return on a queued user APC (the cooperative equivalent
     // of a host alertable-wait wake), then the caller runs xeProcessUserApcs.
@@ -279,15 +286,43 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
     // it and the re-poll is not skipped. A multi-wait has no single object, so
     // it uses the summed epoch of its set.
     uint32_t wait_epoch = 0;
+    bool epoch_tracked = false;
     if (wait_object) {
       wait_epoch = wait_object->cooperative_signal_epoch();
+      switch (wait_object->type()) {
+        case XObject::Type::Event:
+        case XObject::Type::Semaphore:
+        case XObject::Type::Mutant:
+          epoch_tracked = true;
+          break;
+        default:
+          break;
+      }
     } else if (auto* self = XThread::GetCurrentThread()) {
       wait_epoch = self->cooperative_wait_set_epoch();
+      epoch_tracked = self->cooperative_wait_set_count() != 0;
     }
     std::optional<X_STATUS> resolved = poll();
     if (resolved) {
       if (first_block_us) {
         ReportWakeLatency(scheduler, wait_object, first_block_us);
+      }
+      if (parked_once && epoch_tracked && wait_epoch == parked_epoch &&
+          *resolved != X_STATUS_USER_APC) {
+        // A signaller sets the host primitive and bumps the epoch some tens
+        // of nanoseconds later; a re-poll landing in between is a wake still
+        // on its way, not a missing one. Give the bump a moment to show.
+        auto* current = XThread::GetCurrentThread();
+        uint32_t epoch_after = wait_epoch;
+        for (int i = 0; i < 256 && epoch_after == wait_epoch; ++i) {
+          epoch_after = wait_object
+                            ? wait_object->cooperative_signal_epoch()
+                            : (current ? current->cooperative_wait_set_epoch()
+                                       : wait_epoch + 1);
+        }
+        if (epoch_after == wait_epoch) {
+          scheduler->NoteUnsignalledWake(current);
+        }
       }
       WaitExit(kthread, *resolved);
       return *resolved;
@@ -299,6 +334,8 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
     if (!first_block_us) {
       first_block_us = GuestScheduler::NowMicros();
     }
+    parked_once = true;
+    parked_epoch = wait_epoch;
     scheduler->BlockCurrentThread(deadline_ms, wait_epoch, alertable);
   }
 }
@@ -351,10 +388,16 @@ void CooperativeWaiterFifo::Add(XThread* thread) {
   waiters_.push_back(thread);
 }
 
-bool CooperativeWaiterFifo::Remove(XThread* thread) {
+bool CooperativeWaiterFifo::Remove(XThread* thread, bool* was_front) {
   std::lock_guard<std::mutex> lock(lock_);
+  if (was_front) {
+    *was_front = false;
+  }
   for (auto it = waiters_.begin(); it != waiters_.end(); ++it) {
     if (*it == thread) {
+      if (was_front && it == waiters_.begin()) {
+        *was_front = true;
+      }
       waiters_.erase(it);
       break;
     }
@@ -430,6 +473,15 @@ void XObject::WakeCooperativeWaiters() {
   // not just the permit FIFO front's, which loses the wake whenever that
   // waiter leaves between the signal and its dispatch.
   kernel_state()->guest_scheduler()->WakeForSignal(this, nullptr);
+}
+
+void XObject::WakeCooperativeWaitersForHandOn() {
+  cooperative_signal_time_us_.store(GuestScheduler::NowMicros(),
+                                    std::memory_order_relaxed);
+  cooperative_signal_epoch_.fetch_add(1);
+  auto* scheduler = kernel_state()->guest_scheduler();
+  scheduler->NoteQueueHandOn();
+  scheduler->WakeForSignal(this, nullptr);
 }
 
 void XObject::EnterCooperativeWait(XThread* thread) {

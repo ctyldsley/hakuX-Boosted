@@ -1176,6 +1176,17 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
   }
   {
     std::lock_guard<std::mutex> lock(lock_);
+    // hakuX-Boosted: raised BEFORE the epoch is read below, not after the
+    // waiter is linked. A signaller bumps the epoch and then reads this flag
+    // without the lock (WakeForSignal's first test); the waiter read the
+    // epoch and then wrote the flag, so both could miss each other:
+    //   waiter reads the epoch (old) -> signaller bumps it -> signaller
+    //   reads has_blocked on all six CPUs (all false) and returns ->
+    //   waiter stores has_blocked and parks, signalled, until the backstop.
+    // Write-then-read on both sides closes it. It needed every CPU's
+    // blocked list to be empty at that moment, so it was rare. RereadyBlocked
+    // rewrites the flag from the list under this same lock.
+    cpus_[cpu_index].has_blocked.store(true);
     // A signal between the caller's failed poll and this park bumped the epoch
     // but walked the blocked list before we joined it, so nothing would re-poll
     // us before the backstop. Compare under the walk's own lock and poke this
@@ -1193,6 +1204,7 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
       }
       if (epoch_gated && epoch_now != wait_epoch) {
         cpus_[cpu_index].repoll_now.store(true, std::memory_order_relaxed);
+        stats_.park_catches.fetch_add(1, std::memory_order_relaxed);
       }
     }
     auto& links = self->scheduler_links();
@@ -1225,9 +1237,8 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
     if (due && due < cpu.next_timed_repoll_ms) {
       cpu.next_timed_repoll_ms = due;
     }
-    // seq_cst pairs with the wake pre-filters' loads: epoch-read-then-store
-    // here vs bump-then-load there, so at least one side always sees the other.
-    cpu.has_blocked.store(true);
+    // has_blocked was raised at the top of this block (seq_cst, pairing
+    // with the wake pre-filters' loads).
   }
   self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_WAITING;
   YieldToScheduler();
@@ -1253,6 +1264,7 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
   size_t rescue_note_count = 0;
   const uint64_t rescue_now_us = NowMicros();
   uint64_t rescued = 0;
+  uint64_t rescued_by_look = 0;
   bool warn = false;
   uint64_t warn_count = 0;
   uint32_t warn_tid = 0;
@@ -1338,6 +1350,9 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
         if (epoch_moved && !poke_in_flight &&
             !(links.wait_deadline_ms && now_ms >= links.wait_deadline_ms)) {
           ++rescued;
+          if (!force_all) {
+            ++rescued_by_look;
+          }
           backstop_rescue_tid_ = t->thread_id();
           backstop_rescue_handle_ =
               links.wait_handle_count ? links.wait_handles[0] : 0;
@@ -1371,7 +1386,10 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
     cpu.next_timed_repoll_ms = next_due;
     cpu.has_blocked.store(kept_head != nullptr, std::memory_order_relaxed);
     if (rescued) {
-      stats_.backstop_rescues.fetch_add(rescued, std::memory_order_relaxed);
+      stats_.backstop_rescues.fetch_add(rescued - rescued_by_look,
+                                        std::memory_order_relaxed);
+      stats_.timed_look_rescues.fetch_add(rescued_by_look,
+                                          std::memory_order_relaxed);
       backstop_rescue_count_ += rescued;
     }
     if (!backstop_rescue_window_ms_) {
@@ -1573,6 +1591,22 @@ void GuestScheduler::NoteWakeLatency(uint64_t latency_us, XThread* thread) {
   }
 }
 
+void GuestScheduler::NoteUnsignalledWake(XThread* thread) {
+  stats_.unsignalled_wakes.fetch_add(1, std::memory_order_relaxed);
+  static std::atomic<int> budget{200};
+  if (thread && budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+    const auto& links = thread->scheduler_links();
+    XELOGW(
+        "GuestScheduler: wait satisfied with no wake sent: tid={:08X} '{}' "
+        "found handle {:08X} ({} handle(s)) takeable on a re-poll although "
+        "its gate never moved (cpu {}, frame {})",
+        thread->thread_id(), thread->thread_name(),
+        links.wait_handle_count ? links.wait_handles[0] : 0,
+        uint32_t(links.wait_handle_count), links.cpu,
+        xe::logging::GetFrameNumber());
+  }
+}
+
 void GuestScheduler::NoteCriticalSectionWait(uint64_t wait_us,
                                              uint32_t section_address,
                                              uint32_t caller_lr,
@@ -1655,6 +1689,15 @@ void GuestScheduler::ReportStatsIfDue() {
       io_calls,
       io_calls ? to_us(io_queue / io_calls) : 0, to_us(io_queue_max),
       io_calls ? to_us(io_run / io_calls) : 0);
+  // hakuX-Boosted: the missed wakes by kind (boosted/notes/guest-scheduler.md
+  // says what each one is and which should read nought).
+  XELOGI(
+      "GuestScheduler: missed wakes: made good by the timed look {}, by the "
+      "64 ms backstop {}, satisfied with no wake sent {} | not misses: queue "
+      "hand-ons {}, signals caught at the park {}",
+      take(stats_.timed_look_rescues), backstop_rescues,
+      take(stats_.unsignalled_wakes), take(stats_.queue_hand_ons),
+      take(stats_.park_catches));
   // hakuX-Boosted: the last second's wakes and critical section waits.
   XELOGI("GuestScheduler: {}",
          LatencyTotalsLine(wake_latency_reported_, section_waits_reported_,

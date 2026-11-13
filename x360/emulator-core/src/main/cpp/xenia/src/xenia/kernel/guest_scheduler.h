@@ -132,6 +132,17 @@ class GuestScheduler {
   void NoteCriticalSectionWait(uint64_t wait_us, uint32_t section_address,
                                uint32_t caller_lr, XThread* thread);
 
+  // hakuX-Boosted: the missed wakes found by reading (boosted/notes/
+  // guest-scheduler.md), one counter each in the once-a-second line.
+  // A front waiter left a permit queue and the one behind it was poked.
+  void NoteQueueHandOn() {
+    stats_.queue_hand_ons.fetch_add(1, std::memory_order_relaxed);
+  }
+  // A parked wait was satisfied although its gate's epoch never moved: the
+  // object became takeable and no wake was sent. Logged by thread and
+  // handle, a budgeted number of times.
+  void NoteUnsignalledWake(XThread* thread);
+
   // Yields the running guest fiber back to its CPU's idle fiber. Returns (on
   // the calling fiber) once the dispatcher switches back into it.
   void YieldToScheduler();
@@ -370,6 +381,14 @@ class GuestScheduler {
     std::atomic<uint64_t> repolls{0};        // RereadyBlocked passes
     std::atomic<uint64_t> rereadied{0};      // waiters actually re-readied
     std::atomic<uint64_t> backstop_rescues{0};  // wakes the backstop covered
+    // hakuX-Boosted: backstop_rescues counts those the 64 ms backstop made
+    // good, timed_look_rescues those the kGateRecheckMs look did.
+    std::atomic<uint64_t> timed_look_rescues{0};
+    // A signal landed between a waiter's failed poll and its park, seen by
+    // the compare under the lock (working as designed, not a miss).
+    std::atomic<uint64_t> park_catches{0};
+    std::atomic<uint64_t> queue_hand_ons{0};
+    std::atomic<uint64_t> unsignalled_wakes{0};
     std::atomic<uint64_t> idle_wakes{0};     // timed wakes of a parked CPU
     std::atomic<uint64_t> switches{0};       // fiber dispatches
     std::atomic<uint64_t> forced_preempts{0};  // IRQL defers escaped

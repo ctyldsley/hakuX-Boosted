@@ -44,7 +44,9 @@ class CooperativeWaiterFifo {
  public:
   void Add(XThread* thread);
   // Unregisters |thread|, returning true if a waiter remains to be woken.
-  bool Remove(XThread* thread);
+  // hakuX-Boosted: |was_front| (optional) is set when |thread| was first in
+  // line, the only departure that changes who may acquire.
+  bool Remove(XThread* thread, bool* was_front = nullptr);
   // True when |thread| is first in line (or no one is queued).
   bool MayAcquire(XThread* thread);
   bool HasWaiters();
@@ -316,6 +318,12 @@ class XObject {
   // Bumps the epoch, then wakes the dispatch threads. Call after the host
   // primitive is signaled, never before.
   void WakeCooperativeWaiters();
+  // hakuX-Boosted: the same wake for a change that is not a signal: the
+  // front of a permit queue left, so the waiter behind it may now take what
+  // is already there. Moves the epoch and pokes the watchers, and stays out
+  // of the signal ring (nothing was set, and the ring is read as "who set
+  // what").
+  void WakeCooperativeWaitersForHandOn();
 
   // Ring of the most recent cooperative wakes, dumped by the scheduler's
   // no-progress report. A wedge is diagnosed by pairing what the parked fibers
