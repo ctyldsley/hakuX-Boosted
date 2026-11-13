@@ -81,6 +81,11 @@ class SimplificationPass : public ConditionalGroupSubpass {
   );
   static bool Is1BitOpcode(hir::Opcode def_opcode);
 
+  // hakuX-Boosted: set by the one rule (in CheckAnd) that can change an
+  // instruction and still report no change; read by SimplifyBitArith for the
+  // block stamps of simplification_skip_unchanged_blocks.
+  bool unreported_change_ = false;
+
   /* we currently have no caching, and although it is rare some games
              may have massive (in the hundreds) chains of ands + ors + shifts in
              a single unbroken basic block (exsploderman web of shadows) */

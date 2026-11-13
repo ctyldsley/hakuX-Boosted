@@ -63,6 +63,10 @@ bool ConditionalGroupPass::Run(HIRBuilder* builder) {
   if (count_iterations) {
     translation_stats_group_runs.fetch_add(1, std::memory_order_relaxed);
   }
+  // hakuX-Boosted: block stamps (simplification_skip_unchanged_blocks) are
+  // comparable from here to the end of this run and no further: clean stamps
+  // at or below the floor are ignored.
+  builder->set_pass_stamp_floor(builder->NextPassStamp());
   do {
     dirty = false;
     if (count_iterations) {
@@ -75,17 +79,24 @@ bool ConditionalGroupPass::Run(HIRBuilder* builder) {
       auto subpass = dynamic_cast<ConditionalGroupSubpass*>(pass.get());
       if (!subpass) {
         if (!pass->Run(builder)) {
+          builder->set_pass_stamp_floor(UINT32_MAX);  // hakuX-Boosted
           return false;
         }
+        // hakuX-Boosted: a member that does not report what it changed
+        // (only ValidationPass today, which changes nothing) makes every
+        // earlier clean stamp worthless.
+        builder->set_pass_stamp_floor(builder->NextPassStamp());
       } else {
         bool result = false;
         if (!subpass->Run(builder, result)) {
+          builder->set_pass_stamp_floor(UINT32_MAX);  // hakuX-Boosted
           return false;
         }
         dirty |= result;
       }
     }
   } while (dirty);
+  builder->set_pass_stamp_floor(UINT32_MAX);  // hakuX-Boosted
   return true;
 }
 

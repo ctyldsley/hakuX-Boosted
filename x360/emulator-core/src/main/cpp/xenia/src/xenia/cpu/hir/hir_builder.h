@@ -64,6 +64,32 @@ class HIRBuilder {
 
   std::vector<Value*>& locals() { return locals_; }
 
+  // hakuX-Boosted: guest registers (PPCContext slots) that the function being
+  // built keeps in a host register from its first instruction to its last
+  // (pin_guest_registers). Chosen by GuestRegisterPinningPass, honoured by
+  // RegisterAllocationPass (which keeps its values out of those registers)
+  // and by the backend (which turns the slot's context loads and stores into
+  // register moves and brings the context up to date wherever control leaves
+  // the function's own code). Empty means today's behaviour.
+  struct PinnedContextSlot {
+    uint32_t offset;    // offset in PPCContext
+    TypeName type;      // INT64_TYPE, FLOAT64_TYPE or VEC128_TYPE
+    uint8_t reg_set;    // 0: the integer register set, 1: float/vector set
+    uint8_t reg_index;  // index within that register set
+    bool written;       // the function stores to the slot
+  };
+  std::vector<PinnedContextSlot>& pinned_context_slots() {
+    return pinned_context_slots_;
+  }
+
+  // hakuX-Boosted: a counter the simplification passes stamp blocks with
+  // (simplification_skip_unchanged_blocks). Stamps are only compared while
+  // pass_stamp_floor() is not UINT32_MAX, which ConditionalGroupPass arranges
+  // for the length of one of its runs.
+  uint32_t NextPassStamp() { return ++pass_stamp_; }
+  uint32_t pass_stamp_floor() const { return pass_stamp_floor_; }
+  void set_pass_stamp_floor(uint32_t value) { pass_stamp_floor_ = value; }
+
   uint32_t max_value_ordinal() const { return next_value_ordinal_; }
 
   Block* first_block() const { return block_head_; }
@@ -333,6 +359,10 @@ class HIRBuilder {
   uint32_t next_value_ordinal_;
 
   std::vector<Value*> locals_;
+  // hakuX-Boosted
+  std::vector<PinnedContextSlot> pinned_context_slots_;
+  uint32_t pass_stamp_ = 0;
+  uint32_t pass_stamp_floor_ = UINT32_MAX;
 
   Block* block_head_;
   Block* block_tail_;

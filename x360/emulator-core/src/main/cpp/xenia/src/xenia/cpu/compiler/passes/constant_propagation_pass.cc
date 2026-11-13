@@ -73,6 +73,14 @@ bool ConstantPropagationPass::Run(HIRBuilder* builder, bool& result) {
   result = false;
   auto block = builder->first_block();
   while (block) {
+    // hakuX-Boosted: `result` counts for one block at a time inside this
+    // loop, so that a block this pass changed can be stamped for
+    // simplification_skip_unchanged_blocks. Every case below changes only
+    // the instruction it is looking at and that instruction's own result
+    // value, which is used in this block alone. The function's answer is
+    // put back together at the end of each block.
+    const bool result_before_block = result;
+    result = false;
     for (auto i = block->instr_head; i; i = i->next) {
       if (((i->opcode->flags & OPCODE_FLAG_DISALLOW_CONSTANT_FOLDING) != 0) &&
           !cvars::permit_float_constant_evaluation) {
@@ -937,6 +945,12 @@ bool ConstantPropagationPass::Run(HIRBuilder* builder, bool& result) {
           break;
       }
     }
+
+    // hakuX-Boosted
+    if (result) {
+      block->pass_modified_stamp = builder->NextPassStamp();
+    }
+    result |= result_before_block;
 
     block = block->next;
   }

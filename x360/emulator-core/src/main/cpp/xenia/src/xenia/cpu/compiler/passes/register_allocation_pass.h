@@ -47,6 +47,9 @@ class RegisterAllocationPass : public CompilerPass {
     const backend::MachineInfo::RegisterSet* set = nullptr;
     uint32_t count = 0;
     std::bitset<32> availability = 0;
+    // hakuX-Boosted: registers of this set that hold pinned guest registers
+    // in the function being allocated, and so are never handed to a value.
+    std::bitset<32> reserved = 0;
     // TODO(benvanik): another data type.
     std::vector<RegisterUsage> upcoming_uses;
   };

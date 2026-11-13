@@ -10,12 +10,121 @@
 #include "xenia/cpu/compiler/passes/simplification_pass.h"
 
 #include "xenia/base/byte_order.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
+#include "xenia/cpu/compiler/translation_stats.h"
+
+// hakuX-Boosted: see BeginBlockWalk below.
+DEFINE_bool(
+    simplification_skip_unchanged_blocks, false,
+    "While the simplification and constant propagation group repeats until "
+    "nothing changes, each of SimplificationPass's five walks passes over a "
+    "block that it last went through without changing anything and that "
+    "nothing has changed since. HIR values never leave their block, so such "
+    "a walk would find the block exactly as it left it and do nothing again: "
+    "the translated code is the same, only the repeated work is not done. "
+    "Translation time only.",
+    "CPU");
+
+DEFINE_bool(
+    simplification_skip_verify, false,
+    "Self-check for simplification_skip_unchanged_blocks: nothing is skipped; "
+    "every block that would have been is walked anyway, and a change found in "
+    "one is logged (\"SimplifySkipVerify:\") and counted in the "
+    "log_translation_stats line. Any such line means the skip would have "
+    "changed the translated code.",
+    "CPU");
+
 namespace xe {
 namespace cpu {
 namespace compiler {
 namespace passes {
+
+namespace {
+
+// hakuX-Boosted: simplification_skip_unchanged_blocks.
+//
+// Why the pass costs what it does: ConditionalGroupPass reruns it, with
+// constant propagation, until a whole round changes nothing, so every
+// function pays for at least one round that by definition does nothing and
+// usually three in all; and each round of this pass is five separate walks
+// over every instruction of the function where the other passes make one.
+// The pass then runs once more on its own later in the pipeline.
+//
+// What can be skipped without changing the result: a walk is a function of
+// the block it is looking at and nothing else. Every rule starts from an
+// instruction, follows its operands to their defining instructions and
+// their use lists, and rewrites that instruction or inserts one before it.
+// Values other than constants are defined and used in a single block (the
+// register allocator relies on the same fact and asserts it), so all of
+// that stays inside the block. A walk that has just been through a block
+// without changing it would therefore do nothing if run again on the same
+// block, until something changes the block.
+//
+// Each block carries the stamp of its last change by one of the five walks
+// or by ConstantPropagationPass, and for each walk the stamp of its last
+// visit that changed nothing. Stamps come from one counter per function, so
+// "clean stamp greater than modified stamp" means "clean since". They are
+// trusted only inside one run of ConditionalGroupPass, which raises the
+// floor at its start and after any member it cannot see into; the lone
+// SimplificationPass later in the pipeline, after passes that do not stamp,
+// never skips.
+enum SimplifyWalk {
+  kWalkBitArith = 0,
+  kWalkConversions = 1,
+  kWalkAssignments = 2,
+  kWalkBasicArith = 3,
+  kWalkVectorOps = 4,
+};
+
+enum class BlockWalk { kWalk, kSkip, kWalkExpectingNoChange };
+
+inline BlockWalk BeginBlockWalk(hir::HIRBuilder* builder, hir::Block* block,
+                                SimplifyWalk walk) {
+  if (!cvars::simplification_skip_unchanged_blocks) {
+    return BlockWalk::kWalk;
+  }
+  const uint32_t floor = builder->pass_stamp_floor();
+  const uint32_t clean = block->pass_clean_stamp[walk];
+  if (floor == UINT32_MAX || clean <= floor ||
+      clean <= block->pass_modified_stamp) {
+    return BlockWalk::kWalk;
+  }
+  if (cvars::simplification_skip_verify) {
+    return BlockWalk::kWalkExpectingNoChange;
+  }
+  translation_stats.simplify_block_skips.fetch_add(1,
+                                                   std::memory_order_relaxed);
+  return BlockWalk::kSkip;
+}
+
+inline void EndBlockWalk(hir::HIRBuilder* builder, hir::Block* block,
+                         SimplifyWalk walk, BlockWalk mode, bool changed) {
+  if (!cvars::simplification_skip_unchanged_blocks) {
+    return;
+  }
+  translation_stats.simplify_block_walks.fetch_add(1,
+                                                   std::memory_order_relaxed);
+  if (changed) {
+    block->pass_modified_stamp = builder->NextPassStamp();
+    if (mode == BlockWalk::kWalkExpectingNoChange) {
+      const uint64_t count =
+          translation_stats.simplify_skip_mismatches.fetch_add(
+              1, std::memory_order_relaxed);
+      if (count < 64) {
+        XELOGE(
+            "SimplifySkipVerify: walk {} changed a block that "
+            "simplification_skip_unchanged_blocks would have skipped",
+            static_cast<int>(walk));
+      }
+    }
+  } else {
+    block->pass_clean_stamp[walk] = builder->NextPassStamp();
+  }
+}
+
+}  // namespace
 
 // TODO(benvanik): remove when enums redefined.
 using namespace xe::cpu::hir;
@@ -668,6 +777,11 @@ retry_and_simplification:
             if (true_variable_def->dest->use_head->next == nullptr) {
               // one use, convert to shift
               true_variable_def->opcode = &OPCODE_SHL_info;
+              // hakuX-Boosted: the retry may still answer "nothing changed"
+              // although the definition above just did. The answer is left
+              // as it was (it decides whether the group runs again); the
+              // block stamps are told separately.
+              unreported_change_ = true;
               goto retry_and_simplification;
             }
           }
@@ -1021,9 +1135,17 @@ bool SimplificationPass::CheckSAR(hir::Instr* i, hir::HIRBuilder* builder) {
   return false;
 }
 bool SimplificationPass::SimplifyBitArith(hir::HIRBuilder* builder) {
-  bool result = false;
+  bool function_result = false;
   auto block = builder->first_block();
   while (block) {
+    // hakuX-Boosted: `result` is now per block.
+    const BlockWalk block_walk = BeginBlockWalk(builder, block, kWalkBitArith);
+    if (block_walk == BlockWalk::kSkip) {
+      block = block->next;
+      continue;
+    }
+    bool result = false;
+    unreported_change_ = false;
     auto i = block->instr_head;
     while (i) {
       // vector types use the same opcodes as scalar ones for AND/OR/XOR! we
@@ -1051,9 +1173,12 @@ bool SimplificationPass::SimplifyBitArith(hir::HIRBuilder* builder) {
 
       i = i->next;
     }
+    EndBlockWalk(builder, block, kWalkBitArith, block_walk,
+                 result || unreported_change_);
+    function_result |= result;
     block = block->next;
   }
-  return result;
+  return function_result;
 }
 bool SimplificationPass::EliminateConversions(HIRBuilder* builder) {
   // First, we check for truncates/extensions that can be skipped.
@@ -1065,9 +1190,17 @@ bool SimplificationPass::EliminateConversions(HIRBuilder* builder) {
   //   v1.i64 = zero/sign_extend v0.i32 (may be dead code removed later)
   //   v2.i32 = v0.i32
 
-  bool result = false;
+  bool function_result = false;
   auto block = builder->first_block();
   while (block) {
+    // hakuX-Boosted: `result` is now per block.
+    const BlockWalk block_walk =
+        BeginBlockWalk(builder, block, kWalkConversions);
+    if (block_walk == BlockWalk::kSkip) {
+      block = block->next;
+      continue;
+    }
+    bool result = false;
     auto i = block->instr_head;
     while (i) {
       // To make things easier we check in reverse (source of truncate/extend
@@ -1083,9 +1216,11 @@ bool SimplificationPass::EliminateConversions(HIRBuilder* builder) {
       }
       i = i->next;
     }
+    EndBlockWalk(builder, block, kWalkConversions, block_walk, result);
+    function_result |= result;
     block = block->next;
   }
-  return result;
+  return function_result;
 }
 
 bool SimplificationPass::CheckTruncate(Instr* i) {
@@ -1157,9 +1292,17 @@ bool SimplificationPass::SimplifyAssignments(HIRBuilder* builder) {
   // of that instr. Because we may have chains, we do this recursively until
   // we find a non-assign def.
 
-  bool result = false;
+  bool function_result = false;
   auto block = builder->first_block();
   while (block) {
+    // hakuX-Boosted: `result` is now per block.
+    const BlockWalk block_walk =
+        BeginBlockWalk(builder, block, kWalkAssignments);
+    if (block_walk == BlockWalk::kSkip) {
+      block = block->next;
+      continue;
+    }
+    bool result = false;
     auto i = block->instr_head;
     while (i) {
       i->VisitValueOperands([&result, i, this](Value* value, uint32_t idx) {
@@ -1170,9 +1313,11 @@ bool SimplificationPass::SimplifyAssignments(HIRBuilder* builder) {
 
       i = i->next;
     }
+    EndBlockWalk(builder, block, kWalkAssignments, block_walk, result);
+    function_result |= result;
     block = block->next;
   }
-  return result;
+  return function_result;
 }
 
 Value* SimplificationPass::CheckValue(Value* value, bool& result) {
@@ -1374,17 +1519,27 @@ bool SimplificationPass::SimplifyBasicArith(hir::Instr* i,
   return false;
 }
 bool SimplificationPass::SimplifyBasicArith(hir::HIRBuilder* builder) {
-  bool result = false;
+  bool function_result = false;
   auto block = builder->first_block();
   while (block) {
+    // hakuX-Boosted: `result` is now per block.
+    const BlockWalk block_walk =
+        BeginBlockWalk(builder, block, kWalkBasicArith);
+    if (block_walk == BlockWalk::kSkip) {
+      block = block->next;
+      continue;
+    }
+    bool result = false;
     auto i = block->instr_head;
     while (i) {
       result |= SimplifyBasicArith(i, builder);
       i = i->next;
     }
+    EndBlockWalk(builder, block, kWalkBasicArith, block_walk, result);
+    function_result |= result;
     block = block->next;
   }
-  return result;
+  return function_result;
 }
 
 static bool CouldEverProduceDenormal(hir::Instr* i) {
@@ -1459,9 +1614,17 @@ bool SimplificationPass::SimplifyVectorOps(hir::Instr* i,
   return false;
 }
 bool SimplificationPass::SimplifyVectorOps(hir::HIRBuilder* builder) {
-  bool result = false;
+  bool function_result = false;
   auto block = builder->first_block();
   while (block) {
+    // hakuX-Boosted: `result` is now per block.
+    const BlockWalk block_walk =
+        BeginBlockWalk(builder, block, kWalkVectorOps);
+    if (block_walk == BlockWalk::kSkip) {
+      block = block->next;
+      continue;
+    }
+    bool result = false;
     auto i = block->instr_head;
     while (i) {
       bool looks_vectory = false;
@@ -1474,9 +1637,11 @@ bool SimplificationPass::SimplifyVectorOps(hir::HIRBuilder* builder) {
       result |= SimplifyVectorOps(i, builder);
       i = i->next;
     }
+    EndBlockWalk(builder, block, kWalkVectorOps, block_walk, result);
+    function_result |= result;
     block = block->next;
   }
-  return result;
+  return function_result;
 }
 /*
         todo: add load-store simplification pass

@@ -73,6 +73,10 @@ void HIRBuilder::Reset() {
   next_label_id_ = 0;
   next_value_ordinal_ = 0;
   locals_.clear();
+  // hakuX-Boosted
+  pinned_context_slots_.clear();
+  pass_stamp_ = 0;
+  pass_stamp_floor_ = UINT32_MAX;
   block_head_ = block_tail_ = NULL;
   current_block_ = NULL;
 #if SCRIBBLE_ARENA_ON_RESET
@@ -432,6 +436,10 @@ void HIRBuilder::InsertLabel(Label* label, Instr* prev_instr) {
 
   Block* new_block = arena_->Alloc<Block>();
   new_block->ordinal = UINT16_MAX;
+  // hakuX-Boosted: arena memory is not zeroed.
+  new_block->pass_modified_stamp = 0;
+  std::memset(new_block->pass_clean_stamp, 0,
+              sizeof(new_block->pass_clean_stamp));
   new_block->incoming_values = nullptr;
   new_block->arena = arena_;
   new_block->prev = prev_block;
@@ -677,6 +685,9 @@ void HIRBuilder::MergeAdjacentBlocks(Block* left, Block* right) {
 Block* HIRBuilder::AppendBlock() {
   Block* block = arena_->Alloc<Block>();
   block->ordinal = UINT16_MAX;
+  // hakuX-Boosted: arena memory is not zeroed.
+  block->pass_modified_stamp = 0;
+  std::memset(block->pass_clean_stamp, 0, sizeof(block->pass_clean_stamp));
   block->incoming_values = nullptr;
   block->arena = arena_;
   block->next = NULL;

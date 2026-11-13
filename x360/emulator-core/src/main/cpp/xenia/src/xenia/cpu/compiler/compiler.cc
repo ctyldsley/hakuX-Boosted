@@ -18,6 +18,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
 #include "xenia/cpu/compiler/compiler_pass.h"
+#include "xenia/cpu/compiler/translation_stats.h"
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 
@@ -39,6 +40,7 @@ namespace compiler {
 // hakuX-Boosted: totals for log_translation_stats. Several guest threads
 // translate at once, each with its own Compiler from the translator pool but
 // the same pass list, so the totals are shared and indexed by pass position.
+TranslationStats translation_stats;
 std::atomic<uint64_t> translation_stats_group_runs{0};
 std::atomic<uint64_t> translation_stats_group_iterations{0};
 
@@ -132,6 +134,36 @@ std::string FormatContextCounts() {
   }
   return line;
 }
+
+// hakuX-Boosted: the counters of translation_stats.h, on a line of their own.
+std::string FormatExtraStats() {
+  const auto get = [](const std::atomic<uint64_t>& v) {
+    return v.load(std::memory_order_relaxed);
+  };
+  const auto& t = translation_stats;
+  std::string line = fmt::format(
+      " pinning: {} functions considered, {} with loops, {} pinned; slots "
+      "gpr {} fpr {} vr {}; context loads {} and stores {} became register "
+      "moves; {} sync sites, {} resume stubs, {} resume entries, {} verify "
+      "mismatches; pinned gprs:",
+      get(t.pin_functions_considered), get(t.pin_functions_with_loops),
+      get(t.pin_functions_pinned), get(t.pin_gpr_slots), get(t.pin_fpr_slots),
+      get(t.pin_vr_slots), get(t.pin_loads), get(t.pin_stores),
+      get(t.pin_sync_sites), get(t.pin_resume_stubs),
+      get(t.pin_resume_entries), get(t.pin_verify_mismatches));
+  for (size_t n = 0; n < 33; ++n) {
+    const uint64_t count = get(t.pin_by_gpr[n]);
+    if (count) {
+      line += n < 32 ? fmt::format(" r{} {}", n, count)
+                     : fmt::format(" ctr {}", count);
+    }
+  }
+  line += fmt::format(
+      "; simplification: {} block walks, {} skipped, {} skip mismatches",
+      get(t.simplify_block_walks), get(t.simplify_block_skips),
+      get(t.simplify_skip_mismatches));
+  return line;
+}
 }  // namespace
 
 Compiler::Compiler(Processor* processor) : processor_(processor) {}
@@ -188,6 +220,7 @@ bool Compiler::Compile(xe::cpu::hir::HIRBuilder* builder) {
           translation_stats_group_iterations.load(std::memory_order_relaxed),
           line);
       XELOGI("TranslationStats:{}", FormatContextCounts());
+      XELOGI("TranslationStats:{}", FormatExtraStats());
     }
     return true;
   }
