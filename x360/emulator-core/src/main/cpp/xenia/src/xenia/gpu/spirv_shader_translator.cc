@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/spirv_shader_translator.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -22,6 +23,7 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/spirv_compatibility.h"
 #include "xenia/gpu/spirv_shader.h"
+#include "xenia/gpu/spirv_shader_translator_optimize.h"
 #include "xenia/ui/vulkan/vulkan_device.h"
 
 DEFINE_string(spirv_version_override, "1.0",
@@ -1168,9 +1170,51 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
     }
   }
 
+  // hakuX-Boosted: OpName and OpMemberName are the only debug instructions
+  // this translator emits (the source language is unknown, so no OpSource, and
+  // there are no strings or lines). Nothing on the Vulkan path reads them
+  // back, and the driver has to parse them, so spirv_debug_names = false
+  // drops them. The Metal backend finds textures by their variable names
+  // (gpu/metal/msl_shader.cc), so they always stay on Apple platforms.
+#if !XE_PLATFORM_MAC
+  if (!cvars::spirv_debug_names) {
+    builder_->ClearDebugNames();
+  }
+#endif
+
   // TODO(Triang3l): Avoid copy?
   std::vector<unsigned int> module_uints;
   builder_->dump(module_uints);
+
+  // hakuX-Boosted: the optional SPIRV-Tools pass (spirv_optimize), here so it
+  // runs on whichever thread translates and before anything stores the
+  // module.
+  if (cvars::spirv_optimize > 0) {
+    if (!IsSpirvOptimizerAvailable()) {
+      static std::atomic_flag warned = ATOMIC_FLAG_INIT;
+      if (!warned.test_and_set(std::memory_order_relaxed)) {
+        XELOGW("spirv_optimize is set, but this build has no SPIRV-Tools "
+               "optimiser; modules are used as translated");
+      }
+    } else {
+      SpirvOptimizeResult optimize_result = OptimizeTranslatedSpirv(
+          module_uints, cvars::spirv_optimize, features_.spirv_version);
+      if (cvars::shader_profiling) {
+        XELOGI(
+            "shader_profiling: {} {:016X} SPIR-V optimise (level {}) {} B -> "
+            "{} B {:.3f} ms{}",
+            is_vertex_shader() ? "vertex" : "pixel",
+            is_depth_only_fragment_shader_
+                ? uint64_t(0)
+                : current_shader().ucode_data_hash(),
+            cvars::spirv_optimize,
+            optimize_result.words_before * sizeof(uint32_t),
+            optimize_result.words_after * sizeof(uint32_t),
+            optimize_result.milliseconds,
+            optimize_result.succeeded ? "" : " FAILED, not used");
+      }
+    }
+  }
 
   std::vector<uint8_t> module_bytes;
   module_bytes.reserve(sizeof(unsigned int) * module_uints.size());

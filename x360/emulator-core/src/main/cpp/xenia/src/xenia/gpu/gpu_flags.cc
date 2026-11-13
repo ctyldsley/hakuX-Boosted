@@ -304,3 +304,31 @@ DEFINE_bool(
     "multiplies in every gradient texture fetch, which is measurable where "
     "fragment shading is the bottleneck.",
     "GPU");
+
+// hakuX-Boosted: slimming the SPIR-V handed to the Vulkan driver, whose
+// pipeline compile time follows the module size (boosted/notes/
+// spirv-slimming.md). Both are read by SpirvShaderTranslator.
+DEFINE_bool(
+    spirv_debug_names, true,
+    "Keep OpName and OpMemberName in the SPIR-V translated from guest "
+    "shaders. They are only of use when reading a dumped module or debugging "
+    "in RenderDoc, and the driver has to parse them; set to false to leave "
+    "them out. Changing this changes every module's bytes, so the driver's "
+    "stored pipeline cache no longer matches and every pipeline is compiled "
+    "again once. Always kept on Apple platforms, where the Metal backend "
+    "reads the texture names back.",
+    "GPU");
+
+DEFINE_int32(
+    spirv_optimize, 0,
+    "Run the SPIRV-Tools optimiser over each SPIR-V module translated from a "
+    "guest shader before it is handed to the driver, on the thread that "
+    "translates. A smaller module in SSA form is less work for the driver's "
+    "own compiler, at the cost of the optimiser's time per shader; "
+    "shader_profiling logs both sizes and that time.\n"
+    " 0 = off (the module is what the translator emitted)\n"
+    " 1 = a short list that does not change any floating-point result: local "
+    "variables to SSA values, constant propagation, dead branch and dead "
+    "code elimination, block merging, repeated instructions within a block\n"
+    " 2 = SPIRV-Tools' full performance list (as spirv-opt -O)",
+    "GPU");

@@ -33,6 +33,12 @@ class SpirvBuilder : public spv::Builder {
   void SetAllowContraction(bool allow) { allow_contraction_ = allow; }
   bool AllowsContraction() const { return allow_contraction_; }
 
+  // hakuX-Boosted: drops every OpName and OpMemberName collected so far, so
+  // that dump() writes none. They are the only debug instructions a module
+  // built through this class has unless a source language or debug info was
+  // asked for (see the spirv_debug_names setting).
+  void ClearDebugNames() { names.clear(); }
+
   // Make public rather than protected.
   using spv::Builder::createSelectionMerge;
 
