@@ -18,6 +18,7 @@
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/host_thread_state.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
@@ -123,6 +124,34 @@ XThread::~XThread() {
 thread_local XThread* current_xthread_tls_ = nullptr;
 
 namespace {
+// hakuX-Boosted: the current guest thread through the host thread's state
+// when host_thread_state_slot is on (base/host_thread_state.h), else the
+// thread_local above. The state's address is read by a volatile asm each time
+// these run: the read happens where it is written, on the host thread the
+// code is on then, and is never a value kept from before a fiber switch.
+inline XThread* LoadCurrentXThread() {
+  if (const auto* state = xe::threading::HostThreadStateForRead()) {
+    XThread* thread = state->xthread;
+    if (xe::threading::HostThreadStateVerifies(state)) {
+      xe::threading::HostThreadStateCheck(
+          "the current XThread", reinterpret_cast<uintptr_t>(thread),
+          reinterpret_cast<uintptr_t>(current_xthread_tls_));
+    }
+    return thread;
+  }
+  return current_xthread_tls_;
+}
+
+inline void StoreCurrentXThread(XThread* thread) {
+  if (auto* state = xe::threading::HostThreadStateForWrite()) {
+    state->xthread = thread;
+    if (!xe::threading::HostThreadStateVerifies(state)) {
+      return;
+    }
+  }
+  current_xthread_tls_ = thread;
+}
+
 void HostThreadExitCleanupThunk(void* argument) {
   static_cast<XThread*>(argument)->OnHostThreadExitCleanup();
 }
@@ -139,11 +168,11 @@ bool XThread::IsInThread() { return Thread::IsInThread(); }
 // That halted Fable II's audio loading thread in XObject::Wait (run 22, the
 // first -O3/ThinLTO build: a null current thread after BlockCurrentThread).
 XE_NOINLINE bool XThread::IsInThread(XThread* other) {
-  return current_xthread_tls_ == other;
+  return LoadCurrentXThread() == other;
 }
 
 XE_NOINLINE XThread* XThread::GetCurrentThread() {
-  XThread* thread = reinterpret_cast<XThread*>(current_xthread_tls_);
+  XThread* thread = LoadCurrentXThread();
   if (!thread) {
     assert_always("Attempting to use guest stuff from a non-guest thread.");
   }
@@ -151,7 +180,7 @@ XE_NOINLINE XThread* XThread::GetCurrentThread() {
 }
 
 XE_NOINLINE XThread* XThread::GetCurrentFiberThread() {
-  XThread* thread = current_xthread_tls_;
+  XThread* thread = LoadCurrentXThread();
   return (thread && thread->fiber_) ? thread : nullptr;
 }
 
@@ -167,8 +196,8 @@ uint32_t XThread::GetCurrentThreadId() {
 
 void XThread::OnHostThreadExitCleanup() {
   running_ = false;
-  current_thread_ = nullptr;
-  current_xthread_tls_ = nullptr;
+  SetCurrentThreadPointer(nullptr);
+  StoreCurrentXThread(nullptr);
   xe::Profiler::ThreadExit();
   ReleaseHandle();
 }
@@ -209,7 +238,7 @@ static uint8_t GetFakeCpuNumber(uint8_t proc_mask) {
     // guest CPU assignment reflects the game's intent — parent-child thread
     // pairs that share a HW thread may rely on implicit serialization.
     // https://docs.microsoft.com/en-us/windows/win32/dxtecharts/coding-for-multiple-cores
-    XThread* parent = current_xthread_tls_;
+    XThread* parent = LoadCurrentXThread();
     if (parent) {
       return parent->active_cpu();
     }
@@ -503,8 +532,8 @@ X_STATUS XThread::Create() {
       xe::Profiler::ThreadEnter(thread_name_.c_str());
 
       // Execute user code.
-      current_xthread_tls_ = this;
-      current_thread_ = this;
+      StoreCurrentXThread(this);
+      SetCurrentThreadPointer(this);
       cpu::ThreadState::Bind(this->thread_state());
       running_ = true;
 
@@ -613,8 +642,8 @@ X_STATUS XThread::Exit(int exit_code) {
 
   // NOTE: unless PlatformExit fails, expect it to never return!
 #if !(XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID || XE_PLATFORM_MAC)
-  current_xthread_tls_ = nullptr;
-  current_thread_ = nullptr;
+  StoreCurrentXThread(nullptr);
+  SetCurrentThreadPointer(nullptr);
   xe::Profiler::ThreadExit();
 #endif
   running_ = false;
@@ -870,8 +899,8 @@ bool XThread::HasPendingUserApc() {
 }
 
 XE_NOINLINE void XThread::SetCurrentThread(XThread* thread) {
-  current_xthread_tls_ = thread;
-  current_thread_ = thread;
+  StoreCurrentXThread(thread);
+  SetCurrentThreadPointer(thread);
   if (thread) {
     // Attribute logging to this guest thread and bind its PPC context. Under
     // the cooperative scheduler many guest fibers share a host thread, so this
@@ -1511,8 +1540,8 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
       // Profiler needs to know about the thread.
       xe::Profiler::ThreadEnter(thread->name().c_str());
 
-      current_xthread_tls_ = thread;
-      current_thread_ = thread;
+      StoreCurrentXThread(thread);
+      SetCurrentThreadPointer(thread);
 
       // Acquire any mutants
       for (auto mutant : thread->pending_mutant_acquires_) {

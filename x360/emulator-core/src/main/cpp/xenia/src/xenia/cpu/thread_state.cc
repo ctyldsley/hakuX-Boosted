@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/host_thread_state.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/threading.h"
@@ -23,6 +24,36 @@ namespace xe {
 namespace cpu {
 
 thread_local ThreadState* thread_state_ = nullptr;
+
+// hakuX-Boosted: the same value through the host thread's state when
+// host_thread_state_slot is on (base/host_thread_state.h), else the
+// thread_local above. The state's address is read by a volatile asm each time
+// these run, so neither is ever a value from before a fiber switch.
+namespace {
+inline ThreadState* LoadBoundThreadState() {
+  if (const auto* state = xe::threading::HostThreadStateForRead()) {
+    ThreadState* thread_state = state->cpu_thread_state;
+    if (xe::threading::HostThreadStateVerifies(state)) {
+      xe::threading::HostThreadStateCheck(
+          "the bound cpu::ThreadState",
+          reinterpret_cast<uintptr_t>(thread_state),
+          reinterpret_cast<uintptr_t>(thread_state_));
+    }
+    return thread_state;
+  }
+  return thread_state_;
+}
+
+inline void StoreBoundThreadState(ThreadState* thread_state) {
+  if (auto* state = xe::threading::HostThreadStateForWrite()) {
+    state->cpu_thread_state = thread_state;
+    if (!xe::threading::HostThreadStateVerifies(state)) {
+      return;
+    }
+  }
+  thread_state_ = thread_state;
+}
+}  // namespace
 
     struct PackedContext {
         XE_MAYBE_UNUSED uint64_t backend_data[32];//分配256字节給CPU后端使用
@@ -92,8 +123,8 @@ ThreadState::~ThreadState() {
   if (backend_data_) {
     processor_->backend()->FreeThreadData(backend_data_);
   }
-  if (thread_state_ == this) {
-    thread_state_ = nullptr;
+  if (LoadBoundThreadState() == this) {
+    StoreBoundThreadState(nullptr);
   }
   if (context_) {
     processor_->backend()->DeinitializeBackendContext(context_);
@@ -102,15 +133,16 @@ ThreadState::~ThreadState() {
 }
 
 XE_NOINLINE void ThreadState::Bind(ThreadState* thread_state) {
-  thread_state_ = thread_state;
+  StoreBoundThreadState(thread_state);
 }
 
 // hakuX-Boosted: never inlined (a thread_local read by code that fibers carry
 // between host threads: kernel/xthread.cc, XThread::GetCurrentThread).
-XE_NOINLINE ThreadState* ThreadState::Get() { return thread_state_; }
+XE_NOINLINE ThreadState* ThreadState::Get() { return LoadBoundThreadState(); }
 
 XE_NOINLINE uint32_t ThreadState::GetThreadID() {
-  return thread_state_ ? thread_state_->thread_id_ : 0xFFFFFFFF;
+  ThreadState* thread_state = LoadBoundThreadState();
+  return thread_state ? thread_state->thread_id_ : 0xFFFFFFFF;
 }
 
 }  // namespace cpu

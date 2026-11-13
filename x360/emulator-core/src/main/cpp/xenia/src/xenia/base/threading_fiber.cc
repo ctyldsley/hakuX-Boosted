@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/host_thread_state.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/threading.h"
@@ -62,6 +63,33 @@ namespace {
 
 // The fiber currently executing on this host thread.
 thread_local Fiber* current_fiber_ = nullptr;
+
+// hakuX-Boosted: the same value through the host thread's state when
+// host_thread_state_slot is on (base/host_thread_state.h), else the
+// thread_local above. Both read where they are called, never earlier: the
+// state's address comes from a volatile asm.
+inline Fiber* LoadCurrentFiber() {
+  if (const HostThreadState* state = HostThreadStateForRead()) {
+    Fiber* fiber = state->fiber;
+    if (HostThreadStateVerifies(state)) {
+      HostThreadStateCheck("the current fiber",
+                           reinterpret_cast<uintptr_t>(fiber),
+                           reinterpret_cast<uintptr_t>(current_fiber_));
+    }
+    return fiber;
+  }
+  return current_fiber_;
+}
+
+inline void StoreCurrentFiber(Fiber* fiber) {
+  if (HostThreadState* state = HostThreadStateForWrite()) {
+    state->fiber = fiber;
+    if (!HostThreadStateVerifies(state)) {
+      return;
+    }
+  }
+  current_fiber_ = fiber;
+}
 
 size_t HostPageSize() {
 #if XE_PLATFORM_WIN32
@@ -276,12 +304,12 @@ class FcontextFiber : public Fiber {
   }
 
   void SwitchTo() override {
-    auto* prev = static_cast<FcontextFiber*>(current_fiber_);
+    auto* prev = static_cast<FcontextFiber*>(LoadCurrentFiber());
     // SwitchTo requires the host thread to have a current fiber (established by
     // CreateFromThread or a prior switch).
     assert_not_null(prev);
     assert_true(prev != this);
-    current_fiber_ = this;
+    StoreCurrentFiber(this);
 #if XE_FIBER_ASAN
     __sanitizer_start_switch_fiber(&prev->asan_fake_stack_, stack_.base,
                                    stack_.usable);
@@ -307,7 +335,7 @@ class FcontextFiber : public Fiber {
     auto* prev = static_cast<FcontextFiber*>(t.data);
     prev->fctx_ = t.fctx;
 
-    auto* self = static_cast<FcontextFiber*>(current_fiber_);
+    auto* self = static_cast<FcontextFiber*>(LoadCurrentFiber());
 #if XE_FIBER_ASAN
     __sanitizer_finish_switch_fiber(self->asan_fake_stack_, nullptr, nullptr);
 #endif
@@ -347,14 +375,16 @@ std::unique_ptr<Fiber> Fiber::Create(CreationParameters params,
 
 std::unique_ptr<Fiber> Fiber::CreateFromThread() {
   auto fiber = std::make_unique<FcontextFiber>();
-  current_fiber_ = fiber.get();
+  // hakuX-Boosted: with host_thread_state_slot on, this is where a dispatch
+  // thread gets its HostThreadState (its first write).
+  StoreCurrentFiber(fiber.get());
   return fiber;
 }
 
 // hakuX-Boosted: never inlined: the caller may have been moved to another host
 // thread by a fiber switch since it last asked (kernel/xthread.cc,
 // XThread::GetCurrentThread).
-XE_NOINLINE Fiber* Fiber::GetCurrentFiber() { return current_fiber_; }
+XE_NOINLINE Fiber* Fiber::GetCurrentFiber() { return LoadCurrentFiber(); }
 
 bool Fiber::IsStackOverflowFault(const void* address) {
   auto addr = reinterpret_cast<uintptr_t>(address);
