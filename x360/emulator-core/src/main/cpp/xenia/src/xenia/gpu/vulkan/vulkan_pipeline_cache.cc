@@ -162,6 +162,24 @@ DEFINE_bool(
     "Vulkan");
 
 DEFINE_bool(
+    vulkan_placeholder_depth_only_interpreter, false,
+    "With vulkan_placeholder_pipelines and async_shader_vs_interpreter: a "
+    "draw without a pixel shader (a depth-only pass: shadow maps, depth "
+    "pre-passes) whose vertex shader the ucode interpreter can run gets an "
+    "interpreter placeholder and its real pipeline is compiled in the "
+    "background. Off: such a pipeline is translated and compiled on the GPU "
+    "command thread when first drawn, a hitch as long as the compile.",
+    "Vulkan");
+DEFINE_bool(
+    vulkan_placeholder_interpreter_geometry, false,
+    "With vulkan_placeholder_pipelines and async_shader_vs_interpreter: let "
+    "the ucode interpreter stand in for the vertex shader of rectangle lists "
+    "(how titles draw full-screen passes) and quad lists too, through a "
+    "geometry shader built for what the interpreter outputs. Off: such a "
+    "draw has no interpreter placeholder.",
+    "Vulkan");
+
+DEFINE_bool(
     vulkan_dynamic_pipeline_state, true,
     "Use VK_EXT_extended_dynamic_state (and state 2/3 where available) to move "
     "cull/front-face/topology/depth/stencil/blend out of the baked pipeline "
@@ -751,9 +769,17 @@ bool VulkanPipelineCache::EnsureShadersTranslated(
   return true;
 }
 
-bool VulkanPipelineCache::CanCreatePipelineAsync(bool has_pixel_shader) const {
+bool VulkanPipelineCache::CanCreatePipelineAsync(bool has_pixel_shader,
+                                                 bool use_interpreter) const {
+  // hakuX-Boosted: a draw without a pixel shader has nothing to stand in for
+  // but its vertex shader, so with the interpreter its placeholder is exact
+  // (vulkan_placeholder_depth_only_interpreter).
   return cvars::async_shader_compilation && !creation_threads_.empty() &&
-         has_pixel_shader && placeholder_pixel_shader_ != VK_NULL_HANDLE;
+         (has_pixel_shader ||
+          (use_interpreter && cvars::vulkan_placeholder_pipelines &&
+           cvars::vulkan_placeholder_depth_only_interpreter &&
+           ucode_interpreter_vs_ != VK_NULL_HANDLE)) &&
+         placeholder_pixel_shader_ != VK_NULL_HANDLE;
 }
 
 const VulkanPipelineCache::PipelineLayoutProvider*
@@ -987,7 +1013,8 @@ bool VulkanPipelineCache::ConfigurePipeline(
     // Create a fast placeholder pipeline immediately (fast compile) and queue
     // the real pipeline creation in the background. This reduces stutter from
     // pipeline compilation.
-    bool use_async = CanCreatePipelineAsync(pixel_shader != nullptr);
+    bool use_async =
+        CanCreatePipelineAsync(pixel_shader != nullptr, use_interpreter);
 
     // The interpreter can only stand in via the async placeholder path.
     use_interpreter =
@@ -1037,8 +1064,27 @@ bool VulkanPipelineCache::ConfigurePipeline(
                        stand_in_pixel_shader, stand_in_layout);
         pipeline_pair.second.placeholder_created_ms =
             xe::Clock::QueryHostUptimeMillis();
+        // hakuX-Boosted: the geometry shader of a rectangle or quad list
+        // passes on as many interpolators as the translated vertex shader
+        // writes. The interpreter writes the stand-in's two, or none, so its
+        // placeholder gets a geometry shader built for that
+        // (vulkan_placeholder_interpreter_geometry lets such draws get here).
+        bool placeholder_possible = true;
+        if (use_interpreter &&
+            description.geometry_shader != PipelineGeometryShader::kNone) {
+          GeometryShaderKey placeholder_geometry_shader_key;
+          placeholder_geometry_shader_key.type = description.geometry_shader;
+          placeholder_geometry_shader_key.interpolator_count =
+              use_stand_in ? 2 : 0;
+          placeholder_args.geometry_shader =
+              GetGeometryShader(placeholder_geometry_shader_key);
+          placeholder_possible =
+              placeholder_args.geometry_shader != VK_NULL_HANDLE;
+        }
         bool placeholder_created;
-        if (use_stand_in) {
+        if (!placeholder_possible) {
+          placeholder_created = false;
+        } else if (use_stand_in) {
           pipeline_pair.second.placeholder_pipeline_layout.store(
               stand_in_layout, std::memory_order_release);
           pipeline_pair.second.placeholder_stand_in.store(
@@ -1076,7 +1122,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
           placeholder_created =
               use_interpreter
                   ? EnsurePipelineCreatedWithInterpreterPlaceholder(
-                        placeholder_args)
+                        placeholder_args, pixel_shader == nullptr)
                   : EnsurePipelineCreatedWithPlaceholder(placeholder_args);
         }
         if (placeholder_created) {
@@ -2601,12 +2647,36 @@ VkShaderModule VulkanPipelineCache::GetStandInPixelShader(
 }
 
 bool VulkanPipelineCache::EnsurePipelineCreatedWithInterpreterPlaceholder(
-    const PipelineCreationArguments& creation_arguments) {
+    const PipelineCreationArguments& creation_arguments, bool depth_only) {
   VkShaderModule placeholder_ps =
       (cvars::async_shader_vs_interpreter_debug_color &&
        placeholder_color_pixel_shader_ != VK_NULL_HANDLE)
           ? placeholder_color_pixel_shader_
           : placeholder_pixel_shader_;
+  if (depth_only) {
+    // hakuX-Boosted: the placeholder of a draw without a pixel shader
+    // (vulkan_placeholder_depth_only_interpreter) writes depth as the real
+    // pipeline will: with the same float24 conversion where that applies (the
+    // condition is EnsurePipelineCreated's for a draw without a pixel shader),
+    // otherwise with the no-op pixel shader, which is no pixel shader.
+    const PipelineDescription& description = creation_arguments.pipeline->first;
+    placeholder_ps = placeholder_pixel_shader_;
+    if (render_target_cache_.GetPath() !=
+            RenderTargetCache::Path::kPixelShaderInterlock &&
+        render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+        (description.depth_write_enable ||
+         description.depth_compare_op != xenos::CompareFunction::kAlways) &&
+        (description.render_pass_key.depth_and_color_used & 0b1) &&
+        description.render_pass_key.depth_format ==
+            xenos::DepthRenderTargetFormat::kD24FS8) {
+      VkShaderModule float24_ps = render_target_cache_.depth_float24_round()
+                                      ? float24_round_fragment_shader_
+                                      : float24_truncate_fragment_shader_;
+      if (float24_ps != VK_NULL_HANDLE) {
+        placeholder_ps = float24_ps;
+      }
+    }
+  }
   return EnsurePipelineCreated(creation_arguments, placeholder_ps,
                                ucode_interpreter_vs_);
 }

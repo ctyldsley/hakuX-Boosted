@@ -148,6 +148,7 @@ DECLARE_bool(vulkan_async_wait_fullscreen_draws);
 // hakuX-Boosted: the stand-in pixel shader, see vulkan_pipeline_cache.cc.
 DECLARE_int32(vulkan_placeholder_ps_mode);
 DECLARE_bool(vulkan_placeholder_interpreter_translated_vs);
+DECLARE_bool(vulkan_placeholder_interpreter_geometry);
 
 DEFINE_bool(
     vulkan_dynamic_rendering, true,
@@ -4025,16 +4026,20 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             Shader::HostVertexShaderType::kVertex &&
         primitive_processing_result.host_primitive_type !=
             xenos::PrimitiveType::kPointList &&
-        primitive_processing_result.host_primitive_type !=
-            xenos::PrimitiveType::kRectangleList &&
-        primitive_processing_result.host_primitive_type !=
-            xenos::PrimitiveType::kQuadList &&
+        // hakuX-Boosted: rectangle and quad lists can have the interpreter
+        // too, with a geometry shader made for it (ConfigurePipeline).
+        (cvars::vulkan_placeholder_interpreter_geometry ||
+         (primitive_processing_result.host_primitive_type !=
+              xenos::PrimitiveType::kRectangleList &&
+          primitive_processing_result.host_primitive_type !=
+              xenos::PrimitiveType::kQuadList)) &&
         vertex_shader->texture_bindings().empty() &&
         !vertex_shader->uses_subroutine_calls() &&
         vertex_shader->memexport_eM_written() == 0 &&
         vertex_shader->constant_register_map().loop_bitmap == 0;
     bool async_available =
-        pipeline_cache_->CanCreatePipelineAsync(pixel_shader != nullptr);
+        pipeline_cache_->CanCreatePipelineAsync(pixel_shader != nullptr,
+                                                use_interpreter);
     // A draw with no placeholder to render it now: the interpreter can't stand
     // in AND the real VS isn't translated yet (so no real-VS + no-op-PS
     // placeholder either). These are the draws async_shader_skip_draws governs.

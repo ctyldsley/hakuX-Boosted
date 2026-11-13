@@ -358,7 +358,11 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // draw thread must not translate shaders itself). Matches the use_async
   // condition inside ConfigurePipeline. has_pixel_shader because the async
   // placeholder path needs a pixel shader.
-  bool CanCreatePipelineAsync(bool has_pixel_shader) const;
+  // hakuX-Boosted: use_interpreter says the ucode interpreter can stand in for
+  // this draw's vertex shader, which is what a draw without a pixel shader
+  // needs to be asynchronous (vulkan_placeholder_depth_only_interpreter).
+  bool CanCreatePipelineAsync(bool has_pixel_shader,
+                              bool use_interpreter = false) const;
 
  private:
   // PipelineGeometryShader and GeometryShaderKey come from
@@ -652,8 +656,10 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
 
   // Creates a placeholder pipeline that rasterizes the guest geometry via the
   // ucode interpreter VS while the real VS+PS compile in the background.
+  // hakuX-Boosted: depth_only for a draw that has no pixel shader.
   bool EnsurePipelineCreatedWithInterpreterPlaceholder(
-      const PipelineCreationArguments& creation_arguments);
+      const PipelineCreationArguments& creation_arguments,
+      bool depth_only = false);
 
   VulkanCommandProcessor& command_processor_;
   const RegisterFile& register_file_;
