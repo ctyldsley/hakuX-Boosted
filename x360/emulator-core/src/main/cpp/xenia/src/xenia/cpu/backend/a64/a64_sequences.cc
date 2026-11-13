@@ -238,6 +238,14 @@ struct LOAD_CONTEXT_I64
     : Sequence<LOAD_CONTEXT_I64, I<OPCODE_LOAD_CONTEXT, I64Op, OffsetOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto offset = static_cast<uint32_t>(i.src1.value);
+    // hakuX-Boosted: a pinned guest register is read from its host register.
+    if (auto pin = e.FindPinnedGuestRegister(offset, hir::INT64_TYPE)) {
+      if (e.pin_verify()) {
+        e.EmitPinnedVerify(*pin);
+      }
+      e.mov(i.dest, XReg(pin->host_reg));
+      return;
+    }
     e.ldr(i.dest, ptr(e.GetContextReg(), offset));
   }
 };
@@ -252,6 +260,14 @@ struct LOAD_CONTEXT_F64
     : Sequence<LOAD_CONTEXT_F64, I<OPCODE_LOAD_CONTEXT, F64Op, OffsetOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto offset = static_cast<uint32_t>(i.src1.value);
+    // hakuX-Boosted: a pinned guest register is read from its host register.
+    if (auto pin = e.FindPinnedGuestRegister(offset, hir::FLOAT64_TYPE)) {
+      if (e.pin_verify()) {
+        e.EmitPinnedVerify(*pin);
+      }
+      e.fmov(i.dest, DReg(pin->host_reg));
+      return;
+    }
     e.ldr(i.dest, ptr(e.GetContextReg(), offset));
   }
 };
@@ -259,6 +275,16 @@ struct LOAD_CONTEXT_V128
     : Sequence<LOAD_CONTEXT_V128, I<OPCODE_LOAD_CONTEXT, V128Op, OffsetOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto offset = static_cast<uint32_t>(i.src1.value);
+    // hakuX-Boosted: a pinned guest register is read from its host register.
+    if (auto pin = e.FindPinnedGuestRegister(offset, hir::VEC128_TYPE)) {
+      if (e.pin_verify()) {
+        e.EmitPinnedVerify(*pin);
+      }
+      auto pin_vreg = VReg(pin->host_reg);
+      auto dst_vreg = VReg(i.dest.reg().getIdx());
+      e.orr(dst_vreg.b16, pin_vreg.b16, pin_vreg.b16);
+      return;
+    }
     e.ldr(i.dest, ptr(e.GetContextReg(), offset));
   }
 };
@@ -318,6 +344,19 @@ struct STORE_CONTEXT_I64
                I<OPCODE_STORE_CONTEXT, VoidOp, OffsetOp, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto offset = static_cast<uint32_t>(i.src1.value);
+    // hakuX-Boosted: a pinned guest register is written in its host
+    // register; the context copy is brought up to date where control leaves
+    // the function (and here as well under a64_pin_verify).
+    if (auto pin = e.FindPinnedGuestRegister(offset, hir::INT64_TYPE)) {
+      if (i.src2.is_constant) {
+        e.mov(XReg(pin->host_reg), static_cast<uint64_t>(i.src2.constant()));
+      } else {
+        e.mov(XReg(pin->host_reg), i.src2);
+      }
+      if (!e.pin_verify()) {
+        return;
+      }
+    }
     if (i.src2.is_constant) {
       if (i.src2.constant() == 0) {
         e.str(e.xzr, ptr(e.GetContextReg(), offset));
@@ -353,6 +392,23 @@ struct STORE_CONTEXT_F64
                I<OPCODE_STORE_CONTEXT, VoidOp, OffsetOp, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto offset = static_cast<uint32_t>(i.src1.value);
+    // hakuX-Boosted: as STORE_CONTEXT_I64.
+    if (auto pin = e.FindPinnedGuestRegister(offset, hir::FLOAT64_TYPE)) {
+      if (i.src2.is_constant) {
+        union {
+          double d;
+          uint64_t u;
+        } pc;
+        pc.d = i.src2.constant();
+        e.mov(e.x0, pc.u);
+        e.fmov(DReg(pin->host_reg), e.x0);
+      } else {
+        e.fmov(DReg(pin->host_reg), i.src2);
+      }
+      if (!e.pin_verify()) {
+        return;
+      }
+    }
     if (i.src2.is_constant) {
       union {
         double d;
@@ -371,6 +427,19 @@ struct STORE_CONTEXT_V128
                I<OPCODE_STORE_CONTEXT, VoidOp, OffsetOp, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto offset = static_cast<uint32_t>(i.src1.value);
+    // hakuX-Boosted: as STORE_CONTEXT_I64.
+    if (auto pin = e.FindPinnedGuestRegister(offset, hir::VEC128_TYPE)) {
+      if (i.src2.is_constant) {
+        LoadV128Const(e, static_cast<int>(pin->host_reg), i.src2.constant());
+      } else {
+        auto pin_vreg = VReg(pin->host_reg);
+        auto src_vreg = VReg(i.src2.reg().getIdx());
+        e.orr(pin_vreg.b16, src_vreg.b16, src_vreg.b16);
+      }
+      if (!e.pin_verify()) {
+        return;
+      }
+    }
     if (i.src2.is_constant) {
       LoadV128Const(e, 0, i.src2.constant());
       e.str(QReg(0), ptr(e.GetContextReg(), offset));

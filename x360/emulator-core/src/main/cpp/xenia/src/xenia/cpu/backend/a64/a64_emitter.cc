@@ -21,6 +21,7 @@
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/backend/a64/a64_tracers.h"
+#include "xenia/cpu/compiler/translation_stats.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/hir/label.h"
@@ -52,6 +53,19 @@ DEFINE_bool(
     "multiplying: two instructions fewer in every translated function's "
     "prologue, the same address. Takes effect for functions translated after "
     "it is set.",
+    "a64");
+
+// hakuX-Boosted: see A64Emitter::EmitPinnedVerify.
+DEFINE_bool(
+    a64_pin_verify, false,
+    "Self-check for pin_guest_registers, for a debugging run only: every "
+    "store to a pinned guest register also goes to the guest context as it "
+    "would without pinning, and every load of one compares the host register "
+    "with the context copy first. A difference means a pinned register was "
+    "lost or went stale; it is logged (\"PinVerify:\", with the guest "
+    "function and the context offset) and the register is reloaded from the "
+    "context, which stays authoritative in this mode. Slower than not "
+    "pinning at all. Takes effect for functions translated after it is set.",
     "a64");
 
 DEFINE_bool(
@@ -150,6 +164,19 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
     return false;
   }
 
+  // hakuX-Boosted: a function with pinned guest registers tells
+  // ResolveFunction where its return sites can be re-entered, before the code
+  // becomes reachable.
+  if (!pins_.empty()) {
+    std::vector<std::pair<uint32_t, uint32_t>> stubs;
+    stubs.reserve(pinned_resume_stubs_.size());
+    for (const auto& stub : pinned_resume_stubs_) {
+      stubs.emplace_back(stub.guest_address, stub.code_offset);
+    }
+    static_cast<A64Function*>(function)->SetPinnedResumeStubs(
+        std::move(stubs));
+  }
+
   // Emplace the code into the code cache.
   *out_code_address = Emplace(func_info, function);
   *out_code_size = func_info.code_size.total;
@@ -161,6 +188,37 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
 }
 
 bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
+  // hakuX-Boosted: the guest registers this function keeps in host
+  // registers, as GuestRegisterPinningPass chose them. Empty unless
+  // pin_guest_registers is on.
+  pins_.clear();
+  pins_live_ = false;
+  pin_verify_ = cvars::a64_pin_verify;
+  pinned_resume_stubs_.clear();
+  for (const auto& slot : builder->pinned_context_slots()) {
+    PinnedGuestRegister pin;
+    pin.offset = slot.offset;
+    pin.type = slot.type;
+    pin.written = slot.written;
+    if (slot.reg_set == 0) {
+      if (slot.reg_index >= GPR_COUNT || slot.type != hir::INT64_TYPE) {
+        XELOGE("A64: bad pinned integer slot in {:08X}",
+               current_guest_function_);
+        return false;
+      }
+      pin.host_reg = gpr_reg_map_[slot.reg_index];
+    } else {
+      if (slot.reg_index >= VEC_COUNT || (slot.type != hir::FLOAT64_TYPE &&
+                                          slot.type != hir::VEC128_TYPE)) {
+        XELOGE("A64: bad pinned vector slot in {:08X}",
+               current_guest_function_);
+        return false;
+      }
+      pin.host_reg = vec_reg_map_[slot.reg_index];
+    }
+    pins_.push_back(pin);
+  }
+
   // Calculate local variable stack offsets.
   auto locals = builder->locals();
   size_t stack_offset = StackLayout::GUEST_STACK_SIZE;
@@ -232,6 +290,14 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     CallNative(reinterpret_cast<void*>(LogGuestCallEntry));
   }
 
+  // hakuX-Boosted: the pinned guest registers are read from the context
+  // once, here. The context is current on entry: every way into a function's
+  // first instruction is a guest call or the host-to-guest thunk.
+  if (!pins_.empty()) {
+    EmitPinnedReload();
+    pins_live_ = true;
+  }
+
   // Allocate the epilog label (owned by label_cache_ for cleanup).
   auto epilog_label_ptr = new Label();
   label_cache_.push_back(epilog_label_ptr);
@@ -240,6 +306,7 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // Walk HIR blocks and emit ARM64 instructions.
   auto block = builder->first_block();
   synchronize_stack_on_next_instruction_ = false;
+  hir::Opcode last_opcode = hir::OPCODE_NOP;  // hakuX-Boosted
   while (block) {
     // Reset FPCR tracking on each block entry (we don't know which
     // predecessor ran, so mode is unknown).
@@ -265,12 +332,36 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
         if (instr->GetOpcodeNum() != hir::OPCODE_SOURCE_OFFSET) {
           synchronize_stack_on_next_instruction_ = false;
           EnsureSynchronizedGuestAndHostStack();
+        } else if (pins_live_) {
+          // hakuX-Boosted: this source offset is the host address
+          // ResolveFunction would resume at for a longjmp to the return site
+          // of the call just emitted. With pinned registers it resumes at a
+          // stub instead (emitted with the tail code), which reloads them
+          // and jumps here, to the stack check that follows.
+          auto& resume_target = NewCachedLabel();
+          L(resume_target);
+          pinned_resume_stubs_.push_back(
+              {static_cast<uint32_t>(instr->src1.offset), &resume_target, 0});
         }
       }
+      // hakuX-Boosted: bring the context up to date before any instruction
+      // that leaves this function's code, and read the pinned registers back
+      // after any that returns here. See EmitPinnedFlush.
+      const PinSync pin_sync =
+          pins_live_ ? ClassifyPinSync(instr) : PinSync::kNone;
+      if (pin_sync != PinSync::kNone) {
+        EmitPinnedFlush();
+        compiler::translation_stats.pin_sync_sites.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+      last_opcode = instr->GetOpcodeNum();
       const hir::Instr* new_tail = instr;
       bool selected = false;
       try {
         selected = SelectSequence(this, instr, &new_tail);
+        if (selected && pin_sync == PinSync::kFlushAndReload) {
+          EmitPinnedReload();
+        }
       } catch (const Xbyak_aarch64::Error& e) {
         // Uncaught this aborts the process with no context, so name the opcode
         // and the guest function and fail just this compile.
@@ -293,6 +384,18 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
 
     block = block->next;
   }
+
+  // hakuX-Boosted: every branch to the epilog wrote the pinned registers
+  // back first (returns are sync points). Falling off the last block into it
+  // must do the same; after a plain return it already has.
+  if (pins_live_ && last_opcode != hir::OPCODE_RETURN) {
+    EmitPinnedFlush();
+  }
+  // From here on nothing may assume the pinned registers: the epilog's and
+  // the tail code's host calls run with the context already current (or,
+  // for the prologue's stackpoint overflow, before the registers were
+  // loaded).
+  pins_live_ = false;
 
   // ========================================================================
   // EPILOG
@@ -337,6 +440,23 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
              current_guest_function_, e.what());
       return false;
     }
+  }
+  // hakuX-Boosted: one resume stub per return site, see the body loop.
+  for (auto& stub : pinned_resume_stubs_) {
+    stub.code_offset = static_cast<uint32_t>(getSize());
+    try {
+      EmitPinnedReload();
+      CodeGenerator::b(*stub.target);
+    } catch (const Xbyak_aarch64::Error& e) {
+      XELOGE("A64: assembler rejected a resume stub in guest function "
+             "{:08X}: {}",
+             current_guest_function_, e.what());
+      return false;
+    }
+  }
+  if (!pinned_resume_stubs_.empty()) {
+    compiler::translation_stats.pin_resume_stubs.fetch_add(
+        pinned_resume_stubs_.size(), std::memory_order_relaxed);
   }
   code_offsets.tail = getSize();
 
@@ -757,11 +877,186 @@ void A64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
 void A64Emitter::CallNative(void* fn) { CallNativeSafe(fn); }
 
 void A64Emitter::CallNativeSafe(void* fn) {
+  // hakuX-Boosted: a host function called from the middle of a sequence sees
+  // a current context and may change it, like every other way out of the
+  // function's code. Neither the stores nor the loads touch x0-x17, so the
+  // arguments already set up and the result in x0 are undisturbed.
+  const bool sync_pins = pins_live_;
+  if (sync_pins) {
+    EmitPinnedFlush();
+  }
   // GuestToHostThunk: x0=target function, x1/x2=args (set by caller).
   // The thunk rearranges: saves x0 in x9, sets x0=context, calls x9.
   mov(x0, reinterpret_cast<uint64_t>(fn));
   mov(x9, reinterpret_cast<uint64_t>(backend()->guest_to_host_thunk()));
   blr(x9);
+  if (sync_pins) {
+    EmitPinnedReload();
+  }
+}
+
+// hakuX-Boosted: pinned guest registers (pin_guest_registers).
+//
+// A pinned guest register lives in one host register from the end of the
+// function's prologue to its last instruction: its context loads become
+// moves from that register and its stores moves into it (the LOAD_CONTEXT
+// and STORE_CONTEXT sequences ask FindPinnedGuestRegister). The context copy
+// is therefore stale while the function's own code runs, and the rule that
+// keeps this invisible is:
+//
+//   the context is made current (EmitPinnedFlush) before control leaves the
+//   function's own code, and the registers are read back (EmitPinnedReload)
+//   where control comes back.
+//
+// The ways out, all of them:
+//   - guest calls, direct and indirect, conditional or not, tail or not, and
+//     the possible-return form of `blr`: sync points in Emit's loop;
+//   - CALL_EXTERN (kernel calls, through either thunk): the same;
+//   - returns (branches to the epilog) and falling into the epilog: flush;
+//   - traps and debug breaks (the handler sees the context): sync points;
+//   - CONTEXT_BARRIER (the front end's own "context must be current"): sync;
+//   - the scheduler's preemption check: its cold path, which is the only
+//     part that leaves (EmitPreemptCheck);
+//   - any host helper called from inside a sequence (MMIO access, clock,
+//     spin park, pow/log, reservations, tracing): CallNativeSafe above;
+//   - the resolve thunk, ResolveFunction and the stack synchronisation
+//     helper are only reached from inside a guest call's sequence, after its
+//     flush.
+// The two host functions called with a bare blr (RSQRT_V128, the vector
+// helpers beside it) take their operands in registers and never see the
+// context.
+// The ways in: the function's first instruction (context current, loaded by
+// the prologue), the return from any of the above (reloaded), and
+// ResolveFunction resuming a return site after a longjmp (through a stub
+// that reloads, see pinned_resume_stubs_).
+//
+// What may still see a stale context copy of a pinned register: a signal
+// handler or debugger that inspects PPCContext while this function's own
+// code is interrupted between sync points. The MMIO fault handler does not
+// read guest registers from the context (it decodes the faulting host
+// instruction); a crash report would show the last synced values.
+// Translated code already had this property within a block (context
+// promotion keeps values in host registers and drops overwritten stores);
+// pinning extends it to the function. r1, r13 and lr, which host code reads
+// at arbitrary points, are never pinned.
+//
+// The host registers themselves: pinned registers are taken from the
+// allocator's sets (x22-x28, v4-v31), which no sequence uses as scratch.
+// x22-x28 are callee-saved for host functions; v4-v31 are saved by the full
+// guest-to-host thunk; and after every call that does not go through it the
+// registers are reloaded anyway.
+void A64Emitter::EmitPinnedFlush() {
+  if (pin_verify_) {
+    // The context is written at every store in this mode and is the copy
+    // that counts; a register that went wrong must not overwrite it.
+    return;
+  }
+  for (const auto& pin : pins_) {
+    if (!pin.written) {
+      continue;  // still equal to the context copy it was loaded from
+    }
+    switch (pin.type) {
+      case hir::INT64_TYPE:
+        str(XReg(pin.host_reg), ptr(x20, pin.offset));
+        break;
+      case hir::FLOAT64_TYPE:
+        str(DReg(pin.host_reg), ptr(x20, pin.offset));
+        break;
+      default:
+        str(QReg(pin.host_reg), ptr(x20, pin.offset));
+        break;
+    }
+  }
+}
+
+void A64Emitter::EmitPinnedReload() {
+  for (const auto& pin : pins_) {
+    switch (pin.type) {
+      case hir::INT64_TYPE:
+        ldr(XReg(pin.host_reg), ptr(x20, pin.offset));
+        break;
+      case hir::FLOAT64_TYPE:
+        ldr(DReg(pin.host_reg), ptr(x20, pin.offset));
+        break;
+      default:
+        ldr(QReg(pin.host_reg), ptr(x20, pin.offset));
+        break;
+    }
+  }
+}
+
+static uint64_t ReportPinnedMismatch(void* raw_context, uint64_t function,
+                                     uint64_t offset) {
+  const uint64_t count =
+      compiler::translation_stats.pin_verify_mismatches.fetch_add(
+          1, std::memory_order_relaxed);
+  if (count < 64) {
+    XELOGE(
+        "PinVerify: pinned guest register at context offset {:#x} differed "
+        "from the context in guest function {:08X}",
+        offset, static_cast<uint32_t>(function));
+  }
+  return 0;
+}
+
+void A64Emitter::EmitPinnedVerify(const PinnedGuestRegister& pin) {
+  // The report below goes through the guest-to-host thunk, which leaves FPCR
+  // in the scalar mode; make the mode tracking agree whichever way the
+  // compare goes.
+  ForgetFpcrMode();
+  // No flag is written: eor and cbz only, so nothing a neighbouring sequence
+  // might rely on is disturbed.
+  Label& same = NewCachedLabel();
+  switch (pin.type) {
+    case hir::INT64_TYPE:
+      ldr(x0, ptr(x20, pin.offset));
+      eor(x0, x0, XReg(pin.host_reg));
+      break;
+    case hir::FLOAT64_TYPE:
+      ldr(x0, ptr(x20, pin.offset));
+      fmov(x1, DReg(pin.host_reg));
+      eor(x0, x0, x1);
+      break;
+    default:
+      ldr(QReg(0), ptr(x20, pin.offset));
+      eor(VReg(0).b16, VReg(0).b16, VReg(pin.host_reg).b16);
+      // Fold the 128 bits of difference into x0.
+      umov(x0, VReg(0).d2[0]);
+      umov(x1, VReg(0).d2[1]);
+      orr(x0, x0, x1);
+      break;
+  }
+  cbz(x0, same);
+  mov(x1, static_cast<uint64_t>(current_guest_function_));
+  mov(x2, static_cast<uint64_t>(pin.offset));
+  // Reloads every pinned register from the context on the way back.
+  CallNativeSafe(reinterpret_cast<void*>(&ReportPinnedMismatch));
+  L(same);
+}
+
+A64Emitter::PinSync A64Emitter::ClassifyPinSync(const hir::Instr* instr) {
+  switch (instr->GetOpcodeNum()) {
+    case hir::OPCODE_CALL:
+    case hir::OPCODE_CALL_INDIRECT:
+      // An unconditional tail call does not come back.
+      return (instr->flags & hir::CALL_TAIL) ? PinSync::kFlush
+                                             : PinSync::kFlushAndReload;
+    case hir::OPCODE_CALL_TRUE:
+    case hir::OPCODE_CALL_INDIRECT_TRUE:
+    case hir::OPCODE_CALL_EXTERN:
+    case hir::OPCODE_TRAP:
+    case hir::OPCODE_TRAP_TRUE:
+    case hir::OPCODE_DEBUG_BREAK:
+    case hir::OPCODE_DEBUG_BREAK_TRUE:
+    case hir::OPCODE_CONTEXT_BARRIER:
+      return PinSync::kFlushAndReload;
+    case hir::OPCODE_RETURN:
+    case hir::OPCODE_RETURN_TRUE:
+      // Taken, it leaves; not taken, the registers are as they were.
+      return PinSync::kFlush;
+    default:
+      return PinSync::kNone;
+  }
 }
 
 void A64Emitter::SetReturnAddress(uint64_t value) {
@@ -841,18 +1136,31 @@ void A64Emitter::EmitPreemptCheck(uint32_t guest_address) {
   static_assert(offsetof(ppc::PPCContext, preempt_requested) < 4096);
   const uint32_t flag_offset =
       static_cast<uint32_t>(offsetof(ppc::PPCContext, preempt_requested));
-  Label& do_yield = AddToTail([&after, flag_offset](A64Emitter& e, Label&) {
-    e.strb(e.wzr, ptr(e.x20, flag_offset));
-    // Null until the scheduler starts, and a stale flag can reach here after
-    // it shuts down, so check before calling.
-    e.mov(e.x0,
-          reinterpret_cast<uint64_t>(&xe::cpu::backend::preempt_yield_handler));
-    e.ldr(e.x0, ptr(e.x0));
-    e.cbz(e.x0, after);
-    e.mov(e.x9, reinterpret_cast<uint64_t>(e.backend()->guest_to_host_thunk()));
-    e.blr(e.x9);
-    e.b(after);
-  });
+  // hakuX-Boosted: with pinned guest registers the yield, and only the
+  // yield, is a way out of the function's code: the context is made current
+  // before it and the registers are read back after. The test on the usual
+  // path touches neither.
+  const bool sync_pins = pins_live_;
+  Label& do_yield =
+      AddToTail([&after, flag_offset, sync_pins](A64Emitter& e, Label&) {
+        e.strb(e.wzr, ptr(e.x20, flag_offset));
+        // Null until the scheduler starts, and a stale flag can reach here
+        // after it shuts down, so check before calling.
+        e.mov(e.x0, reinterpret_cast<uint64_t>(
+                        &xe::cpu::backend::preempt_yield_handler));
+        e.ldr(e.x0, ptr(e.x0));
+        e.cbz(e.x0, after);
+        if (sync_pins) {
+          e.EmitPinnedFlush();
+        }
+        e.mov(e.x9,
+              reinterpret_cast<uint64_t>(e.backend()->guest_to_host_thunk()));
+        e.blr(e.x9);
+        if (sync_pins) {
+          e.EmitPinnedReload();
+        }
+        e.b(after);
+      });
   if (cvars::log_safepoint_pc && guest_address) {
     // Diagnostic only: costs a materialize + store on every loop back-edge, so
     // it stays off unless a wedge is being chased.

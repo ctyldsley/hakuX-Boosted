@@ -169,6 +169,15 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
   // compiler_->AddPass(new passes::ValueReductionPass());
   // if (validate) compiler_->AddPass(new passes::ValidationPass());
 
+#if XE_ARCH_ARM64
+  // hakuX-Boosted: choose the guest registers the function keeps in host
+  // registers. Analysis only, and a no-op unless pin_guest_registers is on.
+  // Directly before register allocation, which must leave those registers
+  // alone; only the a64 backend knows what to do with the result.
+  compiler_->AddPass(std::make_unique<passes::GuestRegisterPinningPass>(
+      backend->machine_info()));
+#endif
+
   // Register allocation for the target backend.
   // Will modify the HIR to add loads/stores.
   // This should be the last pass before finalization, as after this all

@@ -189,6 +189,37 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   XexModule* GuestModule() { return guest_module_; }
 
+  // hakuX-Boosted: guest registers held in host registers for the whole of
+  // the function being emitted (pin_guest_registers). See the block comment
+  // above A64Emitter::EmitPinnedFlush in a64_emitter.cc for the rules.
+  struct PinnedGuestRegister {
+    uint32_t offset;    // offset in PPCContext
+    hir::TypeName type;  // INT64_TYPE, FLOAT64_TYPE or VEC128_TYPE
+    uint32_t host_reg;  // x or v register number
+    bool written;       // the function stores to it
+  };
+  // The pinned register for a context access of exactly this offset and
+  // type, or null. Always null when nothing is pinned.
+  const PinnedGuestRegister* FindPinnedGuestRegister(uint32_t offset,
+                                                     hir::TypeName type) const {
+    for (const auto& pin : pins_) {
+      if (pin.offset == offset && pin.type == type) {
+        return &pin;
+      }
+    }
+    return nullptr;
+  }
+  // a64_pin_verify: stores to pinned registers also go to the context, and
+  // loads compare the two.
+  bool pin_verify() const { return pin_verify_; }
+  // Context <- pinned registers (those the function writes).
+  void EmitPinnedFlush();
+  // Pinned registers <- context.
+  void EmitPinnedReload();
+  // a64_pin_verify: compare the pinned register with the context copy and
+  // report a difference. Clobbers x0, x1, v0 and nothing else.
+  void EmitPinnedVerify(const PinnedGuestRegister& pin);
+
  protected:
   void* Emplace(const EmitFunctionInfo& func_info,
                 GuestFunction* function = nullptr);
@@ -237,6 +268,23 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   static constexpr size_t kNearBranch14 = (size_t(1) << 15) - 16;
   bool IsNearBoundLabel(const Xbyak_aarch64::Label& label,
                         size_t max_distance) const;
+
+  // hakuX-Boosted: what Emit's loop does round an instruction when guest
+  // registers are pinned.
+  enum class PinSync { kNone, kFlush, kFlushAndReload };
+  static PinSync ClassifyPinSync(const hir::Instr* instr);
+  // hakuX-Boosted: see FindPinnedGuestRegister.
+  std::vector<PinnedGuestRegister> pins_;
+  // True while emitting code that runs with the pinned registers loaded:
+  // from the end of the prologue to the last body instruction.
+  bool pins_live_ = false;
+  bool pin_verify_ = false;
+  struct PinnedResumeStub {
+    uint32_t guest_address;
+    Xbyak_aarch64::Label* target;
+    uint32_t code_offset;
+  };
+  std::vector<PinnedResumeStub> pinned_resume_stubs_;
 
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;
   bool synchronize_stack_on_next_instruction_ = false;

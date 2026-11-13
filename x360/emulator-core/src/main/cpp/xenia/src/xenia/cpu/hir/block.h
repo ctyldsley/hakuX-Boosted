@@ -63,6 +63,14 @@ class Block {
 
   uint16_t ordinal;
 
+  // hakuX-Boosted: for simplification_skip_unchanged_blocks. Values of
+  // HIRBuilder::NextPassStamp(): when a simplification or constant
+  // propagation walk last changed this block, and when each of
+  // SimplificationPass's five walks last went through it without changing
+  // anything.
+  uint32_t pass_modified_stamp;
+  uint32_t pass_clean_stamp[5];
+
   void AssertNoCycles();
 };
 

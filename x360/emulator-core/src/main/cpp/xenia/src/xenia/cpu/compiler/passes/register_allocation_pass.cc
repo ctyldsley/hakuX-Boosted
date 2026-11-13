@@ -76,6 +76,22 @@ bool RegisterAllocationPass::Run(HIRBuilder* builder) {
   // Really, it'd just be nice to have someone who knew what they
   // were doing lower SSA and do this right.
 
+  // hakuX-Boosted: take the host registers GuestRegisterPinningPass gave to
+  // guest registers out of each set for this function. With nothing pinned
+  // (pin_guest_registers off) every mask is empty and nothing changes.
+  for (size_t n = 0; n < xe::countof(usage_sets_.all_sets); ++n) {
+    if (usage_sets_.all_sets[n]) {
+      usage_sets_.all_sets[n]->reserved.reset();
+    }
+  }
+  for (const auto& slot : builder->pinned_context_slots()) {
+    RegisterSetUsage* usage_set =
+        slot.reg_set == 0 ? usage_sets_.int_set : usage_sets_.vec_set;
+    if (usage_set && slot.reg_index < usage_set->count) {
+      usage_set->reserved.set(slot.reg_index);
+    }
+  }
+
   uint16_t block_ordinal = 0;
   uint32_t instr_ordinal = 0;
   auto block = builder->first_block();
@@ -199,6 +215,8 @@ void RegisterAllocationPass::PrepareBlockState() {
     auto usage_set = usage_sets_.all_sets[i];
     if (usage_set) {
       usage_set->availability.set();
+      // hakuX-Boosted: never available, so never allocated or spilled.
+      usage_set->availability &= ~usage_set->reserved;
       usage_set->upcoming_uses.clear();
     }
   }

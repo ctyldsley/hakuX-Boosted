@@ -37,6 +37,7 @@
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/backend/a64/a64_tracers.h"
 #include "xenia/cpu/breakpoint.h"
+#include "xenia/cpu/compiler/translation_stats.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/stack_walker.h"
@@ -72,6 +73,18 @@ DEFINE_bool(
     "register allocator works one block at a time and the call ends its "
     "block. Other host calls keep the full thunk. Takes effect for functions "
     "translated after it is set.",
+    "a64");
+
+// hakuX-Boosted: see EmitGuestFpcrRestore.
+DEFINE_bool(
+    a64_thunk_fpcr_compare, false,
+    "After a host function returns to translated code, the guest-to-host "
+    "thunks read FPCR and write the guest's value back only if the host "
+    "function left a different one, instead of writing it every time. The "
+    "register ends up holding the same value either way. Whether it is "
+    "cheaper depends on what a write to FPCR costs on the core (on many it "
+    "stalls the pipeline; a read does not), so it is a setting to measure. "
+    "Read once, when the thunks are generated at start-up.",
     "a64");
 
 namespace xe {
@@ -110,6 +123,9 @@ class A64HelperEmitter : public A64Emitter {
  public:
   A64HelperEmitter(A64Backend* backend, XbyakA64Allocator* allocator);
 
+  // hakuX-Boosted: FPCR <- the guest scalar mode's value, after a host call.
+  void EmitGuestFpcrRestore();
+
   HostToGuestThunk EmitHostToGuestThunk();
   GuestToHostThunk EmitGuestToHostThunk();
   GuestToHostThunk EmitGuestToHostLeanThunk();  // hakuX-Boosted
@@ -120,6 +136,25 @@ class A64HelperEmitter : public A64Emitter {
 A64HelperEmitter::A64HelperEmitter(A64Backend* backend,
                                    XbyakA64Allocator* allocator)
     : A64Emitter(backend, allocator) {}
+
+// hakuX-Boosted: host callbacks may change FPCR, so the guest scalar value is
+// put back before translated code resumes. x19 (backend context) is
+// callee-saved and survives the host call. With a64_thunk_fpcr_compare the
+// write is skipped when FPCR already holds that value: FPCR is a 64-bit
+// register whose upper half reads as zero, and w11's load zero-extends, so
+// the 64-bit compare is exact. Clobbers x10, x11 and the flags, all free
+// here (the host function has just returned).
+void A64HelperEmitter::EmitGuestFpcrRestore() {
+  ldr(w11,
+      ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_fpu))));
+  if (cvars::a64_thunk_fpcr_compare) {
+    mrs(x10, 3, 3, 4, 4, 0);  // mrs x10, FPCR
+    cmp(x10, x11);
+    // Skip the one instruction that follows.
+    CodeGenerator::b(Xbyak_aarch64::EQ, 8);
+  }
+  msr(3, 3, 4, 4, 0, x11);
+}
 
 // --------------------------------------------------------------------------
 // HostToGuestThunk
@@ -309,9 +344,7 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   // Host callbacks may change FPCR. Restore the guest scalar FPCR before
   // resuming the JIT so later guest ops observe the cached PPC mode.
   // x19 (backend context) is callee-saved, so it survives the host call.
-  ldr(w11,
-      ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_fpu))));
-  msr(3, 3, 4, 4, 0, x11);
+  EmitGuestFpcrRestore();  // hakuX-Boosted: was the ldr and msr, inline
 
   code_offsets.epilog = getSize();
 
@@ -400,9 +433,7 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostLeanThunk() {
   blr(x9);
 
   // As in the full thunk: the host function may have changed FPCR.
-  ldr(w11,
-      ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_fpu))));
-  msr(3, 3, 4, 4, 0, x11);
+  EmitGuestFpcrRestore();
 
   code_offsets.epilog = getSize();
 
@@ -741,6 +772,25 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
           if (host_address &&
               afunc->machine_code() !=
                   reinterpret_cast<const uint8_t*>(host_address)) {
+            // hakuX-Boosted: a function that keeps guest registers in host
+            // registers is resumed through the return site's stub, which
+            // reads them back from the context (current here: whoever
+            // jumped wrote its own back before leaving) and then joins the
+            // ordinary return-site code. A return site without a stub is
+            // not resumed in place: the general path below translates from
+            // that address, as it does when the function is not found.
+            if (afunc->has_pinned_guest_registers()) {
+              const uintptr_t stub_address = afunc->MapPinnedResumeAddress(
+                  static_cast<uint32_t>(target_address));
+              if (!stub_address) {
+                XELOGW(
+                    "A64: return site {:08X} in {:08X} has pinned guest "
+                    "registers and no resume stub; resolving it as a function",
+                    static_cast<uint32_t>(target_address), afunc->address());
+                break;
+              }
+              host_address = stub_address;
+            }
             auto* backend = static_cast<A64Backend*>(processor->backend());
             auto* backend_context =
                 backend->BackendContextForGuestContext(guest_context);
@@ -750,6 +800,10 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
                 static_cast<uint32_t>(guest_context->r[1]));
             if (sync_depth != 0) {
               backend_context->pending_stackpoint_sync_depth = sync_depth;
+              if (afunc->has_pinned_guest_registers()) {  // hakuX-Boosted
+                compiler::translation_stats.pin_resume_entries.fetch_add(
+                    1, std::memory_order_relaxed);
+              }
               return host_address;
             }
             break;
