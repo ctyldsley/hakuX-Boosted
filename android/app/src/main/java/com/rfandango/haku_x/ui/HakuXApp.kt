@@ -10,6 +10,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.Lifecycle
+import androidx.navigation.NavController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -159,12 +161,12 @@ fun HakuXApp(
       ModsScreen(
         gameKey = entry.arguments?.getString("key").orEmpty(),
         title = entry.arguments?.getString("title").orEmpty(),
-        onBack = { nav.popBackStack() },
+        onBack = { nav.backOnce() },
       )
     }
     composable(Routes.SETTINGS) {
       SettingsScreen(
-        onBack = { nav.popBackStack() },
+        onBack = { nav.backOnce() },
         onEditControls = { nav.navigate(Routes.CONTROLS) },
         onControllers = { nav.navigate(Routes.CONTROLLERS) },
         onHardDisk = { nav.navigate(Routes.HDD) },
@@ -175,28 +177,28 @@ fun HakuXApp(
     }
     composable(Routes.INSIGNIA) {
       InsigniaWizard(
-        onBack = { nav.popBackStack() },
+        onBack = { nav.backOnce() },
         onLaunchDashboard = onLaunchDashboard,
         onLaunchSetup = onLaunchSetup,
       )
     }
     composable(Routes.GPU_DRIVER) {
-      GpuDriverScreen(onBack = { nav.popBackStack() })
+      GpuDriverScreen(onBack = { nav.backOnce() })
     }
     composable(Routes.MIGRATE_AGAIN) {
-      MigrateScreen(onDone = { nav.popBackStack() })
+      MigrateScreen(onDone = { nav.backOnce() })
     }
     composable(Routes.HDD) {
-      HddScreen(onBack = { nav.popBackStack() })
+      HddScreen(onBack = { nav.backOnce() })
     }
     composable(Routes.CONTROLLERS) {
-      ControllersScreen(onBack = { nav.popBackStack() }, onMap = { nav.navigate(Routes.mapping(it)) })
+      ControllersScreen(onBack = { nav.backOnce() }, onMap = { nav.navigate(Routes.mapping(it)) })
     }
     composable(Routes.MAPPING, arguments = listOf(navArgument("id") { type = NavType.IntType })) { entry ->
-      ControllerMappingScreen(deviceId = entry.arguments?.getInt("id") ?: -1, onBack = { nav.popBackStack() })
+      ControllerMappingScreen(deviceId = entry.arguments?.getInt("id") ?: -1, onBack = { nav.backOnce() })
     }
     composable(Routes.CONTROLS) {
-      ControlsEditorScreen(onClose = { nav.popBackStack() })
+      ControlsEditorScreen(onClose = { nav.backOnce() })
     }
     composable(
       Routes.GAME,
@@ -208,8 +210,18 @@ fun HakuXApp(
       GameSettingsScreen(
         gameKey = entry.arguments?.getString("key").orEmpty(),
         title = entry.arguments?.getString("title").orEmpty(),
-        onBack = { nav.popBackStack() },
+        onBack = { nav.backOnce() },
       )
     }
   }
+}
+
+/**
+ * hakuX-Boosted: back from a screen, once. A second tap on the back arrow while the screen
+ * is still sliding away popped the library too and left an empty, black window (seen on
+ * device, run 73): only a screen that is fully shown goes back, and never the last one.
+ */
+private fun NavController.backOnce() {
+  val shown = currentBackStackEntry ?: return
+  if (shown.lifecycle.currentState == Lifecycle.State.RESUMED && previousBackStackEntry != null) popBackStack()
 }

@@ -92,9 +92,9 @@ class X360Library(
  *   (X360Badge) and gives them the 360 side's menu (X360GameMenu);
  * - a game image that is a 360 one goes to the 360 core instead of hakuX's
  *   (launchIfXbox360, from LauncherActivity.startCore);
- * - the settings have an Xbox 360 tab with the 360 core's settings in hakuX's
- *   rows (X360SettingsTab), and the Global tab has the 360's share of what both
- *   consoles need: file access, controls, GPU driver (from SettingsScreen).
+ * - the settings have an Xbox 360 tab with everything of the 360's and nothing
+ *   else: its file access, controls, GPU driver and the 360 core's settings in
+ *   hakuX's rows (X360SettingsTab, from SettingsScreen).
  *
  * The 360 side keeps its own settings, data directory and process (":emu");
  * nothing of hakuX's core is shared with it. It reads games by their real
@@ -545,22 +545,13 @@ fun X360AccessBanner() {
 }
 
 /**
- * In the settings' Global tab a section holds each console's rows under the console's
- * name. Where the 360 core isn't offered (Android 9) the section is hakuX's alone and
- * needs no such label.
- */
-@Composable
-fun ConsoleRows(console: String) {
-  if (X360.available) SettingsSubSection(console)
-}
-
-/**
- * Global, Games: "All files access", which the folders' Xbox 360 games need to be listed
+ * Xbox 360, Files: "All files access", which the folders' Xbox 360 games need to be listed
  * with their names and to start (the 360 core reads files by path).
  */
 @Composable
-fun X360FilesAccess() {
+private fun X360FilesAccess() {
   if (!X360.available || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+  Section("Files")
   val context = LocalContext.current
   // read again when back from the system's page for it
   var granted by remember { mutableStateOf(HostApp.allFilesAccessGranted) }
@@ -581,13 +572,13 @@ fun X360FilesAccess() {
 }
 
 /**
- * Global, Controls: the Xbox 360's. The two cores keep their own touch layout and
+ * Xbox 360, Controls. The two cores keep their own touch layout and
  * controller mapping (they share no code), so each console has its rows.
  */
 @Composable
-fun X360Controls() {
+private fun X360Controls() {
   if (!X360.available) return
-  SettingsSubSection("Xbox 360 games")
+  Section("Controls")
   X360ScreenRow(
     "On-screen controls", "Move and resize each control of the on-screen controller.", HostApp.SCREEN_TOUCH_CONTROLS,
   )
@@ -597,13 +588,13 @@ fun X360Controls() {
 }
 
 /**
- * Global, GPU drivers: the driver Xbox 360 games run on (the 360 core's own setting, in
+ * Xbox 360, GPU driver: the driver Xbox 360 games run on (the 360 core's own setting, in
  * the same row style; the bundled Turnip unless another was chosen).
  */
 @Composable
-fun X360GpuDriver() {
+private fun X360GpuDriver() {
   if (!X360.available) return
-  HostApp.GpuDriverSetting("GPU driver") { SettingsSubSection("Xbox 360 games") }
+  HostApp.GpuDriverSetting("GPU driver") { Section("GPU driver") }
 }
 
 /**
@@ -627,6 +618,9 @@ fun X360SettingsTab(modifier: Modifier = Modifier) {
           "Install content", "Add-ons, title updates and packaged games from a file.", HostApp.SCREEN_INSTALL_CONTENT,
         )
       }
+      item { X360FilesAccess() }
+      item { X360Controls() }
+      item { X360GpuDriver() }
     },
     footer = {
       item { Section("About") }

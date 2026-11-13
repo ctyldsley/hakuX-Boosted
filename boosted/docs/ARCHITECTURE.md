@@ -105,7 +105,8 @@ shows exactly these):
 | `android/app/.../LauncherActivity.kt` | One call to `X360.launchIfXbox360` in `startCore` |
 | `android/app/.../ui/library/LibraryScreen.kt` | Three places: `X360AccessBanner()` above the list, `X360Badge` in a card, `X360GameMenu` for a 360 title's long press |
 | `android/app/.../ui/library/LibraryViewModel.kt` | `refresh` merges `X360.scanLibrary`'s titles, names and icons into its list; `onResume` also lists again when `X360.accessChanged()` |
-| `android/app/.../ui/settings/SettingsScreen.kt` | The three tabs: inserted lines marked `tab:` group upstream's sections by tab and call the 360's rows (`SettingsTabsFrame`, `X360FilesAccess`, `X360Controls`, `X360GpuDriver`, `X360SettingsTab`). No line of upstream's is changed or re-indented |
+| `android/app/.../ui/settings/SettingsScreen.kt` | The three tabs: inserted lines marked `tab:` group upstream's sections by tab (`SettingsTabsFrame`). Global holds only what both consoles share (games folders, theme, updates, logs); Xbox holds this core's sections with its controls and GPU driver; Xbox 360 is `X360SettingsTab` alone. No row is on two tabs. |
+| `android/app/.../ui/HakuXApp.kt` | `nav.popBackStack()` replaced by `nav.backOnce()` (at the end of the file): a second back tap during the screen's exit emptied the stack and left a black window. |
 | `android/app/.../ui/theme/Theme.kt` | `HakuXTheme`'s body is one call to `BoostedTheme` (the shared look); upstream's colours are left in place, unused |
 | `android/app/.../data/AppPrefs.kt` | `theme` is dark until one is chosen (upstream: the phone's) |
 | `android/app/.../NativeCoreActivity.kt` | Two calls to `keepInSafeArea`: the frame rate counter and the hitch monitor clear of the cutout and rounded corner |

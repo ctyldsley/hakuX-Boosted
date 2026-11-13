@@ -90,6 +90,8 @@ they own.
 
 ## Right now
 
+- **Run 73 (combined build, `claude/integration-1113` at `5fceb59`) is on the phone; the settings tabs failed the owner's first look, fixed in the next push, not yet built.** Two things, 2026-11-13: (1) Global carried each console's rows (controls, GPU drivers, file access), so tabs read as duplicates. The owner's rule: Global is only what applies to both (games folders, theme, updates, logs), Xbox only the Xbox core's, Xbox 360 only the 360's, no row twice. Done in `SettingsScreen.kt` and `boosted/X360.kt`. (2) A black, empty window after back: reproduced over adb, two taps on the back arrow 120 ms apart pop the library as well (`nav.popBackStack()` unguarded, upstream's). Fixed with `backOnce()` in `HakuXApp.kt`. The tabs themselves switched correctly when driven over adb, slowly and quickly; the owner's "would not accept input" was not reproduced apart from that. The baseline game run of run 73 (every new switch off, `host_perf_log = true`) is still to do.
+
 - **Why Fable II's worker is late: its host thread queues for a core.
   Measured, fix pushed, not built or run.** A second start of run 43 on a
   cold cache, profiled (`device-logs/run43-profile`: log, `perf-guest.data`
