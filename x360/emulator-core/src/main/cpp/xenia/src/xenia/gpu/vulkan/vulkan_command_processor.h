@@ -349,6 +349,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   Shader* LoadShader(xenos::ShaderType shader_type,
                      const uint32_t* host_address,
                      uint32_t dword_count) override;
+  // hakuX-Boosted: shader_ahead, see CommandProcessor::LookAheadPrimaryBuffer.
+  void OnShaderPairAhead(Shader* vertex_shader, Shader* pixel_shader,
+                         xenos::PrimitiveType guest_primitive_type) override;
 
   bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                  IndexBufferInfo* index_buffer_info,

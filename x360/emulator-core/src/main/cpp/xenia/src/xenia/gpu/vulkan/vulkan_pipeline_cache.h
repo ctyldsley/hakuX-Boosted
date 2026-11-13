@@ -23,6 +23,7 @@
 #include <queue>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -190,6 +191,30 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     uint64_t placeholder_created_ms = 0;
     std::atomic<uint32_t> placeholder_draws{0};
 
+    // hakuX-Boosted: boosted/notes/shader-ahead.md. None of these is copied by
+    // the constructors below: a slot is only copied when it is put in the map,
+    // before anything is written to them.
+    // Set by the creation thread that takes this slot's real pipeline job, so
+    // a second job for the same slot (a speculative pipeline promoted when a
+    // draw arrived, or one asked for again at a higher priority) can be
+    // dropped.
+    std::atomic<bool> creation_claimed{false};
+    // A placeholder for this slot is being created on a creation thread
+    // (vulkan_placeholder_async).
+    std::atomic<bool> placeholder_pending{false};
+    // The rest is the GPU command thread's alone.
+    // A placeholder was asked for once, made or not: not asked for again.
+    bool placeholder_attempted = false;
+    // A wait for this slot's real pipeline ran out
+    // (vulkan_placeholder_wait_fullscreen_ms): not waited for again.
+    bool wait_given_up = false;
+    // 0: asked for by a draw. 1: made on a prediction, no draw has used it
+    // yet. 2: as 1, and written off as wasted.
+    uint8_t speculative = 0;
+    // Which prediction made it (SpeculationRule).
+    uint8_t speculative_rule = 0;
+    uint64_t speculative_made_ms = 0;
+
     Pipeline(const PipelineLayoutProvider* pipeline_layout_provider)
         : pipeline_layout(pipeline_layout_provider), dynamic_state{} {}
 
@@ -345,7 +370,70 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
       reg::RB_DEPTHCONTROL normalized_depth_control,
       uint32_t normalized_color_mask,
       VulkanRenderTargetCache::RenderPassKey render_pass_key,
-      bool use_interpreter, Pipeline** pipeline_out);
+      bool use_interpreter, Pipeline** pipeline_out,
+      bool require_real = false);
+
+  // hakuX-Boosted: everything from here to IsInterpreterPlaceholder is
+  // described in boosted/notes/shader-ahead.md. GPU command thread only.
+
+  // Why a draw of the placeholder model was not drawn. The first group says
+  // which condition kept the ucode interpreter from standing in for the
+  // vertex shader (several can be set), the second what state the pipeline
+  // slot was in.
+  enum DrawSkipReason : uint32_t {
+    kSkipInterpreterOff = 1u << 0,
+    kSkipInlineShader = 1u << 1,
+    kSkipDeviceIndices = 1u << 2,
+    kSkipDeviceSharedMemory = 1u << 3,
+    kSkipTessellated = 1u << 4,
+    kSkipHostVertexShaderType = 1u << 5,
+    kSkipPointList = 1u << 6,
+    kSkipRectangleOrQuadList = 1u << 7,
+    kSkipVertexTextureFetch = 1u << 8,
+    kSkipSubroutineCalls = 1u << 9,
+    kSkipMemoryExport = 1u << 10,
+    kSkipLoops = 1u << 11,
+    kSkipVertexShaderTranslated = 1u << 12,
+    kSkipInterpreterMask = (1u << 13) - 1,
+
+    // The vertex shader was not translated yet, so there was nothing to make
+    // a placeholder from ("no interpreter placeholder, real pipeline not
+    // ready").
+    kSkipVertexShaderNotTranslated = 1u << 16,
+    // The slot has neither a placeholder nor the real pipeline ("pipeline
+    // not ready yet"): see the next four for why it has no placeholder.
+    kSkipNoPipeline = 1u << 17,
+    kSkipPlaceholderNotAllowed = 1u << 18,
+    kSkipPlaceholderFailed = 1u << 19,
+    kSkipPlaceholderCompiling = 1u << 20,
+    kSkipPlaceholderNeverTried = 1u << 21,
+    kSkipRealWaitedFor = 1u << 22,
+    // The slot has an interpreter placeholder, and this draw's vertex shader
+    // was loaded inline, which the interpreter cannot read.
+    kSkipInterpreterPlaceholderInlineShader = 1u << 23,
+    // The stand-in pixel shader had nothing valid to bind for this draw.
+    kSkipStandInNoTexture = 1u << 24,
+    kSkipStandInVertexBindings = 1u << 25,
+    kSkipStandInNoSampler = 1u << 26,
+  };
+  // Counts the skipped draw and says why in the log, once for each pair of
+  // shaders and set of reasons. Adds what the slot itself says to `reasons`.
+  void NoteDrawSkipped(uint64_t vertex_shader_hash, uint64_t pixel_shader_hash,
+                       uint32_t reasons, const Pipeline* pipeline);
+  // Called once for each guest frame (at the swap): the budget of
+  // vulkan_placeholder_async_wait_ms is per frame.
+  void NoteFrameBoundary();
+  // Whether full-screen passes wait for their real pipeline instead of being
+  // drawn with a placeholder (vulkan_placeholder_wait_fullscreen_ms).
+  bool IsFullscreenRealPipelineWaited() const;
+
+  // shader_ahead: the command stream that is about to be executed draws with
+  // this pair of shaders (found by CommandProcessor's look ahead). Starts
+  // their translation, and with shader_ahead_speculate the pipelines the pair
+  // is most likely to be drawn with, on the creation threads.
+  void NoteShaderPairAhead(VulkanShader* vertex_shader,
+                           VulkanShader* pixel_shader,
+                           xenos::PrimitiveType guest_primitive_type);
 
   // True while this draw must be fed the ucode interpreter's inputs (full float
   // constants + ucode location). False once hot-swapped to the real VS.
@@ -522,6 +610,49 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     // Priority for async compilation (higher = compiled sooner).
     // Pipelines that write to visible render targets get higher priority.
     uint8_t priority = 0;
+
+    // hakuX-Boosted: boosted/notes/shader-ahead.md.
+    enum class Kind : uint8_t {
+      // The pipeline of the slot, with the translated guest shaders.
+      kReal,
+      // A placeholder for the slot, created away from the GPU command thread
+      // (vulkan_placeholder_async), with the three modules and layout below.
+      kPlaceholder,
+      // Only the translation of the shaders given (either may be null);
+      // `pipeline` is null.
+      kTranslate,
+    };
+    Kind kind = Kind::kReal;
+    // Dropped if another job has already taken the slot's real pipeline.
+    bool skip_if_claimed = false;
+    // Made on a prediction: taken from the speculative queue.
+    bool speculative = false;
+    VkShaderModule placeholder_fragment_shader = VK_NULL_HANDLE;
+    VkShaderModule placeholder_vertex_shader = VK_NULL_HANDLE;
+    const PipelineLayoutProvider* placeholder_layout = nullptr;
+  };
+
+  // hakuX-Boosted: priorities of the jobs this fork adds, above every real
+  // pipeline's (pipeline_util: 0 to 3). A placeholder is what a draw is
+  // waiting for now; a translation is short and lets a placeholder be made.
+  static constexpr uint8_t kPriorityPlaceholder = 255;
+  static constexpr uint8_t kPriorityWaitedFor = 254;
+  static constexpr uint8_t kPriorityTranslateForPlaceholder = 253;
+  static constexpr uint8_t kPriorityTranslateAhead = 4;
+
+  // hakuX-Boosted: which prediction made a speculative pipeline.
+  enum SpeculationRule : uint8_t {
+    // The pair seen ahead in the command stream, in the state of a pipeline
+    // that already has its vertex shader.
+    kRuleSameVertexShader,
+    // ...that already has its pixel shader.
+    kRuleSamePixelShader,
+    // ...in the state of the pipeline a draw asked for last.
+    kRuleNeighbour,
+    // A pair that was just drawn in one state, in the other states its
+    // shaders' other pairs have been drawn in.
+    kRuleSibling,
+    kRuleCount,
   };
 
   // Comparator for priority queue - higher priority first.
@@ -625,7 +756,58 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
       const PipelineCreationArguments& creation_arguments,
       VkShaderModule fragment_shader_override = VK_NULL_HANDLE,
       VkShaderModule vertex_shader_override = VK_NULL_HANDLE,
-      const PipelineLayoutProvider* layout_override = nullptr);
+      const PipelineLayoutProvider* layout_override = nullptr,
+      bool publish_if_empty = false);
+
+  // hakuX-Boosted: boosted/notes/shader-ahead.md.
+  // The modules and render pass a pipeline of this description is created
+  // with (what ConfigurePipeline looks up for a new slot), for a slot that
+  // already exists or is about to be made on a prediction. `pipeline` and
+  // `priority` are left for the caller. GPU command thread only.
+  bool GetCreationArguments(const PipelineDescription& description,
+                            VulkanShader::VulkanTranslation* vertex_shader,
+                            VulkanShader::VulkanTranslation* pixel_shader,
+                            PipelineCreationArguments& arguments_out);
+  // Makes the placeholder of a slot: the block that used to be inside
+  // ConfigurePipeline. `late` when the slot's real pipeline may already be
+  // on its way (the placeholder must then not replace it).
+  void MakePlaceholder(const PipelineCreationArguments& real_arguments,
+                       bool use_interpreter, bool late);
+  // What ConfigurePipeline does for a slot it found in the map: a speculative
+  // slot is taken over by the draw, a slot without a placeholder may get one
+  // late, a full-screen pass may wait for its real pipeline.
+  void OnPipelineReused(
+      std::pair<const PipelineDescription, Pipeline>& pipeline_pair,
+      VulkanShader::VulkanTranslation* vertex_shader,
+      VulkanShader::VulkanTranslation* pixel_shader, bool use_interpreter,
+      bool require_real);
+  // Waits, on the GPU command thread, for the slot's real pipeline.
+  void WaitForRealPipeline(
+      std::pair<const PipelineDescription, Pipeline>& pipeline_pair);
+  void QueueStorageWrites(const PipelineDescription& description,
+                          VulkanShader::VulkanTranslation* vertex_shader,
+                          VulkanShader::VulkanTranslation* pixel_shader);
+  void PushCreationJob(const PipelineCreationArguments& arguments);
+  uint8_t GetRealPipelinePriority(
+      const PipelineDescription& description,
+      const VulkanShader::VulkanTranslation* pixel_shader) const;
+  // The pixel shader module of an interpreter placeholder without a stand-in.
+  VkShaderModule GetInterpreterPlaceholderPixelShader(
+      const PipelineCreationArguments& creation_arguments, bool depth_only);
+
+  // Prediction (shader_ahead, shader_ahead_speculate).
+  bool IsAheadActive() const;
+  void NoteRealPipeline(
+      std::pair<const PipelineDescription, Pipeline>& pipeline_pair,
+      bool was_speculative);
+  bool BuildDescriptionFromTemplate(const PipelineDescription& state_template,
+                                    VulkanShader& vertex_shader,
+                                    VulkanShader& pixel_shader,
+                                    PipelineDescription& description_out);
+  bool SpeculatePipeline(const PipelineDescription& description,
+                         SpeculationRule rule);
+  void SpeculateSiblings(const PipelineDescription& description);
+  void LogStatsIfDue();
 
   // hakuX-Boosted: decides what stands in for the pixel shader of a new
   // placeholder pipeline (the draw thread only). Returns false, with the
@@ -808,6 +990,80 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // During startup loading, don't block on pipeline creation to allow game
   // boot.
   bool startup_loading_ = false;
+
+  // hakuX-Boosted: boosted/notes/shader-ahead.md. Everything below is the
+  // GPU command thread's alone unless it is atomic or said to be under
+  // creation_request_lock_.
+  // Speculative pipelines wait here, behind every job in creation_queue_, and
+  // at most shader_ahead_threads creation threads work on them at a time.
+  // Both under creation_request_lock_.
+  std::deque<PipelineCreationArguments> speculative_queue_;
+  size_t speculative_busy_ = 0;
+  // Speculative jobs queued or being compiled.
+  std::atomic<uint32_t> speculative_outstanding_{0};
+  std::atomic<uint64_t> speculative_compiled_{0};
+  std::atomic<uint64_t> speculative_compile_us_{0};
+  std::atomic<uint64_t> speculative_dropped_{0};
+  // Slots made on a prediction that no draw has used yet (speculative == 1).
+  std::vector<std::pair<const PipelineDescription, Pipeline>*>
+      speculative_unused_;
+  uint64_t speculative_made_[kRuleCount] = {};
+  uint64_t speculative_hits_[kRuleCount] = {};
+  uint64_t speculative_hits_ready_ = 0;
+  uint64_t speculative_hits_compiling_ = 0;
+  uint64_t speculative_hits_queued_ = 0;
+  uint64_t speculative_hits_written_off_ = 0;
+  uint64_t speculative_written_off_ = 0;
+  uint64_t speculative_refused_budget_ = 0;
+  bool speculative_stopped_logged_ = false;
+  // Pipelines a draw asked for that no prediction had made.
+  uint64_t ahead_misses_ = 0;
+  // Pairs told by the look ahead, by PairKey, with when (host uptime, ms).
+  std::unordered_map<uint64_t, uint64_t> ahead_pairs_;
+  uint64_t ahead_pairs_new_ = 0;
+  uint64_t ahead_shaders_new_ = 0;
+  uint64_t ahead_translations_queued_ = 0;
+  // At the first pipeline a draw asked for with a pair seen ahead: how long
+  // ahead it was seen.
+  uint64_t ahead_lead_count_ = 0;
+  uint64_t ahead_lead_total_ms_ = 0;
+  uint64_t ahead_lead_max_ms_ = 0;
+  // The pipelines draws asked for, by vertex and by pixel shader, newest
+  // last, and the pairs among them.
+  std::unordered_map<uint64_t, std::vector<const PipelineDescription*>>
+      descriptions_by_vertex_shader_;
+  std::unordered_map<uint64_t, std::vector<const PipelineDescription*>>
+      descriptions_by_pixel_shader_;
+  std::unordered_set<uint64_t> real_pairs_;
+  const PipelineDescription* last_real_description_ = nullptr;
+  static uint64_t PairKey(uint64_t vertex_shader_hash,
+                          uint64_t pixel_shader_hash) {
+    return vertex_shader_hash ^ ((pixel_shader_hash << 31) |
+                                 (pixel_shader_hash >> 33)) ^
+           (pixel_shader_hash * UINT64_C(0x9E3779B97F4A7C15));
+  }
+
+  // Placeholder coverage.
+  double placeholder_wait_left_ms_ = 0.0;
+  std::unordered_set<uint64_t> skip_reasons_logged_;
+  uint64_t skipped_draws_ = 0;
+  uint64_t skipped_untranslated_vs_ = 0;
+  uint64_t skipped_no_placeholder_ = 0;
+  uint64_t skipped_placeholder_compiling_ = 0;
+  uint64_t skipped_other_ = 0;
+  uint64_t placeholders_inline_ = 0;
+  uint64_t placeholders_async_ = 0;
+  uint64_t placeholders_late_ = 0;
+  uint64_t placeholder_waits_ = 0;
+  double placeholder_wait_ms_ = 0.0;
+  double placeholder_inline_worst_ms_ = 0.0;
+  uint64_t fullscreen_waits_ = 0;
+  double fullscreen_wait_ms_ = 0.0;
+  // Translations EnsureShadersTranslated had to do on the GPU command thread.
+  uint64_t draw_thread_translations_ = 0;
+  double draw_thread_translation_ms_ = 0.0;
+  uint64_t stats_logged_ms_ = 0;
+  uint64_t stats_logged_signature_ = 0;
 
   // Deferred destruction of pipelines.
   // Pipelines are only destroyed after the GPU submission that might reference

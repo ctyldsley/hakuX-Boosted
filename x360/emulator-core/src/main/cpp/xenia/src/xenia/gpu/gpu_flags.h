@@ -89,6 +89,11 @@ DECLARE_bool(texture_gradient_exp_bias);
 DECLARE_bool(spirv_debug_names);
 DECLARE_int32(spirv_optimize);
 
+// hakuX-Boosted: compiling ahead of the first draw, see the end of
+// gpu_flags.cc.
+DECLARE_bool(shader_ahead);
+DECLARE_bool(shader_ahead_speculate);
+
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1
 
 #endif  // XENIA_GPU_GPU_FLAGS_H_

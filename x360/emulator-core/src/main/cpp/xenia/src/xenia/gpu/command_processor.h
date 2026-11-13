@@ -533,6 +533,18 @@ class CommandProcessor {
     return nullptr;
   }
 
+  // hakuX-Boosted: the look ahead of shader_ahead
+  // (boosted/notes/shader-ahead.md). Before a stretch of the primary buffer
+  // is executed, it and the indirect buffers it calls are walked, packet
+  // header by packet header, for the shader loads and the draws in them.
+  // Nothing is executed and no register is written. Each time a draw is found
+  // with a pair of shaders other than the previous draw's, the backend is
+  // told, on the command processor's thread, before the first packet of the
+  // stretch is executed.
+  void LookAheadPrimaryBuffer(uint32_t read_index, uint32_t write_index);
+  virtual void OnShaderPairAhead(Shader* vertex_shader, Shader* pixel_shader,
+                                 xenos::PrimitiveType guest_primitive_type) {}
+
   virtual bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                          IndexBufferInfo* index_buffer_info,
                          bool major_mode_explicit) {
@@ -645,6 +657,26 @@ class CommandProcessor {
   // for reading it back from shared memory (the ucode interpreter placeholder).
   // 0 if unknown (loaded immediately, embedded in the command buffer).
   uint32_t active_vertex_shader_ucode_address_ = 0;
+
+  // hakuX-Boosted: state of the look ahead (shader_ahead).
+  void LookAheadRange(const uint8_t* base, uint32_t capacity_words,
+                      uint32_t start_word, uint32_t word_count,
+                      uint32_t depth);
+  Shader* LookAheadShader(xenos::ShaderType shader_type, uint32_t guest_address,
+                          uint32_t dword_count);
+  struct LookAheadShaderEntry {
+    Shader* shader;
+    // The first and the last dword of the microcode when it was hashed: a
+    // cheap check that the memory at the address still holds that shader.
+    uint32_t first_dword;
+    uint32_t last_dword;
+  };
+  std::unordered_map<uint64_t, LookAheadShaderEntry> look_ahead_shaders_;
+  Shader* look_ahead_vertex_shader_ = nullptr;
+  Shader* look_ahead_pixel_shader_ = nullptr;
+  Shader* look_ahead_told_vertex_shader_ = nullptr;
+  Shader* look_ahead_told_pixel_shader_ = nullptr;
+  uint32_t look_ahead_packets_left_ = 0;
 
   std::atomic<bool> paused_{false};
   std::unique_ptr<xe::threading::Event> pause_resume_event_;

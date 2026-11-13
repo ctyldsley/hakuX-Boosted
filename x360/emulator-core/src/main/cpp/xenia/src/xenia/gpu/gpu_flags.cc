@@ -332,3 +332,30 @@ DEFINE_int32(
     "code elimination, block merging, repeated instructions within a block\n"
     " 2 = SPIRV-Tools' full performance list (as spirv-opt -O)",
     "GPU");
+
+// hakuX-Boosted: compiling ahead of the first draw
+// (boosted/notes/shader-ahead.md). Read by CommandProcessor (the look ahead)
+// and by the Vulkan pipeline cache (what is done with what it finds); the
+// bounds of the speculation are with the pipeline cache's settings.
+DEFINE_bool(
+    shader_ahead, false,
+    "Look through each stretch of the guest's command stream before it is "
+    "executed for the shaders it loads and the pairs it draws with, and "
+    "start analysing and translating the ones not drawn with before on the "
+    "pipeline creation threads, so that this is done, or under way, when "
+    "the draw is reached. Logs one 'shader ahead:' line a second while "
+    "anything changes. Vulkan, host render target path.",
+    "GPU");
+DEFINE_bool(
+    shader_ahead_speculate, false,
+    "With shader_ahead and vulkan_async_skip_draws: also create, at the "
+    "lowest priority, the pipelines a pair of shaders is most likely to be "
+    "drawn with: for a pair seen ahead, in the states of the newest "
+    "pipelines that already have its vertex shader (or its pixel shader, or "
+    "of the last pipeline a draw asked for); and for a pair just drawn, in "
+    "the other states its shaders' other pairs were drawn in. A wrong guess "
+    "is a wasted compile, never a wrong picture. Bounded by "
+    "shader_ahead_max_outstanding, shader_ahead_max_unused and "
+    "shader_ahead_max_wasted; hits, misses and waste are on the "
+    "'shader ahead:' line.",
+    "GPU");
