@@ -132,6 +132,17 @@ class GuestScheduler {
   void NoteCriticalSectionWait(uint64_t wait_us, uint32_t section_address,
                                uint32_t caller_lr, XThread* thread);
 
+  // hakuX-Boosted: the missed wakes found by reading (boosted/notes/
+  // guest-scheduler.md), one counter each in the once-a-second line.
+  // A front waiter left a permit queue and the one behind it was poked.
+  void NoteQueueHandOn() {
+    stats_.queue_hand_ons.fetch_add(1, std::memory_order_relaxed);
+  }
+  // A parked wait was satisfied although its gate's epoch never moved: the
+  // object became takeable and no wake was sent. Logged by thread and
+  // handle, a budgeted number of times.
+  void NoteUnsignalledWake(XThread* thread);
+
   // Yields the running guest fiber back to its CPU's idle fiber. Returns (on
   // the calling fiber) once the dispatcher switches back into it.
   void YieldToScheduler();
@@ -143,7 +154,35 @@ class GuestScheduler {
   // NtYieldExecution, and preemption passes false to keep strict priority.
   // Returns true if another fiber ran on this CPU during the yield, so
   // NtYieldExecution can report NO_YIELD_PERFORMED like NT.
-  bool YieldCurrentThread(bool quantum_end, bool to_lower = true);
+  // hakuX-Boosted: |cause| says who asked, for the counters and for the
+  // cheaper paths behind the guest_scheduler_lean_yield and
+  // guest_scheduler_park_yield_spinners settings. The default is a zero
+  // delay (KeDelayExecutionThread, the caller in xthread.cc).
+  enum class YieldCause : uint8_t {
+    kZeroDelay = 0,  // KeDelayExecutionThread with no or a sub-ms interval
+    kNtYield,        // NtYieldExecution
+    kQuantumEnd,     // a JIT safepoint answering the preempt flag
+    kSpinSite,       // a spin-wait: a JIT backoff site or a kernel spin lock
+    kCount,
+  };
+  bool YieldCurrentThread(bool quantum_end, bool to_lower = true,
+                          YieldCause cause = YieldCause::kZeroDelay);
+
+  // hakuX-Boosted: behind guest_scheduler_apc_poke. Pokes the CPU |thread|
+  // is parked on so its alertable wait looks at its APC queue now. Returns
+  // false when the setting is off, and the caller does what it did before.
+  // Call after the APC is in the thread's queue.
+  bool WakeForApc(XThread* thread);
+  // True with guest_scheduler_apc_poke on, for a caller that has work to do
+  // before it can call WakeForApc.
+  static bool apc_poke_enabled();
+
+  // hakuX-Boosted: the two JIT hooks' part of
+  // guest_scheduler_park_poll_loops (see the comment on PollWatch in the
+  // .cc file). Called on the fiber, on its dispatch thread.
+  bool PollWatchAtSafepoint(XThread* self);
+  bool PollWatchAtBackoff(XThread* self);
+  void PollWatchArm(XThread* self);
 
   // Parks the running guest fiber on its CPU's blocked list and yields. Returns
   // once the dispatcher re-readies it so the wait can re-poll. A single-object
@@ -188,7 +227,9 @@ class GuestScheduler {
   // At least this often every blocked fiber re-polls regardless of the epoch
   // gate, so a missed epoch bump costs a latency blip, not a hang.
   static constexpr uint64_t kRepollBackstopMs = 64;
-  // hakuX-Boosted: how long a parked waiter gated on an object (or a set of
+  // hakuX-Boosted: now the default of the guest_scheduler_gate_recheck_ms
+  // setting, which is what RereadyBlocked reads (0 = no timed look).
+  // How long a parked waiter gated on an object (or a set of
   // them) can go before its gate's epoch is looked at again without a poke.
   // A signal's poke that does not reach the waiter's CPU was only made good
   // by the 64 ms backstop above: two frames of a 30 fps title, and long
@@ -258,6 +299,26 @@ class GuestScheduler {
     // waiter could outrank. Raised on block, recomputed by RereadyBlocked.
     // Guarded by lock_.
     int max_blocked_prio = -1;
+
+    // hakuX-Boosted: everything below is written only by this CPU's dispatch
+    // thread (the fibers it runs included). The pointers are compared, never
+    // followed.
+    // Yields that found nothing else to run and returned without a switch.
+    // Single writer, so a plain load and store; read by the counters and by
+    // the watchdog, which takes it with switch_seq as this CPU's progress.
+    std::atomic<uint64_t> empty_yields{0};
+    uint64_t empty_yields_reported = 0;  // ReportStatsIfDue only
+    // The run of empty yields in quick succession by one thread
+    // (guest_scheduler_park_yield_spinners).
+    XThread* streak_thread = nullptr;
+    uint64_t streak_seq = 0;         // switch_seq the run belongs to
+    uint64_t streak_start_tick = 0;  // 0 = not timed yet
+    uint64_t streak_check_tick = 0;  // the last look at the clock
+    uint32_t streak_calls = 0;
+    // The poll-loop watch (guest_scheduler_park_poll_loops).
+    XThread* poll_watch_thread = nullptr;
+    bool poll_watch_expects_backoff = false;
+    uint64_t poll_watch_start_tick = 0;  // 0 = no backoff site seen yet
   };
 
   // The dispatch thread a thread is pinned to by its guest current_cpu.
@@ -306,6 +367,22 @@ class GuestScheduler {
   }
   // Out-of-line so the yield fast path stays a single relaxed bool load.
   void ReportGlobalLockHazard();
+
+  // hakuX-Boosted: lock_ taken through this, so that with
+  // guest_scheduler_stats on the once-a-second line can say how long the
+  // dispatch threads waited for the one lock and how long they held it.
+  class TimedLock;
+  // An empty yield by |self| on |cpu|: keeps the run's age and, once the run
+  // is old enough, parks the fiber for about a millisecond. Returns true if
+  // it parked.
+  bool NoteEmptyYield(Cpu& cpu, XThread* self);
+  // Parks the running fiber as a timed sleep of about a millisecond that any
+  // ready fiber or poke on this CPU cuts short for the others.
+  void ParkSpinner(XThread* self);
+  // Ticks of the raw host counter (ticks_per_us_ applied in EnsureStarted).
+  uint64_t yield_park_after_ticks_ = 0;
+  uint64_t yield_gap_ticks_ = 0;
+  uint64_t poll_park_after_ticks_ = 0;
 
   KernelState* kernel_state_;
 
@@ -370,6 +447,14 @@ class GuestScheduler {
     std::atomic<uint64_t> repolls{0};        // RereadyBlocked passes
     std::atomic<uint64_t> rereadied{0};      // waiters actually re-readied
     std::atomic<uint64_t> backstop_rescues{0};  // wakes the backstop covered
+    // hakuX-Boosted: backstop_rescues counts those the 64 ms backstop made
+    // good, timed_look_rescues those the kGateRecheckMs look did.
+    std::atomic<uint64_t> timed_look_rescues{0};
+    // A signal landed between a waiter's failed poll and its park, seen by
+    // the compare under the lock (working as designed, not a miss).
+    std::atomic<uint64_t> park_catches{0};
+    std::atomic<uint64_t> queue_hand_ons{0};
+    std::atomic<uint64_t> unsignalled_wakes{0};
     std::atomic<uint64_t> idle_wakes{0};     // timed wakes of a parked CPU
     std::atomic<uint64_t> switches{0};       // fiber dispatches
     std::atomic<uint64_t> forced_preempts{0};  // IRQL defers escaped
@@ -377,6 +462,17 @@ class GuestScheduler {
     std::atomic<uint64_t> io_queue_ns{0};  // time queued before the worker ran
     std::atomic<uint64_t> io_run_ns{0};    // time inside the blocking call
     std::atomic<uint64_t> io_queue_max_ns{0};
+    // hakuX-Boosted: why fibers gave up their CPU. Each is a switch to the
+    // idle fiber, so these add up to about `switches` (a thread's first run
+    // and its exit are the difference).
+    std::atomic<uint64_t> blocks{0};  // parked in a wait or a sleep
+    std::atomic<uint64_t> leaves[size_t(YieldCause::kCount)] = {};
+    std::atomic<uint64_t> yield_parks{0};  // yield spinners parked
+    std::atomic<uint64_t> poll_parks{0};   // poll loops parked
+    std::atomic<uint64_t> apc_pokes{0};
+    std::atomic<uint64_t> lock_acquisitions{0};
+    std::atomic<uint64_t> lock_wait_ticks{0};
+    std::atomic<uint64_t> lock_held_ticks{0};
   };
   Stats stats_;
   // hakuX-Boosted: see NoteWakeLatency. Never reset, so a thread dump has

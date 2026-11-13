@@ -504,7 +504,10 @@ dword_result_t NtYieldExecution_entry() {
   if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread()) {
     // NT reports whether anything else ran. Guests fall back to an alertable
     // sleep on no-yield, which is where their pending APCs get pumped.
-    if (!kernel_state()->guest_scheduler()->YieldCurrentThread(true)) {
+    // hakuX-Boosted: named as the guest's own yield, for the scheduler's
+    // counters and its guest_scheduler_lean_yield path.
+    if (!kernel_state()->guest_scheduler()->YieldCurrentThread(
+            true, true, GuestScheduler::YieldCause::kNtYield)) {
       return X_STATUS_NO_YIELD_PERFORMED;
     }
   } else {
@@ -1495,7 +1498,9 @@ uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
   // its alertable poll re-runs.
   if (thread->thread()) {
     thread->thread()->QueueUserCallback([]() {});
-  } else {
+  } else if (!kernelstate->guest_scheduler()->WakeForApc(thread.get())) {
+    // hakuX-Boosted: WakeForApc pokes the one CPU the target is parked on
+    // (guest_scheduler_apc_poke); with the setting off, every CPU as before.
     kernelstate->guest_scheduler()->WakeAll();
   }
   return X_STATUS_SUCCESS;
@@ -1761,7 +1766,26 @@ uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
 dword_result_t KeInsertQueueApc_entry(pointer_t<XAPC> apc, lpvoid_t arg1,
                                       lpvoid_t arg2, dword_t priority_increment,
                                       const ppc_context_t& context) {
-  return xeKeInsertQueueApc(apc, arg1, arg2, priority_increment, context);
+  uint32_t result =
+      xeKeInsertQueueApc(apc, arg1, arg2, priority_increment, context);
+  // hakuX-Boosted: this export queued its APC without telling the scheduler;
+  // a parked alertable target found it on its next 1 ms look. With
+  // guest_scheduler_apc_poke those looks are gone, so the target's CPU is
+  // poked here (a no-op with the setting off). The thread object is found
+  // through the handle stashed in the KTHREAD's dispatch header, as
+  // XMutant does for a mutant's owner.
+  if (result && apc->apc_mode == 1 && apc->thread_ptr &&
+      GuestScheduler::enabled() && GuestScheduler::apc_poke_enabled()) {
+    auto* kthread = context->TranslateVirtual<X_KTHREAD*>(apc->thread_ptr);
+    if (kthread->header.wait_list.flink_ptr == kXObjSignature) {
+      auto target = context->kernel_state->object_table()->LookupObject<XThread>(
+          kthread->header.wait_list.blink_ptr);
+      if (target && !target->thread()) {
+        context->kernel_state->guest_scheduler()->WakeForApc(target.get());
+      }
+    }
+  }
+  return result;
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInsertQueueApc, kThreading, kImplemented);
 
