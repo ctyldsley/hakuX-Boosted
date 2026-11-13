@@ -12,7 +12,8 @@ Branch `claude/host-thread-state`, cut from
   `host_thread_state_verify`, for the first device run. The arm64 code of
   the readers read by eye (compiled here with the host's clang 18 for
   `aarch64`, not with the NDK): see "Why a read cannot be hoisted".
-- In progress: see "Builds" at the bottom for which commit is green.
+- Built green on Actions: run 58, commit `a1808c8` (see "Builds").
+- In progress: nothing.
 - Next (not mine to do, see "Left for the desktop session"): the
   scheduler's `t_current_cpu`, `base/mutex.cc`'s cached thread id, then
   the measurement on the phone.
@@ -343,6 +344,9 @@ in my row and were not changed. `kernel/guest_scheduler.*` was not touched.
 
 ## Builds
 
-- `795ac55` (first version): run 52,
-  https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43392622426
-  (result to be filled in).
+- **Green: run 58, commit `a1808c8`** (all the code),
+  https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43393536677.
+  The APK to test is this run's artifact. The commit after it changes
+  only this file.
+- Runs 52, 55 and 57 (`795ac55`, `5a76ac1`, `a8df349`) were cancelled by
+  the pushes that followed them, not failed.
