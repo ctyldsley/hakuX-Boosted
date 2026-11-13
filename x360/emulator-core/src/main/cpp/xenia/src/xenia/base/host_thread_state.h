@@ -58,8 +58,11 @@
 // the thread pointer is written here for arm64 only.
 #if defined(__ANDROID__) && defined(__aarch64__)
 #define XE_HOST_THREAD_STATE_SLOT 1
+// Never a call: the point is two instructions.
+#define XE_HOST_THREAD_STATE_INLINE __attribute__((always_inline)) inline
 #else
 #define XE_HOST_THREAD_STATE_SLOT 0
+#define XE_HOST_THREAD_STATE_INLINE inline
 #endif
 
 namespace xe {
@@ -128,11 +131,12 @@ HostThreadState* Register();
 #if XE_HOST_THREAD_STATE_SLOT
 // TLS_SLOT_APP of the calling host thread. Volatile, with the load inside:
 // see the top of the file. always_inline, so that no call is paid for it.
-__attribute__((always_inline)) inline HostThreadState* ReadSlot() {
+XE_HOST_THREAD_STATE_INLINE HostThreadState* ReadSlot() {
   HostThreadState* state;
-  __asm__ volatile("mrs %0, tpidr_el0\n\t"
-                   "ldr %0, [%0, #16]"
-                   : "=r"(state));
+  __asm__ volatile(
+      "mrs %0, tpidr_el0\n\t"
+      "ldr %0, [%0, #16]"
+      : "=r"(state));
   return state;
 }
 #endif  // XE_HOST_THREAD_STATE_SLOT
@@ -143,10 +147,7 @@ __attribute__((always_inline)) inline HostThreadState* ReadSlot() {
 // platform has no slot, or nothing was written anywhere yet, in which case
 // the thread_local still has its initial value). Otherwise never null: a host
 // thread that wrote nothing gets a state of initial values.
-#if XE_HOST_THREAD_STATE_SLOT
-__attribute__((always_inline))
-#endif
-inline const HostThreadState* HostThreadStateForRead() {
+XE_HOST_THREAD_STATE_INLINE const HostThreadState* HostThreadStateForRead() {
 #if XE_HOST_THREAD_STATE_SLOT
   using namespace host_thread_state_internal;
   if (mode.load(std::memory_order_relaxed) == kSlot) {
@@ -159,10 +160,7 @@ inline const HostThreadState* HostThreadStateForRead() {
 
 // For a writer. nullptr: write the thread_local. Otherwise this host thread's
 // own state, made on its first write.
-#if XE_HOST_THREAD_STATE_SLOT
-__attribute__((always_inline))
-#endif
-inline HostThreadState* HostThreadStateForWrite() {
+XE_HOST_THREAD_STATE_INLINE HostThreadState* HostThreadStateForWrite() {
 #if XE_HOST_THREAD_STATE_SLOT
   using namespace host_thread_state_internal;
   uint8_t current_mode = mode.load(std::memory_order_relaxed);
@@ -182,19 +180,19 @@ inline HostThreadState* HostThreadStateForWrite() {
 void HostThreadStateMismatch(const char* what, uint64_t state_value,
                              uint64_t thread_local_value);
 
-// Used by the readers: compares when this state asks for it.
-inline void HostThreadStateVerify(const HostThreadState* state,
-                                  const char* what, uint64_t state_value,
-                                  uint64_t thread_local_value) {
-  if (XE_UNLIKELY(state->verify.load(std::memory_order_relaxed) != 0) &&
-      state_value != thread_local_value) {
-    HostThreadStateMismatch(what, state_value, thread_local_value);
-  }
+// True with host_thread_state_verify: writers keep the thread_local as well,
+// readers compare it with what they read from the state. Readers must test
+// this before they touch the thread_local: reading it is the cost this file
+// exists to avoid.
+inline bool HostThreadStateVerifies(const HostThreadState* state) {
+  return XE_UNLIKELY(state->verify.load(std::memory_order_relaxed) != 0);
 }
 
-// True when a writer must keep the thread_local as well.
-inline bool HostThreadStateKeepsThreadLocal(const HostThreadState* state) {
-  return XE_UNLIKELY(state->verify.load(std::memory_order_relaxed) != 0);
+inline void HostThreadStateCheck(const char* what, uint64_t state_value,
+                                 uint64_t thread_local_value) {
+  if (state_value != thread_local_value) {
+    HostThreadStateMismatch(what, state_value, thread_local_value);
+  }
 }
 
 }  // namespace threading

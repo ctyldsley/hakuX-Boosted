@@ -29,9 +29,11 @@ XE_NOINLINE bool Thread::IsInThread() { return GetCurrentThread() != nullptr; }
 XE_NOINLINE Thread* Thread::GetCurrentThread() {
   if (const auto* state = xe::threading::HostThreadStateForRead()) {
     Thread* thread = state->cpu_thread;
-    xe::threading::HostThreadStateVerify(
-        state, "the current cpu::Thread", reinterpret_cast<uintptr_t>(thread),
-        reinterpret_cast<uintptr_t>(current_thread_));
+    if (xe::threading::HostThreadStateVerifies(state)) {
+      xe::threading::HostThreadStateCheck(
+          "the current cpu::Thread", reinterpret_cast<uintptr_t>(thread),
+          reinterpret_cast<uintptr_t>(current_thread_));
+    }
     return thread;
   }
   return current_thread_;
@@ -40,7 +42,7 @@ XE_NOINLINE Thread* Thread::GetCurrentThread() {
 XE_NOINLINE void Thread::SetCurrentThreadPointer(Thread* thread) {
   if (auto* state = xe::threading::HostThreadStateForWrite()) {
     state->cpu_thread = thread;
-    if (!xe::threading::HostThreadStateKeepsThreadLocal(state)) {
+    if (!xe::threading::HostThreadStateVerifies(state)) {
       return;
     }
   }

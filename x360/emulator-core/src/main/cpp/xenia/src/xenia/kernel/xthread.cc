@@ -132,9 +132,11 @@ namespace {
 inline XThread* LoadCurrentXThread() {
   if (const auto* state = xe::threading::HostThreadStateForRead()) {
     XThread* thread = state->xthread;
-    xe::threading::HostThreadStateVerify(
-        state, "the current XThread", reinterpret_cast<uintptr_t>(thread),
-        reinterpret_cast<uintptr_t>(current_xthread_tls_));
+    if (xe::threading::HostThreadStateVerifies(state)) {
+      xe::threading::HostThreadStateCheck(
+          "the current XThread", reinterpret_cast<uintptr_t>(thread),
+          reinterpret_cast<uintptr_t>(current_xthread_tls_));
+    }
     return thread;
   }
   return current_xthread_tls_;
@@ -143,7 +145,7 @@ inline XThread* LoadCurrentXThread() {
 inline void StoreCurrentXThread(XThread* thread) {
   if (auto* state = xe::threading::HostThreadStateForWrite()) {
     state->xthread = thread;
-    if (!xe::threading::HostThreadStateKeepsThreadLocal(state)) {
+    if (!xe::threading::HostThreadStateVerifies(state)) {
       return;
     }
   }

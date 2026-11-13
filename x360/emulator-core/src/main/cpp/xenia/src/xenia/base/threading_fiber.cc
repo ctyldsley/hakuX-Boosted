@@ -71,9 +71,11 @@ thread_local Fiber* current_fiber_ = nullptr;
 inline Fiber* LoadCurrentFiber() {
   if (const HostThreadState* state = HostThreadStateForRead()) {
     Fiber* fiber = state->fiber;
-    HostThreadStateVerify(state, "the current fiber",
-                          reinterpret_cast<uintptr_t>(fiber),
-                          reinterpret_cast<uintptr_t>(current_fiber_));
+    if (HostThreadStateVerifies(state)) {
+      HostThreadStateCheck("the current fiber",
+                           reinterpret_cast<uintptr_t>(fiber),
+                           reinterpret_cast<uintptr_t>(current_fiber_));
+    }
     return fiber;
   }
   return current_fiber_;
@@ -82,7 +84,7 @@ inline Fiber* LoadCurrentFiber() {
 inline void StoreCurrentFiber(Fiber* fiber) {
   if (HostThreadState* state = HostThreadStateForWrite()) {
     state->fiber = fiber;
-    if (!HostThreadStateKeepsThreadLocal(state)) {
+    if (!HostThreadStateVerifies(state)) {
       return;
     }
   }

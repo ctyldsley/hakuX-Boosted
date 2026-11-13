@@ -33,10 +33,12 @@ namespace {
 inline ThreadState* LoadBoundThreadState() {
   if (const auto* state = xe::threading::HostThreadStateForRead()) {
     ThreadState* thread_state = state->cpu_thread_state;
-    xe::threading::HostThreadStateVerify(
-        state, "the bound cpu::ThreadState",
-        reinterpret_cast<uintptr_t>(thread_state),
-        reinterpret_cast<uintptr_t>(thread_state_));
+    if (xe::threading::HostThreadStateVerifies(state)) {
+      xe::threading::HostThreadStateCheck(
+          "the bound cpu::ThreadState",
+          reinterpret_cast<uintptr_t>(thread_state),
+          reinterpret_cast<uintptr_t>(thread_state_));
+    }
     return thread_state;
   }
   return thread_state_;
@@ -45,7 +47,7 @@ inline ThreadState* LoadBoundThreadState() {
 inline void StoreBoundThreadState(ThreadState* thread_state) {
   if (auto* state = xe::threading::HostThreadStateForWrite()) {
     state->cpu_thread_state = thread_state;
-    if (!xe::threading::HostThreadStateKeepsThreadLocal(state)) {
+    if (!xe::threading::HostThreadStateVerifies(state)) {
       return;
     }
   }

@@ -32,8 +32,9 @@ thread_local uint32_t current_thread_id_ = UINT_MAX;
 XE_NOINLINE uint32_t current_thread_id() {
   if (const HostThreadState* state = HostThreadStateForRead()) {
     uint32_t id = state->thread_id;
-    HostThreadStateVerify(state, "the logging thread id", id,
-                          current_thread_id_);
+    if (HostThreadStateVerifies(state)) {
+      HostThreadStateCheck("the logging thread id", id, current_thread_id_);
+    }
     return id == UINT_MAX ? current_thread_system_id() : id;
   }
   return current_thread_id_ == UINT_MAX ? current_thread_system_id()
@@ -43,7 +44,7 @@ XE_NOINLINE uint32_t current_thread_id() {
 XE_NOINLINE void set_current_thread_id(uint32_t id) {
   if (HostThreadState* state = HostThreadStateForWrite()) {
     state->thread_id = id;
-    if (!HostThreadStateKeepsThreadLocal(state)) {
+    if (!HostThreadStateVerifies(state)) {
       return;
     }
   }

@@ -61,11 +61,12 @@ thread_local HostThreadState thread_state_storage_;
 std::atomic<uint32_t> registered_threads_{0};
 
 __attribute__((always_inline)) inline void WriteSlot(HostThreadState* state) {
-  __asm__ volatile("mrs x16, tpidr_el0\n\t"
-                   "str %0, [x16, #16]"
-                   :
-                   : "r"(state)
-                   : "x16", "memory");
+  __asm__ volatile(
+      "mrs x16, tpidr_el0\n\t"
+      "str %0, [x16, #16]"
+      :
+      : "r"(state)
+      : "x16", "memory");
 }
 
 #endif  // XE_HOST_THREAD_STATE_SLOT
