@@ -791,6 +791,9 @@ struct ThreadSet {
   pid_t dispatch[kDispatchCount] = {};
   pid_t gpu = 0;
   std::vector<pid_t> helpers;
+  // Every thread of the process, the above included. Not part of the
+  // comparison: it changes all the time.
+  std::vector<pid_t> all;
   int total = 0;
 
   bool operator==(const ThreadSet& other) const {
@@ -847,6 +850,7 @@ ThreadSet ScanThreads(const std::vector<std::string>& helper_names) {
     }
     name[strcspn(name, "\n")] = '\0';
     ++set.total;
+    set.all.push_back(tid);
     if (!strncmp(name, "Guest CPU ", 10) && name[10] >= '0' &&
         name[10] < '0' + kDispatchCount && name[11] == '\0') {
       dispatch[name[10] - '0'].Offer(tid);
@@ -1203,6 +1207,10 @@ class Worker {
           ++placed;
         }
         applied_[want.tid] = want.mask;
+        if (std::find(handed_out_.begin(), handed_out_.end(), want.mask) ==
+            handed_out_.end()) {
+          handed_out_.push_back(want.mask);
+        }
       } else if (applied_.erase(want.tid)) {
         SetAffinity(want.tid, everything);
         ++released;
@@ -1222,9 +1230,36 @@ class Worker {
       ++released;
       it = applied_.erase(it);
     }
-    if (placed || released) {
-      XELOGI("host perf: {} thread(s) given their cores, {} let go", placed,
-             released);
+    // A new thread takes its creator's mask with it. Whatever one of ours
+    // starts while it has a mask (the I/O thread a guest thread starts, say)
+    // would be held to that mask for good, and under policy 2 to a dispatch
+    // thread's own core. So any other thread found with exactly a mask that
+    // was handed out here is let go; a mask some other code chose is not
+    // touched.
+    int strays = 0;
+    if (!handed_out_.empty()) {
+      for (pid_t tid : threads_.all) {
+        uint64_t now = 0;
+        if (applied_.count(tid) || !GetAffinity(tid, &now) ||
+            now == allowed_) {
+          continue;
+        }
+        if (std::find(handed_out_.begin(), handed_out_.end(), now) !=
+            handed_out_.end()) {
+          SetAffinity(tid, everything);
+          ++strays;
+        }
+      }
+      if (applied_.empty()) {
+        // Nothing has a mask any more and the last look was just taken.
+        handed_out_.clear();
+      }
+    }
+    if (placed || released || strays) {
+      XELOGI(
+          "host perf: {} thread(s) given their cores, {} let go, {} that had "
+          "inherited a mask freed",
+          placed, released, strays);
     }
   }
 
@@ -1406,6 +1441,41 @@ class Worker {
               MaskToList(mask).c_str());
     }
     XELOGI("{}", text);
+
+    // Every other thread that is not at nice 0. A new thread takes its
+    // creator's nice value as well as its mask, so this shows what the guest's
+    // threads have passed on, and that the audio threads are where they
+    // should be.
+    text = "host perf: other threads not at nice 0:";
+    int listed = 0;
+    for (pid_t tid : threads_.all) {
+      if (tid == threads_.gpu ||
+          std::find(threads_.dispatch, threads_.dispatch + kDispatchCount,
+                    tid) != threads_.dispatch + kDispatchCount ||
+          std::binary_search(threads_.helpers.begin(), threads_.helpers.end(),
+                             tid)) {
+        continue;
+      }
+      const StatSample stat = ReadStat(tid);
+      if (!stat.valid || stat.nice == 0) {
+        continue;
+      }
+      if (++listed > 48) {
+        text += " ...";
+        break;
+      }
+      char path[64];
+      char name[32] = "?";
+      snprintf(path, sizeof(path), "/proc/self/task/%d/comm", int(tid));
+      if (ReadSmallFile(path, name, sizeof(name))) {
+        name[strcspn(name, "\n")] = '\0';
+      }
+      Appendf(text, " %s %d,", name, stat.nice);
+    }
+    if (!listed) {
+      text += " none";
+    }
+    XELOGI("{}", text);
   }
 
   // Takes the frame counters since the last tick; into the line when there
@@ -1536,6 +1606,7 @@ class Worker {
   int64_t rank_gathering_ns_[kDispatchCount] = {};
   int64_t rank_run_ns_[kDispatchCount] = {};
   std::map<pid_t, uint64_t> applied_;
+  std::vector<uint64_t> handed_out_;
   std::map<pid_t, int> refused_;
 
   bool hint_missing_logged_ = false;
