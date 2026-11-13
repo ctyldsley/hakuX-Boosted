@@ -16,6 +16,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/host_thread_state.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
@@ -222,7 +223,62 @@ static thread_local int t_current_cpu = -1;
 // index on both sides of the yield (YieldCurrentThread compares them) must
 // read the thread it is on now, not the TLS block the compiler found on entry
 // (kernel/xthread.cc, XThread::GetCurrentThread).
-XE_NOINLINE static int CurrentCpu() { return t_current_cpu; }
+// hakuX-Boosted: with host_thread_state_slot on, the index is read from the
+// host thread's state (base/host_thread_state.h: one mrs and two loads)
+// instead of through the dynamic TLS resolver, which this function was 2% of
+// the title's main thread for, on top of the resolver's own 8% (run 90's
+// profile). A host thread that never registered reads -1, as its thread_local
+// would say. The state's address is read by a volatile asm on each call, so
+// the rule above holds for it too.
+XE_NOINLINE static int CurrentCpu() {
+  if (const auto* state = xe::threading::HostThreadStateForRead()) {
+    const int cpu = state->scheduler_cpu;
+    if (xe::threading::HostThreadStateVerifies(state)) {
+      xe::threading::HostThreadStateCheck(
+          "the scheduler's CPU index", uint64_t(int64_t(cpu)),
+          uint64_t(int64_t(t_current_cpu)));
+    }
+    return cpu;
+  }
+  return t_current_cpu;
+}
+
+// Written once, by a dispatch thread as it starts. The thread_local is kept
+// as well: it is what the readers use with the setting off, and what the
+// verify mode compares with.
+static void SetCurrentCpu(int index) {
+  if (auto* state = xe::threading::HostThreadStateForWrite()) {
+    state->scheduler_cpu = index;
+  }
+  t_current_cpu = index;
+}
+
+// hakuX-Boosted: the fiber-backed guest thread that a JIT hook or a kernel
+// export is running on, given the PPC context it was handed. With
+// host_thread_state_slot on this is two loads from the context and no
+// thread-local lookup; otherwise (or with no context) it is
+// XThread::GetCurrentFiberThread(), as before. Guest code and kernel exports
+// run on their own thread's context, so the two agree; the verify mode
+// compares them on every call.
+static XThread* FiberThreadOf(void* raw_context) {
+  if (raw_context && xe::threading::HostThreadStateInUse()) {
+    XThread* thread = XThread::FromContext(
+        static_cast<const cpu::ppc::PPCContext*>(raw_context));
+    if (thread && !thread->fiber()) {
+      thread = nullptr;
+    }
+    if (const auto* state = xe::threading::HostThreadStateForRead()) {
+      if (xe::threading::HostThreadStateVerifies(state)) {
+        xe::threading::HostThreadStateCheck(
+            "the fiber thread found from its context",
+            reinterpret_cast<uintptr_t>(thread),
+            reinterpret_cast<uintptr_t>(XThread::GetCurrentFiberThread()));
+      }
+    }
+    return thread;
+  }
+  return XThread::GetCurrentFiberThread();
+}
 
 // Off a dispatch thread there is no CPU to index, so the caller must bail.
 static bool OnDispatchThread(const char* what) {
@@ -248,8 +304,9 @@ static constexpr uint32_t kLockPreemptDeferReport = 65536;
 
 // JIT safepoint handler. The cold path cleared the flag, so the deferred
 // cases re-set it to retry at the next safepoint.
-static void PreemptCurrentFiber(void* /*raw_context*/) {
-  XThread* self = XThread::GetCurrentFiberThread();
+static void PreemptCurrentFiber(void* raw_context) {
+  // hakuX-Boosted: from the context the safepoint passes (FiberThreadOf).
+  XThread* self = FiberThreadOf(raw_context);
   if (!self) {
     return;
   }
@@ -324,8 +381,9 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
 // behind the caller on this same thread, which only a yield can let run. A
 // plain voluntary yield, not a quantum end, so a preempted-at-head fiber
 // keeps its slice semantics.
-static void SpinBackoffYieldFiber(void* /*raw_context*/) {
-  XThread* self = XThread::GetCurrentFiberThread();
+static void SpinBackoffYieldFiber(void* raw_context) {
+  // hakuX-Boosted: the backoff site passes its context (a64_seq_memory.cc).
+  XThread* self = FiberThreadOf(raw_context);
   if (!self) {
     // Guest code on a non-fiber thread (interpreter, early init).
     for (uint32_t n = 0; n < 8; ++n) {
@@ -380,6 +438,10 @@ static double CalibrateTicksPerUs() {
     return 0.0;
   }
   return per_us;
+}
+
+XThread* GuestScheduler::FiberThreadOfContext(void* raw_context) {
+  return FiberThreadOf(raw_context);
 }
 
 GuestScheduler::GuestScheduler(KernelState* kernel_state)
@@ -1107,7 +1169,8 @@ void GuestScheduler::ExitIfTerminated() {
 }
 
 bool GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower,
-                                        YieldCause cause) {
+                                        YieldCause cause,
+                                        XThread* known_self) {
   if (!OnDispatchThread("YieldCurrentThread")) {
     return false;
   }
@@ -2581,7 +2644,7 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
 }
 
 void GuestScheduler::RunLoop(int cpu_index) {
-  t_current_cpu = cpu_index;
+  SetCurrentCpu(cpu_index);
   Cpu& cpu = cpus_[cpu_index];
   // Adopt this host thread's stack as this CPU's idle fiber.
   cpu.idle_fiber = xe::threading::Fiber::CreateFromThread();

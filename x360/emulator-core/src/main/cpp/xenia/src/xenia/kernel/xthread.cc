@@ -184,6 +184,18 @@ XE_NOINLINE XThread* XThread::GetCurrentFiberThread() {
   return (thread && thread->fiber_) ? thread : nullptr;
 }
 
+// hakuX-Boosted: the guest thread a context belongs to, with no thread-local
+// lookup: the context names its ThreadState and that names its owner. Null
+// for a context that no XThread made. This says whose context it is, not
+// which thread is executing: the two agree wherever guest code or a kernel
+// export runs on its own thread's context, which is every caller this has.
+XThread* XThread::FromContext(const cpu::ppc::PPCContext* context) {
+  if (!context || !context->thread_state) {
+    return nullptr;
+  }
+  return static_cast<XThread*>(context->thread_state->owner());
+}
+
 uint32_t XThread::GetCurrentThreadHandle() {
   XThread* thread = XThread::GetCurrentThread();
   return thread->handle();
@@ -459,6 +471,8 @@ X_STATUS XThread::Create() {
   // This is thread safe.
   thread_state_ = new cpu::ThreadState(kernel_state()->processor(), thread_id_,
                                        stack_base_, pcr_address_);
+  // hakuX-Boosted: see cpu::ThreadState::owner.
+  thread_state_->set_owner(this);
   XELOGD("XThread{:08X} ({:X}) Stack: {:08X}-{:08X}", handle(), thread_id_,
          stack_limit_, stack_base_);
 
@@ -1501,6 +1515,8 @@ object_ref<XThread> XThread::Restore(KernelState* kernel_state,
   thread->thread_state_ =
       new cpu::ThreadState(kernel_state->processor(), thread->thread_id_,
                            thread->stack_base_, thread->pcr_address_);
+  // hakuX-Boosted: see cpu::ThreadState::owner.
+  thread->thread_state_->set_owner(thread);
 
   if (state.is_running) {
     auto context = thread->thread_state_->context();

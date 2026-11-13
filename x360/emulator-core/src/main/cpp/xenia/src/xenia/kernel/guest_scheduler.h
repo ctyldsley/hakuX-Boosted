@@ -111,6 +111,12 @@ class GuestScheduler {
   // freeze the guest threads sharing it. The Fence must have one waiter.
   static void WaitOnFence(xe::threading::Fence& fence);
 
+  // hakuX-Boosted: the fiber-backed guest thread running on |raw_context| (a
+  // PPCContext), or null. XThread::GetCurrentFiberThread() without the
+  // thread-local lookup when host_thread_state_slot is on; the same call
+  // otherwise.
+  static XThread* FiberThreadOfContext(void* raw_context);
+
   // Counts a safepoint preemption forced through a deferring IRQL.
   void NoteForcedPreempt();
 
@@ -166,8 +172,11 @@ class GuestScheduler {
     kSpinSite,       // a spin-wait: a JIT backoff site or a kernel spin lock
     kCount,
   };
+  // |known_self|, when the caller has it, is the calling fiber's thread and
+  // saves the lookup.
   bool YieldCurrentThread(bool quantum_end, bool to_lower = true,
-                          YieldCause cause = YieldCause::kZeroDelay);
+                          YieldCause cause = YieldCause::kZeroDelay,
+                          XThread* known_self = nullptr);
 
   // hakuX-Boosted: behind guest_scheduler_apc_poke. Pokes the CPU |thread|
   // is parked on so its alertable wait looks at its APC queue now. Returns

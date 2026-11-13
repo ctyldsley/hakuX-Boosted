@@ -390,6 +390,10 @@ class XThread : public XObject, public cpu::Thread {
   // decide whether a blocking call yields cooperatively or blocks the host
   // thread.
   static XThread* GetCurrentFiberThread();
+  // hakuX-Boosted: the guest thread that owns |context| (two loads, no
+  // thread-local lookup), or null. See the definition for when that is the
+  // thread that is executing.
+  static XThread* FromContext(const cpu::ppc::PPCContext* context);
   static uint32_t GetCurrentThreadHandle();
   static uint32_t GetCurrentThreadId();
 

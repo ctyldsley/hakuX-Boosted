@@ -189,7 +189,7 @@ void RecordSpinEpisode(int64_t dur_ns, int64_t now_ns) {
 // cooperative scheduler - blocking a dispatch thread there can stall the
 // sibling fiber that releases the polled word (raw-jit-spin-path.md Blocker 2).
 // The sleep timeout guarantees forward progress, so no wake plumbing is needed.
-static void SpinBackoffParkThunk(void* /*ppc_context*/) {
+static void SpinBackoffParkThunk(void* ppc_context) {
   static constexpr uint32_t kSpinIters = 24;
   static constexpr int64_t kParkNs = 30000;  // 30us bounded park
   static constexpr int64_t kGapNs = 200000;  // >200us idle -> new episode
@@ -202,7 +202,9 @@ static void SpinBackoffParkThunk(void* /*ppc_context*/) {
     // which may be a fiber queued behind this one. Yield instead - ready-tail
     // requeue guarantees co-resident progress.
     if (auto* yield_handler = xe::cpu::backend::spin_backoff_yield_handler) {
-      yield_handler(nullptr);
+      // hakuX-Boosted: with the context, so the scheduler finds the guest
+      // thread from it instead of through a thread-local lookup.
+      yield_handler(ppc_context);
       return;
     }
     // Scheduler enabled but not started yet (early init), or a non-fiber

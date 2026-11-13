@@ -55,7 +55,18 @@ class ThreadState {
 
   FunctionTraceState& function_trace_state() { return function_trace_state_; }
 
+  // hakuX-Boosted: the guest thread object this context belongs to (a
+  // kernel::XThread; a void* here because cpu does not know the kernel), null
+  // for a context no guest thread owns. Set once, when the owner creates the
+  // state. It lets code that is handed a PPCContext (a JIT hook, a kernel
+  // export) find its guest thread from context->thread_state with two loads
+  // and no thread-local lookup at all (kernel::XThread::FromContext).
+  void* owner() const { return owner_; }
+  void set_owner(void* owner) { owner_ = owner; }
+
  private:
+  void* owner_ = nullptr;
+
   Processor* processor_;
   Memory* memory_;
   void* backend_data_;

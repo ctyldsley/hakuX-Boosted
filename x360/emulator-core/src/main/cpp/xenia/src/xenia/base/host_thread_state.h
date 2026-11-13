@@ -101,9 +101,10 @@ struct HostThreadState {
   // Set while this thread reports a mismatch (the report logs, and logging
   // reads the thread id through here).
   uint32_t in_mismatch_report = 0;
-  // Not used yet. Kept for kernel/guest_scheduler.cc, t_current_cpu: the
-  // logical CPU whose dispatch thread this is, -1 on any other thread
-  // (boosted/notes/host-thread-state.md has the change to make there).
+  // kernel/guest_scheduler.cc, t_current_cpu: the logical CPU whose dispatch
+  // thread this is, -1 on any other thread. Written once by the dispatch
+  // thread as it starts, read by CurrentCpu() on every yield, dispatch and
+  // safepoint.
   int32_t scheduler_cpu = -1;
 };
 
@@ -177,6 +178,20 @@ XE_HOST_THREAD_STATE_INLINE HostThreadState* HostThreadStateForWrite() {
   }
 #endif
   return nullptr;
+}
+
+// True once the mode is "the slot": host_thread_state_slot is on and in use.
+// The other lookups that avoid the thread-local resolver (the guest thread
+// found from its PPC context, kernel/guest_scheduler.cc) follow the same
+// switch, so that one setting moves all of them and the verify mode checks
+// all of them.
+XE_HOST_THREAD_STATE_INLINE bool HostThreadStateInUse() {
+#if XE_HOST_THREAD_STATE_SLOT
+  return host_thread_state_internal::mode.load(std::memory_order_relaxed) ==
+         host_thread_state_internal::kSlot;
+#else
+  return false;
+#endif
 }
 
 // With host_thread_state_verify: the value read from the state and the one in
