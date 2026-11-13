@@ -101,6 +101,10 @@ struct HostThreadState {
   // Set while this thread reports a mismatch (the report logs, and logging
   // reads the thread id through here).
   uint32_t in_mismatch_report = 0;
+  // Not used yet. Kept for kernel/guest_scheduler.cc, t_current_cpu: the
+  // logical CPU whose dispatch thread this is, -1 on any other thread
+  // (boosted/notes/host-thread-state.md has the change to make there).
+  int32_t scheduler_cpu = -1;
 };
 
 namespace host_thread_state_internal {
