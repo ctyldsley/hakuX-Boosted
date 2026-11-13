@@ -85,6 +85,10 @@ DECLARE_bool(use_fuzzy_alpha_epsilon);
 
 DECLARE_bool(texture_gradient_exp_bias);
 
+// hakuX-Boosted: slimming the translated SPIR-V, see the end of gpu_flags.cc.
+DECLARE_bool(spirv_debug_names);
+DECLARE_int32(spirv_optimize);
+
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1
 
 #endif  // XENIA_GPU_GPU_FLAGS_H_
