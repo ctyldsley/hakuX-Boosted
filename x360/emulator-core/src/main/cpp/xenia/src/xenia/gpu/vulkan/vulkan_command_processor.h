@@ -575,7 +575,11 @@ class VulkanCommandProcessor final : public CommandProcessor {
                       const VulkanShader* pixel_shader,
                       bool vertex_bindings_ready, bool pixel_bindings_ready,
                       bool interpreter_placeholder = false,
-                      bool placeholder_pixel_shader = false);
+                      bool placeholder_pixel_shader = false,
+                      // hakuX-Boosted: the one texture of a stand-in pixel
+                      // shader (its sampler is in current_samplers_pixel_).
+                      const VulkanShader::TextureBinding* stand_in_texture =
+                          nullptr);
   // Allocates a descriptor set and fills one or two VkWriteDescriptorSet
   // structure instances (for images and samplers).
   // The descriptor set layout must be the one for the given is_vertex,
@@ -1221,6 +1225,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // each call, capacity persists) to gather the reuse-input words for a single
   // XXH3 call without a per-draw allocation. GPU-command-thread-only.
   std::vector<uint64_t> texture_set_hash_scratch_;
+  // hakuX-Boosted: the pixel stage's texture list of a draw with a stand-in
+  // pixel shader (see UpdateBindings).
+  std::vector<VulkanShader::TextureBinding> stand_in_texture_bindings_;
   // Whether the descriptor sets currently bound to the command buffer - only
   // low bits for the descriptor set layouts that remained the same are kept
   // when changing the pipeline layout. May be out of sync with

@@ -72,6 +72,41 @@ class VulkanShader : public SpirvShader {
     sampler_binding_layout_user_uid_ = uid;
   }
 
+  // hakuX-Boosted: what a stand-in pixel shader (vulkan_placeholder_ps_mode,
+  // vulkan_pipeline_cache.cc) can know of a guest shader from its microcode
+  // alone, before any translation: for a pixel shader, the texture fetches
+  // whose coordinates come from an interpolator; for a vertex shader, the
+  // interpolators that are a copy of a vertex colour.
+  struct StandInTexture {
+    // Fetch constant [0-31].
+    uint8_t fetch_constant;
+    // The interpolator [0-15] the coordinates are read from.
+    uint8_t interpolator;
+    // Which component of the interpolator is U, V and W: 2 bits each, U in
+    // bits 0:1.
+    uint8_t swizzle;
+    // k1D, k2D or kCube (3D and stacked textures are not candidates).
+    xenos::FetchOpDimension dimension;
+    // The coordinates are in texels.
+    bool unnormalized;
+    // The fetch reads the interpolator itself. False if it reads a register
+    // computed from the interpolator by a per-component operation (a scale or
+    // an offset of the coordinates, which the stand-in leaves out).
+    bool direct;
+  };
+  struct StandInInfo {
+    static constexpr uint32_t kMaxTextures = 4;
+    // In program order, the fetches that read an interpolator directly first.
+    uint32_t texture_count = 0;
+    StandInTexture textures[kMaxTextures];
+    // Vertex shaders: bit per interpolator [0-15] written with a copy of a
+    // normalised 8-8-8-8 vertex attribute (possibly times a constant).
+    uint32_t color_interpolators = 0;
+  };
+  // One walk over the microcode the first time, then the stored result. Call
+  // from the draw thread only (not synchronised), after AnalyzeUcode.
+  const StandInInfo& GetStandInInfo();
+
  protected:
   Translation* CreateTranslationInstance(uint64_t modification) override;
 
@@ -81,6 +116,10 @@ class VulkanShader : public SpirvShader {
   std::atomic_flag binding_layout_user_uids_set_up_ = ATOMIC_FLAG_INIT;
   size_t texture_binding_layout_user_uid_ = 0;
   size_t sampler_binding_layout_user_uid_ = 0;
+
+  // hakuX-Boosted: see GetStandInInfo.
+  bool stand_in_info_valid_ = false;
+  StandInInfo stand_in_info_;
 };
 
 }  // namespace vulkan

@@ -145,6 +145,9 @@ DECLARE_bool(submit_on_primary_buffer_end);
 DECLARE_bool(vulkan_placeholder_pipelines);
 DECLARE_bool(vulkan_async_skip_draws);
 DECLARE_bool(vulkan_async_wait_fullscreen_draws);
+// hakuX-Boosted: the stand-in pixel shader, see vulkan_pipeline_cache.cc.
+DECLARE_int32(vulkan_placeholder_ps_mode);
+DECLARE_bool(vulkan_placeholder_interpreter_translated_vs);
 
 DEFINE_bool(
     vulkan_dynamic_rendering, true,
@@ -4008,7 +4011,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     use_interpreter =
         cvars::vulkan_placeholder_pipelines &&
         cvars::async_shader_vs_interpreter &&
-        !vertex_shader_translation->is_translated() &&
+        // hakuX-Boosted: optionally also for a vertex shader that is
+        // translated already (a new pipeline of a known vertex shader), whose
+        // placeholder would otherwise be compiled from the translated shader
+        // on this thread.
+        (!vertex_shader_translation->is_translated() ||
+         cvars::vulkan_placeholder_interpreter_translated_vs) &&
         active_vertex_shader_ucode_address_ != 0 &&
         device_properties.fullDrawIndexUint32 &&
         SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
@@ -4308,6 +4316,76 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return true;
   }
 
+  // hakuX-Boosted: a placeholder with a stand-in pixel shader
+  // (vulkan_placeholder_ps_mode). It was created with its own pipeline layout,
+  // with room for one texture and one sampler for the pixel stage, which this
+  // draw binds its descriptor sets with. Which texture it samples, and by
+  // which interpolator, is decided here for each draw from what the pixel
+  // shader's microcode says (VulkanShader::GetStandInInfo), and passed in the
+  // system constants.
+  const bool placeholder_bound =
+      current_pipeline != VK_NULL_HANDLE &&
+      current_pipeline ==
+          pipeline->placeholder_pipeline.load(std::memory_order_acquire);
+  VulkanPipelineCache::StandIn stand_in;
+  const VulkanPipelineCache::PipelineLayoutProvider* stand_in_layout = nullptr;
+  if (placeholder_bound) {
+    stand_in = VulkanPipelineCache::StandIn::Unpack(
+        pipeline->placeholder_stand_in.load(std::memory_order_acquire));
+    stand_in_layout =
+        pipeline->placeholder_pipeline_layout.load(std::memory_order_acquire);
+    if (!stand_in_layout || !pixel_shader) {
+      stand_in = VulkanPipelineCache::StandIn();
+      stand_in_layout = nullptr;
+    }
+  }
+  const bool stand_in_used =
+      stand_in.shader != VulkanPipelineCache::StandInPixelShader::kNone;
+  const bool stand_in_has_texture =
+      stand_in_used &&
+      stand_in.shader != VulkanPipelineCache::StandInPixelShader::kFlat;
+  const bool stand_in_interpreter =
+      stand_in_used &&
+      pipeline->uses_interpreter.load(std::memory_order_acquire);
+  // The texture fetches of the pixel shader the stand-in can use: of the kind
+  // its module samples, by an interpolator that reaches the pixel shader, and,
+  // with a translated vertex shader, by the one interpolator whose location
+  // is baked into the module.
+  const VulkanShader::StandInInfo* stand_in_info = nullptr;
+  uint32_t stand_in_candidates = 0;
+  uint32_t stand_in_texture_mask = 0;
+  if (stand_in_has_texture) {
+    stand_in_info = &pixel_shader->GetStandInInfo();
+    for (uint32_t i = 0; i < stand_in_info->texture_count; ++i) {
+      const VulkanShader::StandInTexture& texture = stand_in_info->textures[i];
+      if ((texture.dimension == xenos::FetchOpDimension::kCube) !=
+              (stand_in.shader ==
+               VulkanPipelineCache::StandInPixelShader::kCube) ||
+          !(interpolator_mask & (uint32_t(1) << texture.interpolator)) ||
+          (!stand_in_interpreter &&
+           texture.interpolator != stand_in.texcoord_interpolator)) {
+        continue;
+      }
+      stand_in_candidates |= uint32_t(1) << i;
+      stand_in_texture_mask |= uint32_t(1) << texture.fetch_constant;
+    }
+    if (!stand_in_candidates) {
+      // Should not happen (the pipeline was made for one of them): nothing
+      // valid to bind to the stand-in's texture, so no draw.
+      return true;
+    }
+  }
+  if (stand_in_used && !stand_in_interpreter && !stage_bindings_ready[0]) {
+    // The translated vertex shader of this placeholder samples textures, and
+    // this draw's snapshot of its bindings was taken before they were ready.
+    const auto* stand_in_pipeline_layout =
+        static_cast<const PipelineLayout*>(stand_in_layout);
+    if (stand_in_pipeline_layout->texture_count_vertex() ||
+        stand_in_pipeline_layout->sampler_count_vertex()) {
+      return true;
+    }
+  }
+
   // Push debug marker with Xbox 360 draw context for RenderDoc annotation.
   // Done early so texture loads appear nested under the draw that uses them.
   if (debug_markers_enabled_) {
@@ -4330,7 +4408,117 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       (pixel_shader != nullptr && stage_bindings_ready[1]
            ? pixel_shader->GetUsedTextureMaskAfterTranslation()
            : 0);
+  // hakuX-Boosted: and the textures the stand-in pixel shader may sample.
+  used_texture_mask |= stand_in_texture_mask;
   texture_cache_->RequestTextures(used_texture_mask);
+
+  // hakuX-Boosted: now that the textures are known, the stand-in's choice for
+  // this draw, as the word the shaders read (bits in
+  // shaders/placeholder_stand_in.glsli), and its texture and sampler.
+  uint32_t stand_in_word = 0;
+  VulkanShader::TextureBinding stand_in_texture_binding = {};
+  if (stand_in_used) {
+    if (stand_in_has_texture) {
+      // The first candidate that holds colour: a texture whose red, green or
+      // blue is signed or biased (TextureSign) is a normal map or other
+      // vector data, which would be worse to show than no texture.
+      const VulkanShader::StandInTexture* chosen = nullptr;
+      const VulkanShader::StandInTexture* first = nullptr;
+      uint8_t chosen_signs = 0;
+      for (uint32_t i = 0; i < stand_in_info->texture_count && !chosen; ++i) {
+        if (!(stand_in_candidates & (uint32_t(1) << i))) {
+          continue;
+        }
+        const VulkanShader::StandInTexture& texture =
+            stand_in_info->textures[i];
+        if (!first) {
+          first = &texture;
+        }
+        uint8_t signs =
+            texture_cache_->GetActiveTextureSwizzledSigns(texture.fetch_constant);
+        bool is_color = true;
+        for (uint32_t j = 0; j < 3; ++j) {
+          xenos::TextureSign sign =
+              xenos::TextureSign((signs >> (2 * j)) & 0b11);
+          is_color &= sign != xenos::TextureSign::kSigned &&
+                      sign != xenos::TextureSign::kUnsignedBiased;
+        }
+        if (is_color) {
+          chosen = &texture;
+          chosen_signs = signs;
+        }
+      }
+      // The layout has the texture and the sampler whether or not this draw
+      // samples them, so something valid is bound either way.
+      const VulkanShader::StandInTexture& bound = chosen ? *chosen : *first;
+      stand_in_texture_binding.fetch_constant = bound.fetch_constant;
+      stand_in_texture_binding.dimension =
+          stand_in.shader == VulkanPipelineCache::StandInPixelShader::kCube
+              ? xenos::FetchOpDimension::kCube
+              : xenos::FetchOpDimension::k2D;
+      stand_in_texture_binding.is_signed = 0;
+      VulkanShader::SamplerBinding stand_in_sampler_binding;
+      stand_in_sampler_binding.fetch_constant = bound.fetch_constant;
+      stand_in_sampler_binding.mag_filter = xenos::TextureFilter::kUseFetchConst;
+      stand_in_sampler_binding.min_filter = xenos::TextureFilter::kUseFetchConst;
+      stand_in_sampler_binding.mip_filter = xenos::TextureFilter::kUseFetchConst;
+      stand_in_sampler_binding.aniso_filter = xenos::AnisoFilter::kUseFetchConst;
+      VulkanTextureCache::SamplerParameters stand_in_sampler_parameters =
+          texture_cache_->GetSamplerParameters(stand_in_sampler_binding);
+      bool stand_in_sampler_overflowed;
+      VkSampler stand_in_sampler = texture_cache_->UseSampler(
+          stand_in_sampler_parameters, stand_in_sampler_overflowed);
+      if (stand_in_sampler == VK_NULL_HANDLE) {
+        // No sampler to be had in this submission: the draw waits for the
+        // real pipeline, as it would without the stand-in.
+        return true;
+      }
+      // The pixel stage's samplers of this draw are the stand-in's one. The
+      // cross-draw sampler cache must not take them for the pixel shader's.
+      current_samplers_pixel_.clear();
+      current_samplers_pixel_.emplace_back(stand_in_sampler_parameters,
+                                           stand_in_sampler);
+      current_samplers_shader_pixel_ = nullptr;
+      if (chosen) {
+        stand_in_word |= UINT32_C(0x100) | chosen->interpolator |
+                         (uint32_t(chosen->swizzle) << 10) |
+                         (chosen->unnormalized ? UINT32_C(0x10000) : 0) |
+                         (uint32_t(chosen->fetch_constant) << 18);
+        if (xenos::TextureSign(chosen_signs & 0b11) ==
+            xenos::TextureSign::kGamma) {
+          stand_in_word |= UINT32_C(0x800000);
+        }
+      }
+    }
+    if (stand_in.color_interpolator !=
+        VulkanPipelineCache::StandIn::kNoInterpolator) {
+      stand_in_word |= UINT32_C(0x200) | (stand_in.color_interpolator << 4);
+    }
+    if (cvars::vulkan_placeholder_ps_mode >= 2) {
+      stand_in_word |= UINT32_C(0x20000);
+    }
+  }
+  if (cvars::shader_profiling && placeholder_bound) {
+    // Once for each placeholder, at its first draw; the count is logged when
+    // the real pipeline replaces it (VulkanPipelineCache).
+    if (!pipeline->placeholder_draws.fetch_add(1, std::memory_order_relaxed)) {
+      XELOGI(
+          "shader_profiling: first draw with a placeholder: VS {:016X}, PS "
+          "{:016X}, {} vertex shader, {} pixel shader, stand-in word "
+          "{:08X} (texture fetch constant {}, by interpolator {}, vertex "
+          "colour interpolator {})",
+          vertex_shader->ucode_data_hash(),
+          pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+          pipeline->uses_interpreter.load(std::memory_order_acquire)
+              ? "interpreter"
+              : "translated",
+          VulkanPipelineCache::GetStandInPixelShaderName(stand_in.shader),
+          stand_in_word,
+          (stand_in_word & 0x100) ? int((stand_in_word >> 18) & 31) : -1,
+          (stand_in_word & 0x100) ? int(stand_in_word & 15) : -1,
+          (stand_in_word & 0x200) ? int((stand_in_word >> 4) & 15) : -1);
+    }
+  }
 
   // Update the graphics pipeline, and if the new graphics pipeline has a
   // different layout, invalidate incompatible descriptor sets before updating
@@ -4407,8 +4595,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     current_guest_graphics_pipeline_handle_ = current_pipeline;
     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
   }
+  // hakuX-Boosted: a stand-in placeholder was created with its own layout.
   auto pipeline_layout = static_cast<const PipelineLayout*>(
-      pipeline->pipeline_layout.load(std::memory_order_acquire));
+      stand_in_layout
+          ? stand_in_layout
+          : pipeline->pipeline_layout.load(std::memory_order_acquire));
   if (current_guest_graphics_pipeline_layout_ != pipeline_layout) {
     if (current_guest_graphics_pipeline_layout_) {
       // Keep descriptor set layouts for which the new pipeline layout is
@@ -4580,10 +4771,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           ucode_address,
           uint32_t(vertex_shader->ucode_dword_count()) * sizeof(uint32_t));
     }
+    // hakuX-Boosted: the stand-in's word goes in the padding after the
+    // interpreter's two (std140 uvec4 [34].z), which nothing else reads: no
+    // field is added to the system constants.
     if (system_constants_.interpreter_ucode_base_dwords != ucode_base_dwords ||
-        system_constants_.interpreter_cf_instr_count != cf_instr_count) {
+        system_constants_.interpreter_cf_instr_count != cf_instr_count ||
+        system_constants_.texture_integer_scale_pad[0] != stand_in_word) {
       system_constants_.interpreter_ucode_base_dwords = ucode_base_dwords;
       system_constants_.interpreter_cf_instr_count = cf_instr_count;
+      system_constants_.texture_integer_scale_pad[0] = stand_in_word;
       current_constant_buffers_up_to_date_ &=
           ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferSystem);
     }
@@ -4631,7 +4827,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // the new layout.
   if (!UpdateBindings(vertex_shader, pixel_shader, stage_bindings_ready[0],
                       stage_bindings_ready[1], interpreter_placeholder,
-                      placeholder_pixel_shader)) {
+                      placeholder_pixel_shader,
+                      stand_in_has_texture ? &stand_in_texture_binding
+                                           : nullptr)) {
     return false;
   }
 
@@ -7797,7 +7995,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                             bool vertex_bindings_ready,
                                             bool pixel_bindings_ready,
                                             bool interpreter_placeholder,
-                                            bool placeholder_pixel_shader) {
+                                            bool placeholder_pixel_shader,
+                                            const VulkanShader::TextureBinding*
+                                                stand_in_texture) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -8037,8 +8237,17 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   // The no-op placeholder PS never samples; the interpreter VS never samples.
   // (Both flags stay false when vulkan_placeholder_pipelines is off.)
   if (placeholder_pixel_shader) {
-    sampler_count_pixel = 0;
-    texture_count_pixel = 0;
+    if (stand_in_texture) {
+      // hakuX-Boosted: a stand-in pixel shader samples one texture with one
+      // sampler, which the caller chose and put in current_samplers_pixel_.
+      stand_in_texture_bindings_.assign(1, *stand_in_texture);
+      textures_pixel = &stand_in_texture_bindings_;
+      texture_count_pixel = 1;
+      sampler_count_pixel = 1;
+    } else {
+      sampler_count_pixel = 0;
+      texture_count_pixel = 0;
+    }
   }
   if (interpreter_placeholder) {
     sampler_count_vertex = 0;
@@ -8202,6 +8411,13 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     current_graphics_descriptor_set_values_up_to_date_ &=
         ~((UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex) |
           (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
+  }
+
+  // hakuX-Boosted: upstream's reuse gate goes by the guest shader, which a
+  // stand-in's set and the real set have in common: always write a stand-in's.
+  if (stand_in_texture && cvars::vulkan_texture_descriptor_reuse_edge) {
+    current_graphics_descriptor_set_values_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
   }
 
   // Make sure new descriptor sets are bound to the command buffer.
@@ -8527,7 +8743,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     // Dual write-back (see the vertex stage above for the switch-safety
     // rationale): always refresh edge's snapshot, then keep the hash state
     // either correct-and-valid (hash mode) or marked invalid (edge mode).
-    current_textures_pixel_shader_ = pixel_shader;
+    // hakuX-Boosted: a stand-in's set is not the pixel shader's.
+    current_textures_pixel_shader_ = stand_in_texture ? nullptr : pixel_shader;
     current_written_samplers_pixel_ = current_samplers_pixel_;
     if (cvars::vulkan_texture_descriptor_reuse_edge) {
       current_texture_descriptor_set_hash_valid_pixel_ = false;

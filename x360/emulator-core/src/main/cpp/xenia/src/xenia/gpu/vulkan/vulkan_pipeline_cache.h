@@ -87,6 +87,47 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     VkColorComponentFlags color_write_mask[xenos::kMaxColorRenderTargets];
   };
 
+  // hakuX-Boosted: the stand-in pixel shader of a placeholder pipeline
+  // (vulkan_placeholder_ps_mode), which draws an approximation of the guest
+  // pixel shader instead of nothing while the real pipeline compiles. See
+  // shaders/placeholder_stand_in.glsli for what it draws.
+  enum class StandInPixelShader : uint32_t {
+    // The no-op placeholder pixel shader (no stand-in).
+    kNone,
+    // The vertex colour or a mid grey.
+    kFlat,
+    // A 1D or 2D texture, times the vertex colour.
+    k2D,
+    // A cube texture, times the vertex colour.
+    kCube,
+  };
+  struct StandIn {
+    static constexpr uint32_t kNoInterpolator = 0xFF;
+    StandInPixelShader shader = StandInPixelShader::kNone;
+    // The interpolator the texture coordinate is read from when the placeholder
+    // runs the translated guest vertex shader (the input location is baked in
+    // the pixel shader module). kNoInterpolator with the interpreter vertex
+    // shader, which is told for each draw which interpolator to output, and
+    // when there is no texture.
+    uint32_t texcoord_interpolator = kNoInterpolator;
+    // The interpolator carrying the vertex colour, kNoInterpolator if none.
+    uint32_t color_interpolator = kNoInterpolator;
+
+    uint32_t Pack() const {
+      return uint32_t(shader) | (texcoord_interpolator << 8) |
+             (color_interpolator << 16);
+    }
+    static StandIn Unpack(uint32_t packed) {
+      StandIn stand_in;
+      stand_in.shader = StandInPixelShader(packed & 0xFF);
+      stand_in.texcoord_interpolator = (packed >> 8) & 0xFF;
+      stand_in.color_interpolator = (packed >> 16) & 0xFF;
+      return stand_in;
+    }
+  };
+
+  static const char* GetStandInPixelShaderName(StandInPixelShader shader);
+
   struct Pipeline {
     // VK_NULL_HANDLE while asynchronous creation is pending (or after it
     // failed). The slot address is STABLE for the cache's lifetime
@@ -133,6 +174,21 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     // unlike the separate is_placeholder flag which is cleared a few
     // instructions after the real pipeline is swapped in.
     std::atomic<VkPipeline> placeholder_pipeline{VK_NULL_HANDLE};
+    // hakuX-Boosted: the stand-in pixel shader of the placeholder, as
+    // StandIn::Pack (0 if the placeholder has the no-op pixel shader), and the
+    // layout the placeholder was created with, which has room for the
+    // stand-in's one texture and one sampler and so is neither the minimal
+    // layout nor the real one in pipeline_layout. Both are written once, before
+    // the placeholder handle is published, and a draw that binds the
+    // placeholder binds its descriptor sets with this layout.
+    std::atomic<uint32_t> placeholder_stand_in{0};
+    std::atomic<const PipelineLayoutProvider*> placeholder_pipeline_layout{
+        nullptr};
+    // hakuX-Boosted: for the shader_profiling log, when the placeholder was
+    // made (written before the real pipeline's creation is queued) and how
+    // many draws were recorded with it.
+    uint64_t placeholder_created_ms = 0;
+    std::atomic<uint32_t> placeholder_draws{0};
 
     Pipeline(const PipelineLayoutProvider* pipeline_layout_provider)
         : pipeline_layout(pipeline_layout_provider), dynamic_state{} {}
@@ -149,7 +205,14 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
           uses_interpreter(
               other.uses_interpreter.load(std::memory_order_acquire)),
           placeholder_pipeline(
-              other.placeholder_pipeline.load(std::memory_order_acquire)) {}
+              other.placeholder_pipeline.load(std::memory_order_acquire)),
+          placeholder_stand_in(
+              other.placeholder_stand_in.load(std::memory_order_acquire)),
+          placeholder_pipeline_layout(other.placeholder_pipeline_layout.load(
+              std::memory_order_acquire)),
+          placeholder_created_ms(other.placeholder_created_ms),
+          placeholder_draws(
+              other.placeholder_draws.load(std::memory_order_acquire)) {}
 
     // Move constructor
     Pipeline(Pipeline&& other) noexcept
@@ -163,7 +226,14 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
           uses_interpreter(
               other.uses_interpreter.load(std::memory_order_acquire)),
           placeholder_pipeline(
-              other.placeholder_pipeline.load(std::memory_order_acquire)) {}
+              other.placeholder_pipeline.load(std::memory_order_acquire)),
+          placeholder_stand_in(
+              other.placeholder_stand_in.load(std::memory_order_acquire)),
+          placeholder_pipeline_layout(other.placeholder_pipeline_layout.load(
+              std::memory_order_acquire)),
+          placeholder_created_ms(other.placeholder_created_ms),
+          placeholder_draws(
+              other.placeholder_draws.load(std::memory_order_acquire)) {}
 
     // Deleted copy assignment to prevent accidental copying
     Pipeline& operator=(const Pipeline&) = delete;
@@ -544,10 +614,34 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // vertex_shader_override, if not VK_NULL_HANDLE, is used instead of the
   // translated vertex shader module (for the ucode interpreter placeholder,
   // whose guest VS is intentionally not translated yet).
+  // hakuX-Boosted: layout_override, if not null, is the layout to create the
+  // pipeline with instead of the slot's (a placeholder with a stand-in pixel
+  // shader, whose layout is its own).
   bool EnsurePipelineCreated(
       const PipelineCreationArguments& creation_arguments,
       VkShaderModule fragment_shader_override = VK_NULL_HANDLE,
-      VkShaderModule vertex_shader_override = VK_NULL_HANDLE);
+      VkShaderModule vertex_shader_override = VK_NULL_HANDLE,
+      const PipelineLayoutProvider* layout_override = nullptr);
+
+  // hakuX-Boosted: decides what stands in for the pixel shader of a new
+  // placeholder pipeline (the draw thread only). Returns false, with the
+  // outputs untouched, when the placeholder gets the no-op pixel shader as
+  // before: vulkan_placeholder_ps_mode is 0, the render target path is the
+  // fragment shader interlock one, or the pixel shader writes no colour.
+  // Otherwise fills what the stand-in is, its pixel shader module and the
+  // pipeline layout to create the placeholder with.
+  bool GetStandIn(VulkanShader::VulkanTranslation* vertex_shader,
+                  VulkanShader::VulkanTranslation* pixel_shader,
+                  bool use_interpreter, StandIn& stand_in_out,
+                  VkShaderModule& pixel_shader_module_out,
+                  const PipelineLayoutProvider*& pipeline_layout_out);
+  // The stand-in pixel shader module with its texture coordinate and colour
+  // inputs at the given locations (0 and 1 are the modules as compiled, which
+  // is what the interpreter vertex shader outputs). VK_NULL_HANDLE on failure.
+  VkShaderModule GetStandInPixelShader(StandInPixelShader shader,
+                                       bool has_color,
+                                       uint32_t texcoord_location,
+                                       uint32_t color_location);
 
   // Creates a placeholder pipeline using the placeholder pixel shader.
   // Used for pipeline hot-swap to reduce stutter.
@@ -642,6 +736,15 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // Flat grey debug pixel shader for interpreter placeholders, so the interim
   // geometry is visible (host-render-target path only).
   VkShaderModule placeholder_color_pixel_shader_ = VK_NULL_HANDLE;
+
+  // hakuX-Boosted: the interpreter vertex shader that also outputs the two
+  // interpolators the stand-in pixel shaders read, and those pixel shaders:
+  // [StandInPixelShader - 1][has a colour input], as compiled (inputs at
+  // locations 0 and 1), then copies with the inputs at other locations, by
+  // GetStandInPixelShader's key (the draw thread only).
+  VkShaderModule ucode_interpreter_stand_in_vs_ = VK_NULL_HANDLE;
+  VkShaderModule stand_in_pixel_shaders_[3][2] = {};
+  std::unordered_map<uint32_t, VkShaderModule> stand_in_pixel_shaders_moved_;
 
   // Tessellation shaders.
   // Vertex shaders for tessellation - pass indices/factors to TCS.
