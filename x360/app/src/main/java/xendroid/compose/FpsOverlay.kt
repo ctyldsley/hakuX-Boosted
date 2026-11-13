@@ -30,6 +30,7 @@ import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.roundToInt
 import xendroid.compose.core.EmulatorSession
+import xendroid.compose.ui.screenSafePadding
 
 /**
  * Small, draggable FPS / frame-time readout drawn over the Vulkan SurfaceView. Shows a RenderDoc-
@@ -53,6 +54,7 @@ fun FpsOverlay(
     val prefs = remember { context.getSharedPreferences("fps_overlay", Context.MODE_PRIVATE) }
     var offset by remember { mutableStateOf(Offset(prefs.getFloat("x", 0f), prefs.getFloat("y", 0f))) }
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    var textSize by remember { mutableStateOf(IntSize.Zero) }
     var fps by remember { mutableStateOf(0.0) }
     var frameMs by remember { mutableStateOf(0.0) }
 
@@ -66,14 +68,25 @@ fun FpsOverlay(
         }
     }
 
-    Box(modifier.fillMaxSize().onSizeChanged { boxSize = it }) {
+    // hakuX-Boosted: the readout's area is the window less what the screen cuts off (the
+    // display cutout, on either side in landscape; the rounded corners; the system bars
+    // while they show: ui/SafeArea.kt). Its place is an offset from that area's corner, so
+    // the default, the top left, is whole on screen, and a place stored before this, or
+    // dragged to with the phone held the other way up, is brought back inside it.
+    Box(modifier.fillMaxSize().screenSafePadding().onSizeChanged { boxSize = it }) {
         Text(
             text = String.format(Locale.US, "FPS %.0f  ·  %.1f ms", fps, frameMs),
             color = Color.White.copy(alpha = 0.7f),       // soft, more transparent than the old yellow
             fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
             modifier = Modifier
-                .offset { IntOffset(offset.x.roundToInt(), offset.y.roundToInt()) }
+                .offset {
+                    IntOffset(
+                        offset.x.roundToInt().coerceIn(0, maxOf(0, boxSize.width - textSize.width)),
+                        offset.y.roundToInt().coerceIn(0, maxOf(0, boxSize.height - textSize.height)),
+                    )
+                }
+                .onSizeChanged { textSize = it }
                 .background(Color.Black.copy(alpha = 0.28f), RoundedCornerShape(4.dp))
                 .padding(horizontal = 5.dp, vertical = 1.dp)
                 .pointerInput(boxSize) {

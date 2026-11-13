@@ -2,6 +2,8 @@
   <!-- The app's green (ui/theme Theme.kt's primary, light and dark) for the
        framework's widgets: the in-game dialogs' buttons, check boxes and
        spinners, the clock's pickers. Without it they are Material's teal. -->
-  <color name="hakux_green">#FF2E7D32</color>
-  <color name="hakux_green_dark">#FF81C784</color>
+  <!-- hakuX-Boosted: the shared look's accent (x360/app/.../ui/theme/HostTheme.kt);
+       upstream: #FF2E7D32 and #FF81C784. -->
+  <color name="hakux_green">#FF1F8A3B</color>
+  <color name="hakux_green_dark">#FF54D66A</color>
 </resources>
