@@ -774,6 +774,24 @@ int main(int argc, char** argv) {
       }
     }
   }
+  // The failure path: a module the optimiser has to refuse (its last
+  // instruction claims more words than there are) must come back exactly as
+  // it went in, float controls extension included.
+  {
+    std::vector<uint8_t> bytes =
+        Translate(tests.front(), Config{"", false, 0}, options, nullptr);
+    std::vector<uint32_t> broken(bytes.size() / sizeof(uint32_t));
+    std::memcpy(broken.data(), bytes.data(), bytes.size());
+    broken[broken.size() - 1] = (uint32_t(100) << 16) | 253;  // OpReturn
+    std::vector<uint32_t> before = broken;
+    xe::gpu::SpirvOptimizeResult result = xe::gpu::OptimizeTranslatedSpirv(
+        broken, 1, options.spirv_version);
+    bool untouched = result.ran && !result.succeeded && broken == before;
+    std::printf("\na module the optimiser refuses is left as it was: %s\n",
+                untouched ? "yes" : "NO");
+    preserved = preserved && untouched;
+  }
+
   std::printf(
       "\nbindings, interface variables, execution modes, capabilities and "
       "NoContraction in every optimised module: %s\n",
