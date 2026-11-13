@@ -11,7 +11,9 @@
 
 #include "xenia/gpu/spirv_shader_translator_optimize.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <string>
 #include <utility>
 
@@ -53,15 +55,73 @@ spv_target_env GetTargetEnv(unsigned int spirv_version) {
   return SPV_ENV_VULKAN_1_0;
 }
 
+// SPIRV-Tools' dead code elimination and three of its local variable passes
+// (among them the access chain conversion used below) do nothing at all on a
+// module that uses an extension outside their own lists, and
+// SPV_KHR_float_controls is not in those lists. The translator declares it for
+// SPIR-V below 1.4 whenever the device has a float controls feature, which is
+// the app's configuration on Turnip. The extension only allows the float
+// controls execution modes and capabilities, which none of those passes look
+// at, so its OpExtension is taken out for the optimiser and put back
+// afterwards. The capabilities and execution modes stay in throughout, and the
+// capabilities are what SPIRV-Tools checks before it folds floating point.
+constexpr uint32_t kSpirvOpExtension = 10;
+constexpr uint32_t kSpirvOpCapability = 17;
+constexpr char kFloatControlsExtension[] = "SPV_KHR_float_controls";
+
+// Returns the words of the removed instruction, empty if it was not there.
+std::vector<uint32_t> TakeFloatControlsExtension(
+    std::vector<uint32_t>& module) {
+  std::vector<uint32_t> taken;
+  // After the five header words: capabilities, then extensions.
+  size_t i = 5;
+  while (i < module.size()) {
+    uint32_t opcode = module[i] & 0xFFFF;
+    size_t length = module[i] >> 16;
+    if (!length || i + length > module.size()) {
+      break;
+    }
+    if (opcode == kSpirvOpExtension && taken.empty() &&
+        (length - 1) * sizeof(uint32_t) >= sizeof(kFloatControlsExtension) &&
+        !std::memcmp(&module[i + 1], kFloatControlsExtension,
+                     sizeof(kFloatControlsExtension))) {
+      taken.assign(module.begin() + i, module.begin() + i + length);
+      module.erase(module.begin() + i, module.begin() + i + length);
+      continue;
+    }
+    if (opcode != kSpirvOpCapability && opcode != kSpirvOpExtension) {
+      break;
+    }
+    i += length;
+  }
+  return taken;
+}
+
+void RestoreExtension(std::vector<uint32_t>& module,
+                      const std::vector<uint32_t>& taken) {
+  if (taken.empty()) {
+    return;
+  }
+  // Extensions follow the capabilities.
+  size_t i = 5;
+  while (i < module.size() && (module[i] & 0xFFFF) == kSpirvOpCapability &&
+         (module[i] >> 16) && i + (module[i] >> 16) <= module.size()) {
+    i += module[i] >> 16;
+  }
+  module.insert(module.begin() + std::min(i, module.size()), taken.begin(),
+                taken.end());
+}
+
 // The short list. Each pass is here for a reason measured on the translator's
 // own output (boosted/notes/spirv-slimming.md); the order matters.
 //
-// None of them changes a floating-point result. The three that could fold
-// arithmetic (constant propagation, simplification, redundancy elimination)
-// go through Instruction::IsFloatingPointFoldingAllowed, which refuses any
-// instruction decorated NoContraction (the translator decorates all guest
-// arithmetic) and every instruction of a module that declares a float
-// controls capability (the translator declares all the device has).
+// None of them changes a floating-point result. Only constant propagation
+// evaluates anything, and SPIRV-Tools' folding goes through
+// Instruction::IsFloatingPointFoldingAllowed, which refuses any instruction
+// decorated NoContraction (the translator decorates all guest arithmetic) and
+// every floating-point instruction of a module that declares a float controls
+// capability (the translator declares each one the device has). The rest move,
+// merge or delete instructions without rewriting any.
 void RegisterSafePasses(spvtools::Optimizer& optimizer) {
   optimizer
       // The guest's registers are one function-local array of vec4. Split it
@@ -86,7 +146,16 @@ void RegisterSafePasses(spvtools::Optimizer& optimizer) {
       // constants. true: keep all entry point interface variables.
       .RegisterPass(spvtools::CreateAggressiveDCEPass(true))
       // A block with one predecessor that has one successor is merged into it.
-      .RegisterPass(spvtools::CreateBlockMergePass());
+      .RegisterPass(spvtools::CreateBlockMergePass())
+      // Within each block, an instruction that repeats an earlier one on the
+      // same operands (the absolute value of an operand taken once per
+      // multiply, the same component extracted again, a system constant
+      // loaded again) is replaced by the earlier result. The same operation
+      // on the same values gives the same bits, so this is exact. The
+      // function-wide form of this pass (redundancy elimination) finds little
+      // more in arithmetic and takes several times longer on shaders with
+      // many texture fetches, so it is left to level 2.
+      .RegisterPass(spvtools::CreateLocalRedundancyEliminationPass());
 }
 
 }  // namespace
@@ -133,13 +202,18 @@ SpirvOptimizeResult OptimizeTranslatedSpirv(std::vector<uint32_t>& module,
   options.set_preserve_bindings(true);
   options.set_preserve_spec_constants(true);
 
+  std::vector<uint32_t> float_controls_extension =
+      TakeFloatControlsExtension(module);
   std::vector<uint32_t> optimized;
   bool succeeded =
       optimizer.Run(module.data(), module.size(), &optimized, options) &&
       !optimized.empty();
   if (succeeded) {
-    // The old words are freed here, at the end of the call.
+    // The old words are freed at the end of the call.
     module.swap(optimized);
+  }
+  RestoreExtension(module, float_controls_extension);
+  if (succeeded) {
     result.words_after = module.size();
   } else {
     XELOGW("SPIRV-Tools optimiser (spirv_optimize = {}) failed, the module is "
