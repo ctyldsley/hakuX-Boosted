@@ -9,14 +9,24 @@
 
 #include "xenia/cpu/compiler/passes/conditional_group_pass.h"
 
+#include <atomic>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/profiling.h"
 #include "xenia/cpu/compiler/compiler.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
 
+DECLARE_bool(log_translation_stats);
+
 namespace xe {
 namespace cpu {
 namespace compiler {
+
+// hakuX-Boosted: defined in compiler.cc, for log_translation_stats.
+extern std::atomic<uint64_t> translation_stats_group_runs;
+extern std::atomic<uint64_t> translation_stats_group_iterations;
+
 namespace passes {
 
 // TODO(benvanik): remove when enums redefined.
@@ -48,8 +58,17 @@ bool ConditionalGroupPass::Initialize(Compiler* compiler) {
 
 bool ConditionalGroupPass::Run(HIRBuilder* builder) {
   bool dirty;
+  // hakuX-Boosted: how often the group reruns, for log_translation_stats.
+  const bool count_iterations = cvars::log_translation_stats;
+  if (count_iterations) {
+    translation_stats_group_runs.fetch_add(1, std::memory_order_relaxed);
+  }
   do {
     dirty = false;
+    if (count_iterations) {
+      translation_stats_group_iterations.fetch_add(1,
+                                                   std::memory_order_relaxed);
+    }
     for (size_t i = 0; i < passes_.size(); ++i) {
       scratch_arena()->Reset();
       auto& pass = passes_[i];
