@@ -51,6 +51,19 @@ DEFINE_uint32(
     "Raising it trades code cache size and translation time for fewer calls.",
     "CPU");
 
+// hakuX-Boosted: see PPCHIRBuilder::TryInlineExternCall.
+DEFINE_bool(
+    inline_extern_calls, false,
+    "A linking call (bl) to a kernel import stub is translated as the call to "
+    "the host function itself, in the caller, instead of a guest call to the "
+    "stub: no call-site lookup, no stub prologue with its stackpoint push, no "
+    "return check. Only when the stub still holds exactly what the loader "
+    "wrote there (sc 2; blr) and the function is marked as an import, so a "
+    "title that patched its own import table before the caller was "
+    "translated keeps its patch. Takes effect for functions translated after "
+    "it is set.",
+    "CPU");
+
 namespace xe {
 namespace cpu {
 namespace ppc {
@@ -316,6 +329,48 @@ bool PPCHIRBuilder::TryInlineLeafCall(uint32_t target_address,
              address, code, target_address);
     }
   }
+  return true;
+}
+
+bool PPCHIRBuilder::TryInlineExternCall(uint32_t target_address,
+                                        uint64_t cia) {
+  if (!cvars::inline_extern_calls) {
+    return false;
+  }
+  if (target_address == start_address_) {
+    return false;
+  }
+  Function* target = LookupFunction(target_address);
+  if (!target || target->behavior() != Function::Behavior::kExtern ||
+      target->address() != target_address) {
+    return false;
+  }
+  // The stub must still be what XexModule::SetupLibraryImports wrote:
+  //     sc 2
+  //     blr
+  // If the title has overwritten it, what is there now is what must run.
+  Memory* memory = frontend_->memory();
+  uint8_t* ptr = memory->TranslateVirtual(target_address);
+  if (!ptr) {
+    return false;
+  }
+  constexpr uint32_t kSc2 = 0x44000042;
+  constexpr uint32_t kBlr = 0x4E800020;
+  if (xe::load_and_swap<uint32_t>(ptr) != kSc2 ||
+      xe::load_and_swap<uint32_t>(ptr + 4) != kBlr) {
+    return false;
+  }
+
+  // What the bl does architecturally; the host function may read LR.
+  StoreLR(LoadConstantUint64(cia + 4));
+  if (with_debug_info_) {
+    CommentFormat("inlined import stub {:08X}", target_address);
+  }
+  // What the stub's `sc 2` would have emitted, with the stub as the function.
+  // The stub's `blr` returns to cia + 4, which is where this falls through
+  // to. The return site is deliberately not recorded with SetReturnAddress:
+  // no guest frame is entered, so there is none to resynchronise to.
+  CallExtern(target);
   return true;
 }
 

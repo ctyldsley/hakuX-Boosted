@@ -9,12 +9,130 @@
 
 #include "xenia/cpu/compiler/compiler.h"
 
+#include <atomic>
+#include <chrono>
+#include <string>
+#include <typeinfo>
+
+#include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
 #include "xenia/cpu/compiler/compiler_pass.h"
+#include "xenia/cpu/hir/hir_builder.h"
+#include "xenia/cpu/ppc/ppc_context.h"
+
+// hakuX-Boosted: where translation time goes, by pass, without a profiler.
+DEFINE_bool(
+    log_translation_stats, false,
+    "Time every HIR compiler pass and log the running totals (functions "
+    "compiled, milliseconds per pass, and how many times the simplification "
+    "and constant propagation group reran before it settled) every 2048 "
+    "functions, with a count of the guest register loads and stores left in "
+    "the code after the passes, by register. Two clock reads per pass and "
+    "one walk of the finished HIR per function while on; nothing while off.",
+    "CPU");
 
 namespace xe {
 namespace cpu {
 namespace compiler {
+
+// hakuX-Boosted: totals for log_translation_stats. Several guest threads
+// translate at once, each with its own Compiler from the translator pool but
+// the same pass list, so the totals are shared and indexed by pass position.
+std::atomic<uint64_t> translation_stats_group_runs{0};
+std::atomic<uint64_t> translation_stats_group_iterations{0};
+
+namespace {
+constexpr size_t kMaxTimedPasses = 48;
+std::atomic<uint64_t> pass_nanoseconds[kMaxTimedPasses];
+std::atomic<uint64_t> functions_compiled{0};
+constexpr uint64_t kStatsLogInterval = 2048;
+
+// What is left in the HIR when the passes are done, summed over every
+// function translated: these are static counts (each instruction once,
+// however often it runs), enough to see which guest registers the
+// per-block model reloads and re-stores most.
+std::atomic<uint64_t> hir_blocks{0};
+std::atomic<uint64_t> hir_instrs{0};
+std::atomic<uint64_t> gpr_loads[32];
+std::atomic<uint64_t> gpr_stores[32];
+// 0 lr, 1 ctr, 2 cr bytes, 3 xer bytes, 4 fpr, 5 vr, 6 anything else.
+constexpr size_t kOtherBuckets = 7;
+const char* const kOtherBucketNames[kOtherBuckets] = {
+    "lr", "ctr", "cr", "xer", "fpr", "vr", "other"};
+std::atomic<uint64_t> other_loads[kOtherBuckets];
+std::atomic<uint64_t> other_stores[kOtherBuckets];
+
+void CountContextAccess(uint64_t offset, bool is_store) {
+  using ppc::PPCContext;
+  const auto bump = [is_store](std::atomic<uint64_t>* loads,
+                               std::atomic<uint64_t>* stores, size_t index) {
+    (is_store ? stores : loads)[index].fetch_add(1, std::memory_order_relaxed);
+  };
+  const uint64_t gpr_base = offsetof(PPCContext, r);
+  if (offset >= gpr_base && offset < gpr_base + 32 * 8) {
+    bump(gpr_loads, gpr_stores, static_cast<size_t>((offset - gpr_base) / 8));
+    return;
+  }
+  size_t bucket = 6;
+  if (offset >= offsetof(PPCContext, lr) &&
+      offset < offsetof(PPCContext, lr) + 8) {
+    bucket = 0;
+  } else if (offset >= offsetof(PPCContext, ctr) &&
+             offset < offsetof(PPCContext, ctr) + 8) {
+    bucket = 1;
+  } else if (offset >= offsetof(PPCContext, cr0) &&
+             offset < offsetof(PPCContext, cr0) + 32) {
+    bucket = 2;
+  } else if (offset >= offsetof(PPCContext, xer_ca) &&
+             offset <= offsetof(PPCContext, xer_so)) {
+    bucket = 3;
+  } else if (offset >= offsetof(PPCContext, f) &&
+             offset < offsetof(PPCContext, f) + 32 * 8) {
+    bucket = 4;
+  } else if (offset >= offsetof(PPCContext, v) &&
+             offset < offsetof(PPCContext, v) + 128 * 16) {
+    bucket = 5;
+  }
+  bump(other_loads, other_stores, bucket);
+}
+
+void CountFinishedHir(hir::HIRBuilder* builder) {
+  uint64_t blocks = 0;
+  uint64_t instrs = 0;
+  for (auto block = builder->first_block(); block; block = block->next) {
+    ++blocks;
+    for (auto i = block->instr_head; i; i = i->next) {
+      ++instrs;
+      if (i->opcode == &hir::OPCODE_LOAD_CONTEXT_info) {
+        CountContextAccess(i->src1.offset, false);
+      } else if (i->opcode == &hir::OPCODE_STORE_CONTEXT_info) {
+        CountContextAccess(i->src1.offset, true);
+      }
+    }
+  }
+  hir_blocks.fetch_add(blocks, std::memory_order_relaxed);
+  hir_instrs.fetch_add(instrs, std::memory_order_relaxed);
+}
+
+std::string FormatContextCounts() {
+  std::string line = fmt::format(
+      " blocks {}, HIR instructions {}; guest register loads/stores left:",
+      hir_blocks.load(std::memory_order_relaxed),
+      hir_instrs.load(std::memory_order_relaxed));
+  for (size_t n = 0; n < 32; ++n) {
+    line += fmt::format(" r{} {}/{}", n,
+                        gpr_loads[n].load(std::memory_order_relaxed),
+                        gpr_stores[n].load(std::memory_order_relaxed));
+  }
+  for (size_t n = 0; n < kOtherBuckets; ++n) {
+    line += fmt::format(" {} {}/{}", kOtherBucketNames[n],
+                        other_loads[n].load(std::memory_order_relaxed),
+                        other_stores[n].load(std::memory_order_relaxed));
+  }
+  return line;
+}
+}  // namespace
 
 Compiler::Compiler(Processor* processor) : processor_(processor) {}
 
@@ -28,6 +146,52 @@ void Compiler::AddPass(std::unique_ptr<CompilerPass> pass) {
 void Compiler::Reset() {}
 
 bool Compiler::Compile(xe::cpu::hir::HIRBuilder* builder) {
+  if (cvars::log_translation_stats) {
+    // hakuX-Boosted: the same loop as below with a clock around each pass.
+    using clock = std::chrono::steady_clock;
+    for (size_t i = 0; i < passes_.size(); ++i) {
+      auto& pass = passes_[i];
+      scratch_arena_.Reset();
+      const auto start = clock::now();
+      const bool ok = pass->Run(builder);
+      const uint64_t elapsed =
+          static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  clock::now() - start)
+                  .count());
+      if (i < kMaxTimedPasses) {
+        pass_nanoseconds[i].fetch_add(elapsed, std::memory_order_relaxed);
+      }
+      if (!ok) {
+        return false;
+      }
+    }
+    CountFinishedHir(builder);
+    const uint64_t count =
+        functions_compiled.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count % kStatsLogInterval == 0) {
+      std::string line;
+      uint64_t total = 0;
+      for (size_t i = 0; i < passes_.size() && i < kMaxTimedPasses; ++i) {
+        const uint64_t ns =
+            pass_nanoseconds[i].load(std::memory_order_relaxed);
+        total += ns;
+        const auto& pass_ref = *passes_[i];
+        line += fmt::format(" [{}] {} {:.1f}ms;", i, typeid(pass_ref).name(),
+                            static_cast<double>(ns) / 1e6);
+      }
+      XELOGI(
+          "TranslationStats: {} functions, HIR passes {:.1f} ms in all; "
+          "simplify/constprop group ran {} times, {} iterations;{}",
+          count, static_cast<double>(total) / 1e6,
+          translation_stats_group_runs.load(std::memory_order_relaxed),
+          translation_stats_group_iterations.load(std::memory_order_relaxed),
+          line);
+      XELOGI("TranslationStats:{}", FormatContextCounts());
+    }
+    return true;
+  }
+
   // TODO(benvanik): sophisticated stuff. Run passes in parallel, run until they
   //                 stop changing things, etc.
   for (size_t i = 0; i < passes_.size(); ++i) {

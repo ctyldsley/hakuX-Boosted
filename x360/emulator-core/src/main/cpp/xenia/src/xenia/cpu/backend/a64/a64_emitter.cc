@@ -30,6 +30,30 @@
 DECLARE_int64(a64_max_stackpoints);
 DECLARE_bool(a64_enable_host_guest_stack_synchronization);
 
+DECLARE_bool(a64_lean_extern_thunk);
+
+// hakuX-Boosted: see A64Emitter::IsNearBoundLabel.
+DEFINE_bool(
+    a64_short_backward_branches, false,
+    "A conditional branch (b.cond, cbz, cbnz, tbz, tbnz) to a block label "
+    "already placed earlier in the same function is emitted as the one "
+    "instruction it is when the distance is known to be in range, instead of "
+    "an inverted branch over an unconditional one. Loop back-edges are the "
+    "common case. Forward branches, whose distance is not known when they are "
+    "emitted, keep the two-instruction form. Takes effect for functions "
+    "translated after it is set.",
+    "a64");
+
+// hakuX-Boosted: see A64Emitter::PushStackpoint.
+DEFINE_bool(
+    a64_compact_stackpoint_push, false,
+    "The guest function prologue's stackpoint push indexes its 16-byte "
+    "entries with a shifted add instead of materialising the entry size and "
+    "multiplying: two instructions fewer in every translated function's "
+    "prologue, the same address. Takes effect for functions translated after "
+    "it is set.",
+    "a64");
+
 DEFINE_bool(
     log_safepoint_pc, false,
     "Record the guest address of every JIT safepoint a fiber passes, so the "
@@ -224,7 +248,10 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     // Bind all labels targeting this block.
     auto label = block->label_head;
     while (label) {
-      L(GetLabel(label->id));
+      auto& host_label = GetLabel(label->id);
+      L(host_label);
+      // hakuX-Boosted: where it was placed, for IsNearBoundLabel.
+      bound_label_offsets_[&host_label] = getSize();
       label = label->next;
     }
 
@@ -363,6 +390,9 @@ void A64Emitter::ResetPerFunctionState() {
   }
   label_cache_.clear();
 
+  // hakuX-Boosted: keyed by the labels deleted below.
+  bound_label_offsets_.clear();
+
   // Clean up HIR->xbyak label map. HIR label ids restart at each function, so
   // stale entries would hand the next function this one's labels.
   for (auto& pair : label_map_) {
@@ -382,8 +412,31 @@ void A64Emitter::DebugBreak() { brk(0xF000); }
 
 void A64Emitter::Trap(uint16_t trap_type) { brk(trap_type); }
 
+// hakuX-Boosted: true when `label` is a block label of this function that has
+// already been placed and lies no more than max_distance bytes behind the
+// instruction about to be emitted, so a one-instruction branch to it is known
+// to encode. Only labels recorded where Emit binds them are considered; any
+// other label (forward, tail code, the epilog) is unknown here and keeps the
+// far form. The assembler checks the range again when it encodes.
+bool A64Emitter::IsNearBoundLabel(const Xbyak_aarch64::Label& label,
+                                  size_t max_distance) const {
+  if (!cvars::a64_short_backward_branches) {
+    return false;
+  }
+  auto it = bound_label_offsets_.find(&label);
+  if (it == bound_label_offsets_.end()) {
+    return false;
+  }
+  const size_t here = getSize();
+  return here >= it->second && here - it->second <= max_distance;
+}
+
 void A64Emitter::b(const Xbyak_aarch64::Cond cond,
                    const Xbyak_aarch64::Label& label) {
+  if (IsNearBoundLabel(label, kNearBranch19)) {
+    CodeGenerator::b(cond, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::b(static_cast<Xbyak_aarch64::Cond>(cond ^ 1), skip);
   CodeGenerator::b(label);
@@ -392,6 +445,10 @@ void A64Emitter::b(const Xbyak_aarch64::Cond cond,
 
 void A64Emitter::cbz(const Xbyak_aarch64::WReg& rt,
                      const Xbyak_aarch64::Label& label) {
+  if (IsNearBoundLabel(label, kNearBranch19)) {
+    CodeGenerator::cbz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbnz(rt, skip);
   CodeGenerator::b(label);
@@ -400,6 +457,10 @@ void A64Emitter::cbz(const Xbyak_aarch64::WReg& rt,
 
 void A64Emitter::cbz(const Xbyak_aarch64::XReg& rt,
                      const Xbyak_aarch64::Label& label) {
+  if (IsNearBoundLabel(label, kNearBranch19)) {
+    CodeGenerator::cbz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbnz(rt, skip);
   CodeGenerator::b(label);
@@ -408,6 +469,10 @@ void A64Emitter::cbz(const Xbyak_aarch64::XReg& rt,
 
 void A64Emitter::cbnz(const Xbyak_aarch64::WReg& rt,
                       const Xbyak_aarch64::Label& label) {
+  if (IsNearBoundLabel(label, kNearBranch19)) {
+    CodeGenerator::cbnz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbz(rt, skip);
   CodeGenerator::b(label);
@@ -416,6 +481,10 @@ void A64Emitter::cbnz(const Xbyak_aarch64::WReg& rt,
 
 void A64Emitter::cbnz(const Xbyak_aarch64::XReg& rt,
                       const Xbyak_aarch64::Label& label) {
+  if (IsNearBoundLabel(label, kNearBranch19)) {
+    CodeGenerator::cbnz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbz(rt, skip);
   CodeGenerator::b(label);
@@ -424,6 +493,10 @@ void A64Emitter::cbnz(const Xbyak_aarch64::XReg& rt,
 
 void A64Emitter::tbz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
                      const Xbyak_aarch64::Label& label) {
+  if (IsNearBoundLabel(label, kNearBranch14)) {
+    CodeGenerator::tbz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbnz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -432,6 +505,10 @@ void A64Emitter::tbz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
 
 void A64Emitter::tbz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
                      const Xbyak_aarch64::Label& label) {
+  if (IsNearBoundLabel(label, kNearBranch14)) {
+    CodeGenerator::tbz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbnz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -440,6 +517,10 @@ void A64Emitter::tbz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
 
 void A64Emitter::tbnz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
                       const Xbyak_aarch64::Label& label) {
+  if (IsNearBoundLabel(label, kNearBranch14)) {
+    CodeGenerator::tbnz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -448,6 +529,10 @@ void A64Emitter::tbnz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
 
 void A64Emitter::tbnz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
                       const Xbyak_aarch64::Label& label) {
+  if (IsNearBoundLabel(label, kNearBranch14)) {
+    CodeGenerator::tbnz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -628,6 +713,16 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
 void A64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
   ForgetFpcrMode();
   bool undefined = true;
+  // hakuX-Boosted: the thunk without the vector register saves, when this
+  // call is the last instruction of its block (HIRBuilder::CallExtern ends
+  // the block, so it always is; checked rather than assumed). No HIR value
+  // outlives its block, so none is live in a vector register after the call.
+  // See A64HelperEmitter::EmitGuestToHostLeanThunk for the whole argument.
+  auto thunk = backend()->guest_to_host_thunk();
+  if (cvars::a64_lean_extern_thunk && instr && !instr->next &&
+      backend()->guest_to_host_lean_thunk()) {
+    thunk = backend()->guest_to_host_lean_thunk();
+  }
   if (function->behavior() == Function::Behavior::kBuiltin) {
     auto builtin_function = static_cast<const BuiltinFunction*>(function);
     if (builtin_function->handler()) {
@@ -637,7 +732,7 @@ void A64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
       mov(x0, reinterpret_cast<uint64_t>(builtin_function->handler()));
       mov(x1, reinterpret_cast<uint64_t>(builtin_function->arg0()));
       mov(x2, reinterpret_cast<uint64_t>(builtin_function->arg1()));
-      mov(x9, reinterpret_cast<uint64_t>(backend()->guest_to_host_thunk()));
+      mov(x9, reinterpret_cast<uint64_t>(thunk));
       blr(x9);
     }
   } else if (function->behavior() == Function::Behavior::kExtern) {
@@ -648,7 +743,7 @@ void A64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
       mov(x0, reinterpret_cast<uint64_t>(extern_function->extern_handler()));
       ldr(x1, ptr(GetContextReg(), static_cast<int32_t>(offsetof(
                                        ppc::PPCContext, kernel_state))));
-      mov(x9, reinterpret_cast<uint64_t>(backend()->guest_to_host_thunk()));
+      mov(x9, reinterpret_cast<uint64_t>(thunk));
       blr(x9);
     }
   }
@@ -800,10 +895,19 @@ void A64Emitter::PushStackpoint() {
   ldr(w9, ptr(x19, static_cast<uint32_t>(
                        offsetof(A64BackendContext, current_stackpoint_depth))));
 
-  // Compute offset into array: x10 = w9 * sizeof(A64BackendStackpoint)
-  mov(w10, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
-  umull(x10, w9, w10);
-  add(x8, x8, x10);
+  if (cvars::a64_compact_stackpoint_push) {
+    // hakuX-Boosted: x8 += depth * 16 in one instruction. The ldr into w9
+    // above zero-extended x9, so the 64-bit shifted add gives the address the
+    // multiply did.
+    static_assert(sizeof(A64BackendStackpoint) == 16,
+                  "the shift below is the entry size");
+    add(x8, x8, x9, LSL, 4);
+  } else {
+    // Compute offset into array: x10 = w9 * sizeof(A64BackendStackpoint)
+    mov(w10, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
+    umull(x10, w9, w10);
+    add(x8, x8, x10);
+  }
 
   // Store host SP.
   mov(x10, sp);

@@ -227,6 +227,17 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // Map from HIR label IDs to xbyak_aarch64 Labels.
   std::unordered_map<uint32_t, Xbyak_aarch64::Label*> label_map_;
 
+  // hakuX-Boosted: code offsets of the block labels placed so far in the
+  // function being emitted, for one-instruction backward branches
+  // (a64_short_backward_branches). Cleared with the labels.
+  std::unordered_map<const Xbyak_aarch64::Label*, size_t> bound_label_offsets_;
+  // Reach of b.cond/cbz/cbnz (imm19) and tbz/tbnz (imm14) backwards, less a
+  // margin of four instructions.
+  static constexpr size_t kNearBranch19 = (size_t(1) << 20) - 16;
+  static constexpr size_t kNearBranch14 = (size_t(1) << 15) - 16;
+  bool IsNearBoundLabel(const Xbyak_aarch64::Label& label,
+                        size_t max_distance) const;
+
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;
   bool synchronize_stack_on_next_instruction_ = false;
 };

@@ -61,6 +61,19 @@ DEFINE_bool(a64_vmx_nan_fixup, true,
             "raw float bits may behave differently.",
             "a64");
 
+// hakuX-Boosted: see EmitGuestToHostLeanThunk.
+DEFINE_bool(
+    a64_lean_extern_thunk, false,
+    "Calls from translated code into the kernel's host functions (a guest "
+    "import stub's CALL_EXTERN, the last instruction of its block) go through "
+    "a thunk that saves and restores only the frame pointer and link register "
+    "instead of also 28 vector registers (56 16-byte memory operations a "
+    "call). Nothing is held in a vector register across such a call: the "
+    "register allocator works one block at a time and the call ends its "
+    "block. Other host calls keep the full thunk. Takes effect for functions "
+    "translated after it is set.",
+    "a64");
+
 namespace xe {
 namespace cpu {
 namespace backend {
@@ -99,6 +112,7 @@ class A64HelperEmitter : public A64Emitter {
 
   HostToGuestThunk EmitHostToGuestThunk();
   GuestToHostThunk EmitGuestToHostThunk();
+  GuestToHostThunk EmitGuestToHostLeanThunk();  // hakuX-Boosted
   ResolveFunctionThunk EmitResolveFunctionThunk();
   void* EmitGuestAndHostSynchronizeStackHelper();
 };
@@ -333,6 +347,81 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
       code_offsets.prolog_stack_alloc - code_offsets.prolog;
   func_info.stack_size = g2h_stack;
   func_info.lr_save_offset = 0x1C8;  // stp x29, x30, [sp, #0x1C0]
+
+  void* fn = Emplace(func_info);
+  return reinterpret_cast<GuestToHostThunk>(fn);
+}
+
+// --------------------------------------------------------------------------
+// GuestToHostLeanThunk (hakuX-Boosted)
+// --------------------------------------------------------------------------
+// The same contract as GuestToHostThunk (x0 = target host function, x1/x2 =
+// arguments; the target is called with the PPCContext* first) for call sites
+// where no guest value is held in a vector register across the call, so the
+// 28 Q registers the full thunk saves and restores need not be touched.
+//
+// What still has to survive the host function, and why it does:
+//   x19, x20, x21 (backend context, context, membase) and the allocatable
+//   x22-x28 are callee-saved under AAPCS64, so the host function preserves
+//   them; the full thunk does not save them either.
+//   x29/x30 are saved here, as there.
+//   FPCR is restored to the guest scalar mode, as there.
+//   v4-v31: not preserved. Only CallExtern uses this thunk, and only when the
+//   CALL_EXTERN is the last instruction of its HIR block (A64Emitter::
+//   CallExtern checks). HIR values never outlive their block (the register
+//   allocator resets at each block and asserts that every use is in the
+//   defining block), so no value is live after the call in this function;
+//   and the guest caller of this function reached it through a guest call,
+//   across which nothing is live either, since translated functions use
+//   v4-v31 and x22-x28 freely without saving them. A host caller came in
+//   through HostToGuestThunk, which preserves what AAPCS64 asks of us.
+GuestToHostThunk A64HelperEmitter::EmitGuestToHostLeanThunk() {
+  struct {
+    size_t prolog;
+    size_t prolog_stack_alloc;
+    size_t body;
+    size_t epilog;
+    size_t tail;
+  } code_offsets = {};
+
+  code_offsets.prolog = getSize();
+
+  // x29, x30 at sp + 0x0; 16 bytes keeps SP 16-byte aligned.
+  const size_t lean_stack = 16;
+  sub(sp, sp, static_cast<uint32_t>(lean_stack));
+  code_offsets.prolog_stack_alloc = getSize();
+  stp(x29, x30, ptr(sp, 0x0));
+
+  code_offsets.body = getSize();
+
+  mov(x9, x0);   // x9 = target function (scratch)
+  mov(x0, x20);  // x0 = PPCContext*
+  // x1, x2 already hold the arguments.
+  blr(x9);
+
+  // As in the full thunk: the host function may have changed FPCR.
+  ldr(w11,
+      ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_fpu))));
+  msr(3, 3, 4, 4, 0, x11);
+
+  code_offsets.epilog = getSize();
+
+  ldp(x29, x30, ptr(sp, 0x0));
+  add(sp, sp, static_cast<uint32_t>(lean_stack));
+  ret();
+
+  code_offsets.tail = getSize();
+
+  EmitFunctionInfo func_info = {};
+  func_info.code_size.total = getSize();
+  func_info.code_size.prolog = code_offsets.body - code_offsets.prolog;
+  func_info.code_size.body = code_offsets.epilog - code_offsets.body;
+  func_info.code_size.epilog = code_offsets.tail - code_offsets.epilog;
+  func_info.code_size.tail = getSize() - code_offsets.tail;
+  func_info.prolog_stack_alloc_offset =
+      code_offsets.prolog_stack_alloc - code_offsets.prolog;
+  func_info.stack_size = lean_stack;
+  func_info.lr_save_offset = 0x8;  // stp x29, x30, [sp, #0x0]
 
   void* fn = Emplace(func_info);
   return reinterpret_cast<GuestToHostThunk>(fn);
@@ -816,6 +905,10 @@ bool A64Backend::Initialize(Processor* processor) {
   host_to_guest_thunk_ = thunk_emitter.EmitHostToGuestThunk();
   guest_to_host_thunk_ = thunk_emitter.EmitGuestToHostThunk();
   resolve_function_thunk_ = thunk_emitter.EmitResolveFunctionThunk();
+  // hakuX-Boosted: always generated (a few dozen bytes), used only by code
+  // translated while a64_lean_extern_thunk is on. If it could not be placed,
+  // CallExtern falls back to the full thunk.
+  guest_to_host_lean_thunk_ = thunk_emitter.EmitGuestToHostLeanThunk();
 
   if (!host_to_guest_thunk_ || !guest_to_host_thunk_ ||
       !resolve_function_thunk_) {

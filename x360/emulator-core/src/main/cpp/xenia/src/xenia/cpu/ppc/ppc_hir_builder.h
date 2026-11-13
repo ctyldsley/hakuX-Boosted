@@ -47,6 +47,10 @@ class PPCHIRBuilder : public hir::HIRBuilder {
   // emitted nothing) when the target does not qualify, in which case the
   // caller emits a normal call.
   bool TryInlineLeafCall(uint32_t target_address, uint64_t cia);
+  // hakuX-Boosted: a `bl` to a kernel import stub as the host call itself
+  // (inline_extern_calls). Returns false, emitting nothing, when the target
+  // is not such a stub.
+  bool TryInlineExternCall(uint32_t target_address, uint64_t cia);
   Label* LookupLabel(uint32_t address);
 
   Value* LoadLR();

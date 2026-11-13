@@ -118,6 +118,12 @@ class A64Backend : public Backend {
 
   HostToGuestThunk host_to_guest_thunk() const { return host_to_guest_thunk_; }
   GuestToHostThunk guest_to_host_thunk() const { return guest_to_host_thunk_; }
+  // hakuX-Boosted: the same transition without the 28 vector registers saved
+  // and restored around it, for call sites that have none live
+  // (a64_lean_extern_thunk; see EmitGuestToHostLeanThunk).
+  GuestToHostThunk guest_to_host_lean_thunk() const {
+    return guest_to_host_lean_thunk_;
+  }
   ResolveFunctionThunk resolve_function_thunk() const {
     return resolve_function_thunk_;
   }
@@ -185,6 +191,7 @@ class A64Backend : public Backend {
 
   HostToGuestThunk host_to_guest_thunk_ = nullptr;
   GuestToHostThunk guest_to_host_thunk_ = nullptr;
+  GuestToHostThunk guest_to_host_lean_thunk_ = nullptr;  // hakuX-Boosted
   ResolveFunctionThunk resolve_function_thunk_ = nullptr;
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
 
