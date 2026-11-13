@@ -1119,7 +1119,7 @@ bool GuestScheduler::NoteEmptyYield(Cpu& cpu, XThread* self) {
 
 // hakuX-Boosted: guest_scheduler_park_poll_loops.
 //
-// The translator marks spin-waits (MemoryPollPass's load-test-branch loops,
+// The translator marks spin-waits (MemoryPollParkPass's load-test-branch loops,
 // the collapsed spin-backoff loops) with a backoff site, which calls
 // SpinBackoffYieldFiber, but only while preempt_requested is up; and the
 // loop's own safepoint at its head usually sees the flag first and clears
