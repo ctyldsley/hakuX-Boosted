@@ -24,13 +24,15 @@ they start with another directory.
 Done:
 - Step 1, the tests (section 1). In the workflow as the job "Translator
   tests".
+- Step 2, pinning for most functions (section 2): `pin_guest_registers_wide`,
+  `pin_guest_registers_flags`, and why the first form pinned 17 functions.
 
 In progress:
-- Step 2, pinning for most functions.
+- Step 3 (dead flag stores, memory access, calls, branches, constants over
+  blocks).
 
 Next:
-- Step 3 (dead flag stores, memory access, calls, branches, constants over
-  blocks), step 4 (translating ahead on a helper thread).
+- Step 4 (translating ahead on a helper thread).
 
 ## 1. The tests
 
@@ -149,13 +151,156 @@ sources (needs `gcc-powerpc-linux-gnu`); the generated files are checked in.
 - All 115 C-derived cases with host-computed expected values pass on the
   unmodified translator, as do all 141,588 upstream cases bar the one above.
 
+## 2. Pinning for most functions (`pin_guest_registers_wide`)
+
+### Why the first form pinned 17 functions of 24,576
+
+The compiled-C tests reproduce the device's number: with
+`pin_guest_registers` alone, 2 of 204 functions are pinned (44 have loops).
+The cost model was not the cause, and neither was the loop requirement. The
+cause is one line of the front end: `PPCHIRBuilder::Emit` puts a
+`CONTEXT_BARRIER` in front of **every PowerPC branch instruction** (`b`,
+`bc`, `bclr`, `bcctr` are of type `kSync` in the opcode table). The barrier
+is there for the per-block passes: a conditional branch does not end a HIR
+block, so without it context promotion would carry a value, or drop a store,
+across a branch in the middle of a block. The first pinning read the barrier
+as "host code needs the context here" and wrote every pinned register back
+and read every one again at each. A loop is at least one branch a trip, so in
+any function with branches the cost of a pin was at least its benefit, and
+the model (correctly, on those numbers) declined. The 17 functions were the
+ones whose pinned registers were float or vector registers used many times
+between two branches.
+
+### What the wide form does
+
+`GuestRegisterPinningPass::RunWide`
+(`cpu/compiler/passes/guest_register_pinning_pass.cc`; the long comment
+above it has the argument in full):
+
+- The front end now marks the barriers it emits for a branch
+  (`CONTEXT_BARRIER_FOR_BRANCH`, `hir/opcodes.h`). In the wide form these are
+  not sync points. The pass follows the branch itself, and the call or
+  return a branch instruction may turn into is a sync point in its own right
+  (`CALL`, `CALL_INDIRECT`, `RETURN`). Barriers for `mfmsr`, `mtmsr` and `sc`
+  stay sync points.
+- For every candidate register the pass computes over the function's control
+  flow, mid-block branches included, where it is **dirty** (the host register
+  may differ from the context: stored to since the context was last current)
+  and where it is **live** (its value may still be read, or written back).
+  At each sync point the backend stores exactly the dirty registers and, if
+  control returns, loads exactly the live ones; at entry it loads the ones
+  live there. The first form stored every written register and loaded every
+  register at every sync point.
+- So a register held over a call costs at most what the per-block code
+  already pays, and functions with calls and functions without loops
+  qualify. A register is pinned when that at least halves its loads and
+  stores (`benefit >= 2 * cost + 2`, weighted by loop depth as before).
+- New candidates with `pin_guest_registers_flags`: the link register, and
+  the condition register and carry bytes (8-bit values in an integer host
+  register, kept zero-extended as a load from the context would give them).
+  The count register was already a candidate.
+- `pin_guest_registers_max_vec` may now go to 16 (was 12).
+  `pin_guest_registers_max_int` stays at most 3: the pins come out of the
+  seven registers the allocator has (x22 to x28), an instruction can need
+  four of them, and the only other integer registers are the scratch
+  registers sequences use freely (the study's 175-use audit). That audit is
+  now testable but was not done here.
+
+What it does not do: the load of a pinned register is still a `mov` from the
+pin into the value's own register (the allocator does not know the pin could
+serve as the value's home). So pinning removes memory operations, not
+instructions: per access one `ldr`/`str [x20]` becomes one register move,
+which the phone's core removes at rename, and adds one `ldr` or `str` per
+register at the places counted below.
+
+### On the test corpus (static counts and block counts, not speed)
+
+`seq_cc_*`, `seq_regs_*`, `seq_flags_*` (204 functions, most of them
+single-block test wrappers and leaves with nothing to pin):
+
+| | `pin_guest_registers` | + `_wide` | + `_flags`, 3 integer, 16 vector |
+|---|---|---|---|
+| functions pinned (of 204; 44 have loops) | 2 | 41 | 44 |
+| of those, without a loop | 0 | 10 | 12 |
+| slots: integer / float / vector / flag | 0 / 2 / 0 / 0 | 65 / 26 / 12 / 0 | 86 / 26 / 14 / 16 |
+| context loads + stores that became moves | 26 | 597 | 759 |
+| loads + stores emitted to keep in step | 31 | 185 | 249 |
+| blocks translated in pinned functions | 5.2% | 53.3% | 55.6% |
+| blocks executed in pinned functions | 8.0% | 69.9% | 70.0% |
+
+A title is not this corpus. The third `TranslationStats:` line now prints the
+same figures on the device (see "What `log_translation_stats` prints").
+
+### Correctness, and how it is checked
+
+The argument is in the comment above `RunWide`. In short: liveness here is
+"a read or a write-back is reachable without passing a store or a reload",
+over a set of edges that contains every edge the code can take, and every
+instruction counts as a possible write-back of what is dirty before it
+(because any sequence may call a host helper, which writes back the dirty
+registers). So whenever a pinned register is read or written back, the last
+thing before it on the path taken was a store to it, a reload that was
+emitted because it was live, or the entry load. Over-estimating either set
+only adds a store or a load of a correct value.
+
+The list of sync points is the first form's (`A64Emitter::ClassifyPinSync`),
+less the branch barriers. Host helpers called from inside a sequence, the
+preemption check's yield and the two bare host calls use the masks of the
+instruction being emitted.
+
+Checked by:
+- All 141,886 tests with wide pinning on, with `_flags` and the largest
+  register counts, each with and without `a64_pin_verify`: every test's
+  assertions and every test's full state equal to the reference.
+- `pin_guest_registers_stress` (a test setting): pins the most used
+  registers of every function whether or not it pays. Without it the cost
+  model keeps registers that are busy round calls out of pins, and the
+  write-back and reload paths are hardly run. With it all 141,886 pass, again
+  with and without verify, and with 1 integer pin and 4 vector pins.
+- Three deliberate faults, to see that the tests notice: no reload after a
+  sync point, no write-back before one, no load at entry. Without stress and
+  without the fix below, all three went unnoticed. With stress, each one
+  crashes or hangs the plain run, and `a64_pin_verify` reports the two it
+  can see (392 and 558 mismatches; a missing write-back is invisible to
+  verify by design, since verify keeps the context current).
+- That exercise also showed that the self-check lines were never visible in
+  the test runner (it does not set up the log), so a verify run that found
+  mismatches still passed. The runner now reads the mismatch counters
+  (`compiler::SelfCheckMismatches`) and fails on any.
+
+Not checked: `longjmp` into a pinned function (the resume stubs now reload
+the registers live after that call; the path cannot run in the tests), the
+preemption yield with pins, kernel calls with pins.
+
 ## The settings
 
 (Completed as the steps land. So far:)
 
 | Setting | Default | What it changes | Expected effect | Risk | Tested by |
 |---|---|---|---|---|---|
+| `pin_guest_registers_wide` | false | With `pin_guest_registers`: the wide form of section 2 | Pins in most functions that have more than one block; fewer context loads and stores in loops and between calls | Medium. A wrong write-back or reload corrupts a guest register silently. Tested as section 2 describes; `a64_pin_verify` works with it | matrix lines "wide pinning", "wide stress" |
+| `pin_guest_registers_flags` | false | With `_wide`: LR and the condition register and carry bytes may be pinned | A compare in one block and its branch in another stop going through memory | As above; an 8-bit pin takes one of the integer pins | "wide pinning, all", "wide stress" |
+| `pin_guest_registers_max_vec` | 8 | now 0 to 16 with `_wide` | | | "wide pinning, all" |
+| `pin_guest_registers_stress` | false | Test setting: pins regardless of benefit | None: slower code. Not for play | | |
 | `ppc_mcrf_copies_field` | false | `mcrf` copies the four bits of the source field | Correctness only | Low: a title that relied on the wrong result would have to be broken on a console | `seq_mcrf_fields.s`, matrix line "mcrf, exact" |
+
+## What `log_translation_stats` prints now
+
+The third `TranslationStats:` line (pinning) ends with a new part:
+
+```
+...; wide: A pinned functions have no loop, B flag slots, sync loads C and
+stores D emitted; blocks translated in pinned functions E of F (x%); blocks
+executed in pinned functions G of H (y%)
+```
+
+"functions considered / with loops / pinned" before it are as they were. E of
+F is static. G of H is counted by the translated code itself, in code
+translated while `log_translation_stats` was on (four instructions at each
+block head, no lock, so the threads lose some counts to each other: read it
+as a share, not a total). "context loads and stores became register moves"
+against "sync loads and stores emitted" is the memory traffic removed
+against the traffic added, counted once per instruction, not per execution.
 
 ## Upstream files changed, and why
 
@@ -168,3 +313,9 @@ All marked `hakuX-Boosted:` at each change.
 | `cpu/ppc/testing/ci/**` | new: the small build, the scripts, the matrix, the C sources of the generated tests |
 | `cpu/ppc/testing/seq_*.s` (six new files) | new tests |
 | `cpu/ppc/ppc_emit_control.cc` | `ppc_mcrf_copies_field` |
+| `cpu/hir/opcodes.h`, `hir_builder.h`, `.cc` | `CONTEXT_BARRIER_FOR_BRANCH`; `ContextBarrier` takes flags; the per-instruction sync masks (`PinSyncState`) |
+| `cpu/ppc/ppc_hir_builder.cc` | marks the barriers emitted for branch instructions |
+| `cpu/compiler/passes/guest_register_pinning_pass.h`, `.cc` | `RunWide` and the three new settings |
+| `cpu/backend/a64/a64_emitter.h`, `.cc` | write-back and reload take a mask; the masks of the current instruction; 8-bit pins; the block counters |
+| `cpu/backend/a64/a64_sequences.cc` | `LOAD_CONTEXT` and `STORE_CONTEXT` for I8 ask for a pin |
+| `cpu/compiler/translation_stats.h`, `compiler.cc` | the new counters, `FormatTranslationStats`, `SelfCheckMismatches` |

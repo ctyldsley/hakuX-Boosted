@@ -69,6 +69,14 @@ DEFINE_bool(
     "registers pin_guest_registers_max_int allows.",
     "CPU");
 
+DEFINE_bool(
+    pin_guest_registers_stress, false,
+    "For the translator's tests, not for play: with pin_guest_registers_wide, "
+    "pin the most used registers of every function whether or not that "
+    "saves anything, so that every write-back and reload the backend can "
+    "emit is exercised. Slower code.",
+    "CPU");
+
 DECLARE_bool(debug);
 
 namespace xe {
@@ -888,7 +896,7 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
   };
   std::vector<Choice> order;
   for (size_t n = 0; n < candidates.size(); ++n) {
-    if (benefit[n] >= 2 * cost[n] + 2) {
+    if (benefit[n] >= 2 * cost[n] + 2 || cvars::pin_guest_registers_stress) {
       order.push_back({n, static_cast<int64_t>(benefit[n]) -
                               static_cast<int64_t>(cost[n])});
     }

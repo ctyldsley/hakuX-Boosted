@@ -776,6 +776,17 @@ bool RunTests(const std::vector<std::string>& test_names) {
             xe::cpu::compiler::FormatTranslationStats().c_str());
   }
 
+  // hakuX-Boosted: the self-check modes report through the log, which this
+  // runner does not show; their counters say the same thing. Any mismatch
+  // fails the run.
+  const uint64_t self_check_mismatches =
+      xe::cpu::compiler::SelfCheckMismatches();
+  fprintf(stderr, "\nSelf-check mismatches: %llu\n",
+          static_cast<unsigned long long>(self_check_mismatches));
+  if (self_check_mismatches) {
+    ++failed_count;
+  }
+
   fprintf(stderr, "\nTotal tests: %d\n", failed_count + passed_count);
   fprintf(stderr, "Passed: %d\n", passed_count);
   fprintf(stderr, "Failed: %d\n", failed_count);

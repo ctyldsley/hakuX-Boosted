@@ -45,6 +45,9 @@ struct TranslationStats {
   // Which guest register each pinned integer slot was (r0..r31, 32 = ctr,
   // 33 = lr).
   std::atomic<uint64_t> pin_by_gpr[34];
+  // Mismatches reported by the self-check modes of the settings added
+  // after pinning (each logs a line starting "TranslatorVerify:").
+  std::atomic<uint64_t> verify_mismatches{0};
   // pin_guest_registers_wide.
   std::atomic<uint64_t> pin_functions_pinned_no_loop{0};
   std::atomic<uint64_t> pin_flag_slots{0};
@@ -72,6 +75,12 @@ struct TranslationStats {
 };
 
 extern TranslationStats translation_stats;
+
+// What the translator's self-check modes (a64_pin_verify,
+// simplification_skip_verify and the like) have found since launch: the sum
+// of their mismatch counters. Anything but zero is a wrong translation
+// caught in the act.
+uint64_t SelfCheckMismatches();
 
 // The TranslationStats lines as text, now (log_translation_stats logs them
 // every 2048 functions; a short run, a test run among them, ends before

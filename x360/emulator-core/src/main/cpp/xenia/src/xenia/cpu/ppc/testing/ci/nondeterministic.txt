@@ -6,3 +6,7 @@
 # as intended ("[00, 00, ...]"), and the memory it ends with depends on which
 # tests ran before it in the same process.
 stwbrx_1
+
+# Read the time base.
+mftb_1
+mftb_2

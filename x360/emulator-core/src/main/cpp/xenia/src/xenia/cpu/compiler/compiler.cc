@@ -187,6 +187,13 @@ std::string FormatExtraStats() {
 }
 }  // namespace
 
+uint64_t SelfCheckMismatches() {
+  const auto& t = translation_stats;
+  return t.pin_verify_mismatches.load(std::memory_order_relaxed) +
+         t.simplify_skip_mismatches.load(std::memory_order_relaxed) +
+         t.verify_mismatches.load(std::memory_order_relaxed);
+}
+
 std::string FormatTranslationStats() {
   return fmt::format(
       "TranslationStats: {} functions (on request)\nTranslationStats:{}\n"

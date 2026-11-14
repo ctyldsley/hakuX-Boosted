@@ -85,8 +85,14 @@ for shard in "$work"/shard.[0-9]*; do
   fi
 done
 # Lines the translator's self-check modes print when they find a difference.
+# The runner does not show the log, so the count comes from the mismatch
+# counters it prints at its end ("Self-check mismatches: N"), which also fail
+# the shard; the grep stays for a build whose log is visible.
 checks=$(cat "$work"/shard.*.out "$work"/shard.*.xe.log 2>/dev/null \
   | grep -c -E 'PinVerify:|SimplifySkipVerify:|TranslatorVerify:' || true)
+for n in $(sed -n 's/^Self-check mismatches: //p' "$work"/shard.*.out); do
+  checks=$((checks + n))
+done
 if [ -n "${KEEP_LOGS:-}" ]; then mkdir -p "$KEEP_LOGS"; cp "$work"/shard.*.out "$work"/shard.*.xe.log "$KEEP_LOGS"/ 2>/dev/null; fi
 # Every test's final state, against the reference run's.
 state_diff=0
@@ -106,5 +112,5 @@ if [ -n "${STATE_REF:-}" ]; then
   fi
   echo "${LABEL:-tests}: $(wc -l < "$work/common") states compared with the reference, $state_diff differ"
 fi
-echo "${LABEL:-tests}: $total run, $passed passed, $failed failed, $checks self-check lines [$*]"
+echo "${LABEL:-tests}: $total run, $passed passed, $failed failed, $checks self-check mismatches [$*]"
 [ "$bad" = 0 ] && [ "$failed" = 0 ] && [ "$checks" = 0 ] && [ "$total" -gt 0 ] && [ "$state_diff" = 0 ]
