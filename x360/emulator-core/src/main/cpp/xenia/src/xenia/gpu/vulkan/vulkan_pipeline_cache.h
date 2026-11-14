@@ -1061,6 +1061,13 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   std::atomic<size_t> creation_threads_busy_{0};
   // hakuX-Boosted: vulkan_pipeline_creation_adaptive. The limit is above any
   // count unless the setting is on.
+  // hakuX-Boosted: real pipeline compile time by how many of the pipeline's
+  // guest shaders an earlier real pipeline had (0, 1, 2). Creation threads
+  // and the GPU command thread.
+  std::mutex compiled_shaders_lock_;
+  std::unordered_set<const void*> compiled_shaders_;
+  uint64_t compiled_by_seen_count_[3] = {};
+  double compiled_by_seen_ms_[3] = {};
   // hakuX-Boosted: the kept record.
   enum class DriverCacheState { kNone, kMatch, kMismatch, kUnknown };
   DriverCacheState driver_cache_state_ = DriverCacheState::kNone;

@@ -262,6 +262,15 @@ DEFINE_bool(
     "Vulkan");
 
 DEFINE_bool(
+    vulkan_placeholder_interpreter_vertex_textures, false,
+    "With vulkan_placeholder_interpreter = 2: a vertex shader that fetches "
+    "textures can have an interpreter placeholder. The interpreter's vertex "
+    "stage does not sample: such a fetch reads 0, so geometry that is "
+    "displaced or placed by a texture is drawn in the wrong place until the "
+    "real pipeline is ready. Off: such draws are refused by the interpreter "
+    "(and dropped or compiled on the GPU command thread, as before).",
+    "Vulkan");
+DEFINE_bool(
     vulkan_placeholder_depth_only_async, false,
     "With vulkan_placeholder_pipelines: the pipeline of a draw without a "
     "pixel shader (shadow maps, depth pre-passes) that the interpreter "
@@ -1717,8 +1726,9 @@ uint32_t VulkanPipelineCache::GetProgramInterpreterRefusal(
   if (program.element_count() > ucode_program::kCodeElements) {
     reasons |= kSkipProgramTooLarge;
   }
-  if (program.features & (ucode_program::kFeatureTextureFetch |
-                          ucode_program::kFeatureFetchQuery)) {
+  if ((program.features & (ucode_program::kFeatureTextureFetch |
+                           ucode_program::kFeatureFetchQuery)) &&
+      !cvars::vulkan_placeholder_interpreter_vertex_textures) {
     // Its result would be 0, and the shape of the draw may hang on it.
     reasons |= kSkipVertexTextureFetch;
   }
@@ -2787,6 +2797,24 @@ void VulkanPipelineCache::LogStatsIfDue() {
         speculative_refused_budget_);
   }
   if (cover) {
+    uint64_t by_seen_count[3];
+    double by_seen_ms[3];
+    {
+      std::lock_guard<std::mutex> seen_lock(compiled_shaders_lock_);
+      std::memcpy(by_seen_count, compiled_by_seen_count_,
+                  sizeof(by_seen_count));
+      std::memcpy(by_seen_ms, compiled_by_seen_ms_, sizeof(by_seen_ms));
+    }
+    XELOGI(
+        "pipeline compiles by shaders the driver had compiled before: "
+        "neither {} ({:.0f} ms, mean {:.1f}), one of the two {} ({:.0f} ms, "
+        "mean {:.1f}), both {} ({:.0f} ms, mean {:.1f})",
+        by_seen_count[0], by_seen_ms[0],
+        by_seen_count[0] ? by_seen_ms[0] / double(by_seen_count[0]) : 0.0,
+        by_seen_count[1], by_seen_ms[1],
+        by_seen_count[1] ? by_seen_ms[1] / double(by_seen_count[1]) : 0.0,
+        by_seen_count[2], by_seen_ms[2],
+        by_seen_count[2] ? by_seen_ms[2] / double(by_seen_count[2]) : 0.0);
     XELOGI(
         "placeholder cover: draws skipped {} (vertex shader not translated "
         "{}, no placeholder {}, placeholder compiling {}, over the "
@@ -5154,6 +5182,31 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
           std::chrono::duration<double, std::milli>(
               std::chrono::steady_clock::now() - pso_create_start)
               .count());
+      // hakuX-Boosted: a real pipeline's time by how many of its two guest
+      // shaders the driver had compiled before in another pipeline. If
+      // pipelines whose shaders were both seen are cheap, the driver keeps
+      // compiled shaders by stage, and warming a pair of shaders with any
+      // state at all is as good as guessing its state right
+      // (boosted/notes/shader-first-run.md, "Speculation").
+      if (!creating_placeholder) {
+        double compile_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() -
+                                pso_create_start)
+                                .count();
+        std::lock_guard<std::mutex> seen_lock(compiled_shaders_lock_);
+        uint32_t seen = 0;
+        if (!compiled_shaders_.insert(creation_arguments.vertex_shader)
+                 .second) {
+          ++seen;
+        }
+        // A draw without a pixel shader has the one stage.
+        if (!creation_arguments.pixel_shader ||
+            !compiled_shaders_.insert(creation_arguments.pixel_shader).second) {
+          ++seen;
+        }
+        ++compiled_by_seen_count_[seen];
+        compiled_by_seen_ms_[seen] += compile_ms;
+      }
       // hakuX-Boosted: what the placeholder was made of and where, so that a
       // slow one can be put down to the interpreter's module or to a guest
       // vertex shader's (boosted/notes/shader-ahead.md).
