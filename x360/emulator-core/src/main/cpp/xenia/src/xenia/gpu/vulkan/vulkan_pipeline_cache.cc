@@ -70,6 +70,7 @@ namespace shaders {
 // hakuX-Boosted: the guest shader interpreter, version 2
 // (vulkan_placeholder_interpreter = 2, shaders/ucode_program.glsli).
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_point_strip_vs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_quad_cp_ds.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_quad_patch_ds.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_triangle_cp_ds.h"
@@ -147,7 +148,11 @@ DEFINE_int32(
     "colour if the vertex shader passes one through, alpha 1; without a "
     "usable texture the vertex colour or a mid grey. 2: as 1, but alpha is "
     "the texture's times the vertex colour's and the guest alpha test is "
-    "applied, so blended and cut-out surfaces keep their shape. Depth test "
+    "applied, so blended and cut-out surfaces keep their shape. 3: with "
+    "vulkan_placeholder_interpreter = 2, the guest pixel shader's own "
+    "microcode run by the interpreter, so the pixels are the real shader's; "
+    "for a pixel shader the interpreter cannot run (the log says which and "
+    "why), as 2. Depth test "
     "and write are the real pipeline's; depth is never written from the "
     "stand-in. Host render target path only.",
     "Vulkan");
@@ -235,6 +240,8 @@ DEFINE_int32(
     "Vulkan");
 
 // hakuX-Boosted: boosted/notes/shader-first-run.md.
+DECLARE_bool(texture_integer_num_format);
+
 DEFINE_int32(
     vulkan_placeholder_interpreter, 1,
     "With vulkan_placeholder_pipelines and async_shader_vs_interpreter: "
@@ -668,6 +675,9 @@ bool VulkanPipelineCache::Initialize() {
   ucode_program_vs_ = ui::vulkan::util::CreateShaderModule(
       vulkan_device, shaders::ucode_program_vs,
       sizeof(shaders::ucode_program_vs));
+  ucode_program_ps_ = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::ucode_program_ps,
+      sizeof(shaders::ucode_program_ps));
   if (vulkan_device->properties().maxVertexOutputComponents >= 66 &&
       vulkan_device->properties().maxFragmentInputComponents >= 66) {
     // Sixteen interpolators and the point coordinates.
@@ -1557,6 +1567,80 @@ VkShaderModule VulkanPipelineCache::GetProgramVertexShader(
   }
 }
 
+uint32_t VulkanPipelineCache::GetProgramPixelRefusal(
+    VulkanShader& vertex_shader, VulkanShader& pixel_shader,
+    uint64_t pixel_shader_modification) {
+  uint32_t reasons = 0;
+  if (ucode_program_ps_ == VK_NULL_HANDLE ||
+      !command_processor_.GetVulkanDevice()
+           ->properties()
+           .imageViewFormatSwizzle) {
+    // Without view swizzles the translated shader swizzles what it sampled;
+    // the interpreter does not.
+    reasons |= kPixelRefusalNoModule;
+  }
+  if (cvars::texture_integer_num_format || cvars::texture_gradient_exp_bias) {
+    reasons |= kPixelRefusalSetting;
+  }
+  if (render_target_cache_.draw_resolution_scale_x() > 1 ||
+      render_target_cache_.draw_resolution_scale_y() > 1) {
+    reasons |= kPixelRefusalResolutionScale;
+  }
+  const ucode_program::Program& program = pixel_shader.GetUcodeProgram();
+  if (program.features & ucode_program::kFeatureMalformed) {
+    reasons |= kPixelRefusalMalformed;
+  }
+  // Both programs share the buffer.
+  if (vertex_shader.GetUcodeProgram().element_count() +
+          program.element_count() >
+      ucode_program::kCodeElements) {
+    reasons |= kPixelRefusalTooLarge;
+  }
+  if (program.features & ucode_program::kFeatureFetchQuery) {
+    reasons |= kPixelRefusalFetchQuery;
+  }
+  if (program.features & ucode_program::kFeatureMemoryExport) {
+    reasons |= kPixelRefusalMemoryExport;
+  }
+  if (program.features & ucode_program::kFeatureTooManyTextures) {
+    reasons |= kPixelRefusalTooManyTextures;
+  }
+  if (program.features &
+      (ucode_program::kFeatureTexture1D | ucode_program::kFeatureTexture3D)) {
+    reasons |= kPixelRefusalTextureKind;
+  }
+  if (program.features & ucode_program::kFeatureDepthOutput) {
+    reasons |= kPixelRefusalDepthOutput;
+  }
+  SpirvShaderTranslator::Modification modification(pixel_shader_modification);
+  if (modification.pixel.param_gen_enable &&
+      modification.pixel.param_gen_point) {
+    reasons |= kPixelRefusalPointSprite;
+  }
+  if (modification.pixel.depth_stencil_mode !=
+          SpirvShaderTranslator::Modification::DepthStencilMode::kNoModifiers &&
+      modification.pixel.depth_stencil_mode !=
+          SpirvShaderTranslator::Modification::DepthStencilMode::kEarlyHint) {
+    // The translated shader writes depth itself in these modes.
+    reasons |= kPixelRefusalDepthMode;
+  }
+  if (modification.pixel.rt0_blend_rgb_factor_for_premult !=
+          xenos::BlendFactor::kOne ||
+      modification.pixel.rt0_blend_a_factor_for_premult !=
+          xenos::BlendFactor::kOne) {
+    reasons |= kPixelRefusalBlendPremultiply;
+  }
+  return reasons;
+}
+
+uint32_t VulkanPipelineCache::GetProgramPixelWord(
+    uint64_t pixel_shader_modification) {
+  SpirvShaderTranslator::Modification modification(pixel_shader_modification);
+  return modification.pixel.param_gen_enable
+             ? 1 | (modification.pixel.param_gen_interpolator << 1)
+             : 0;
+}
+
 uint32_t VulkanPipelineCache::GetProgramInterpreterRefusal(
     VulkanShader& vertex_shader,
     Shader::HostVertexShaderType host_vertex_shader_type,
@@ -1762,7 +1846,8 @@ void VulkanPipelineCache::MakePlaceholder(
           use_program ? "interpreter (version 2)"
                       : (use_interpreter ? "interpreter" : "translated"),
           GetStandInPixelShaderName(stand_in.shader),
-          stand_in.shader == StandInPixelShader::kFlat
+          (stand_in.shader == StandInPixelShader::kFlat ||
+           stand_in.shader == StandInPixelShader::kProgram)
               ? "none"
               : (use_interpreter && !use_program
                      ? "chosen per draw"
@@ -2600,7 +2685,12 @@ void VulkanPipelineCache::LogStatsIfDue() {
         "creation thread's placeholder {} ({:.1f} ms), for a full-screen "
         "pass's real pipeline {} ({:.1f} ms); translations done on the GPU "
         "command thread {} ({:.1f} ms); real pipelines compiled on the GPU "
-        "command thread {} ({:.1f} ms, slowest {:.1f} ms)",
+        "command thread {} ({:.1f} ms, slowest {:.1f} ms); placeholders "
+        "whose pixels the interpreter draws {}, refused {} (malformed {}, "
+        "too large {}, fetch query {}, memory export {}, too many textures "
+        "{}, 1D or 3D texture {}, depth output {}, point sprite {}, depth "
+        "mode {}, blend premultiply {}, resolution scale {}, a setting {}, "
+        "no module {})",
         skipped_draws_, skipped_untranslated_vs_, skipped_no_placeholder_,
         skipped_placeholder_compiling_, skipped_interpreter_budget_,
         skipped_other_, placeholders_inline_,
@@ -2609,7 +2699,15 @@ void VulkanPipelineCache::LogStatsIfDue() {
         fullscreen_waits_,
         fullscreen_wait_ms_, draw_thread_translations_,
         draw_thread_translation_ms_, draw_thread_pipelines_,
-        draw_thread_pipeline_ms_, draw_thread_pipeline_worst_ms_);
+        draw_thread_pipeline_ms_, draw_thread_pipeline_worst_ms_,
+        placeholders_program_pixel_, placeholders_program_pixel_refused_,
+        program_pixel_refusals_[0], program_pixel_refusals_[1],
+        program_pixel_refusals_[2], program_pixel_refusals_[3],
+        program_pixel_refusals_[4], program_pixel_refusals_[5],
+        program_pixel_refusals_[6], program_pixel_refusals_[7],
+        program_pixel_refusals_[8], program_pixel_refusals_[9],
+        program_pixel_refusals_[10], program_pixel_refusals_[11],
+        program_pixel_refusals_[12]);
   }
 }
 
@@ -3981,6 +4079,8 @@ const char* VulkanPipelineCache::GetStandInPixelShaderName(
       return "2D texture";
     case StandInPixelShader::kCube:
       return "cube texture";
+    case StandInPixelShader::kProgram:
+      return "interpreter";
     default:
       return "no-op";
   }
@@ -4014,6 +4114,42 @@ bool VulkanPipelineCache::GetStandIn(
   }
   if (per_draw_choice && ucode_interpreter_stand_in_vs_ == VK_NULL_HANDLE) {
     return false;
+  }
+
+  // hakuX-Boosted: the pixel shader's own microcode, where the interpreter
+  // can run it and its vertex stage is there to feed it all sixteen
+  // interpolators.
+  if (cvars::vulkan_placeholder_ps_mode >= 3 && use_program) {
+    uint32_t refusal = GetProgramPixelRefusal(
+        guest_vertex_shader, guest_pixel_shader, pixel_shader->modification());
+    if (!refusal) {
+      const PipelineLayoutProvider* program_layout =
+          command_processor_.GetPipelineLayout(
+              ucode_program::kMaxTextures * 2, ucode_program::kMaxTextures, 0,
+              0);
+      if (program_layout) {
+        ++placeholders_program_pixel_;
+        stand_in_out = StandIn();
+        stand_in_out.shader = StandInPixelShader::kProgram;
+        pixel_shader_module_out = ucode_program_ps_;
+        pipeline_layout_out = program_layout;
+        return true;
+      }
+      refusal = kPixelRefusalNoModule;
+    }
+    ++placeholders_program_pixel_refused_;
+    for (uint32_t i = 0; i < kPixelRefusalCount; ++i) {
+      if (refusal & (uint32_t(1) << i)) {
+        ++program_pixel_refusals_[i];
+      }
+    }
+    if (cvars::shader_profiling) {
+      XELOGI(
+          "shader_profiling: pixel interpreter refused PS {:016X} (reasons "
+          "{:04X}, program features {:05X}): the stand-in is used",
+          guest_pixel_shader.ucode_data_hash(), refusal,
+          guest_pixel_shader.GetUcodeProgram().features);
+    }
   }
 
   // The interpolators that reach the pixel shader: written by the vertex

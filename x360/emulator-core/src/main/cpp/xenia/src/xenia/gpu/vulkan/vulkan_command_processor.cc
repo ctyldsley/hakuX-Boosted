@@ -4659,8 +4659,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
   const bool stand_in_used =
       stand_in.shader != VulkanPipelineCache::StandInPixelShader::kNone;
+  // hakuX-Boosted: the pixel side of the interpreter is not the stand-in: it
+  // takes the pixel shader's own textures, by its program's slots.
+  const bool stand_in_program =
+      stand_in.shader == VulkanPipelineCache::StandInPixelShader::kProgram;
   const bool stand_in_has_texture =
-      stand_in_used &&
+      stand_in_used && !stand_in_program &&
       stand_in.shader != VulkanPipelineCache::StandInPixelShader::kFlat;
   // hakuX-Boosted: the interpreter's version 2 is not told per draw which
   // interpolators to output: for the stand-in it is a translated vertex
@@ -4740,7 +4744,56 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
            : 0);
   // hakuX-Boosted: and the textures the stand-in pixel shader may sample.
   used_texture_mask |= stand_in_texture_mask;
+  if (stand_in_program) {
+    used_texture_mask |= pixel_shader->GetUcodeProgram().texture_fetch_constants;
+  }
   texture_cache_->RequestTextures(used_texture_mask);
+
+  // hakuX-Boosted: the textures and samplers of the pixel interpreter's
+  // slots. A slot nothing uses is given fetch constant 0's, or the null
+  // texture of its kind.
+  if (stand_in_program) {
+    const ucode_program::Program& pixel_program =
+        pixel_shader->GetUcodeProgram();
+    program_pixel_texture_bindings_.clear();
+    current_samplers_pixel_.clear();
+    current_samplers_shader_pixel_ = nullptr;
+    for (uint32_t i = 0; i < ucode_program::kMaxTextures; ++i) {
+      const ucode_program::Texture& slot = pixel_program.textures[i];
+      VulkanShader::TextureBinding texture_binding = {};
+      texture_binding.fetch_constant = slot.fetch_constant;
+      texture_binding.dimension = i < ucode_program::kMaxTextures2D
+                                      ? xenos::FetchOpDimension::k2D
+                                      : xenos::FetchOpDimension::kCube;
+      texture_binding.is_signed = 0;
+      program_pixel_texture_bindings_.push_back(texture_binding);
+      texture_binding.is_signed = 1;
+      program_pixel_texture_bindings_.push_back(texture_binding);
+    }
+    for (uint32_t i = 0; i < ucode_program::kMaxTextures; ++i) {
+      const ucode_program::Texture& slot = pixel_program.textures[i];
+      VulkanShader::SamplerBinding sampler_binding;
+      sampler_binding.fetch_constant = slot.fetch_constant;
+      sampler_binding.mag_filter = slot.mag_filter;
+      sampler_binding.min_filter = slot.min_filter;
+      sampler_binding.mip_filter = slot.mip_filter;
+      sampler_binding.aniso_filter = slot.aniso_filter;
+      VulkanTextureCache::SamplerParameters sampler_parameters =
+          texture_cache_->GetSamplerParameters(sampler_binding);
+      bool sampler_overflowed;
+      VkSampler sampler =
+          texture_cache_->UseSampler(sampler_parameters, sampler_overflowed);
+      if (sampler == VK_NULL_HANDLE) {
+        // Out of samplers in this submission: no draw, as for the stand-in.
+        first_run_draw.kind = kFirstRunDrawSkipped;
+        pipeline_cache_->NoteDrawSkipped(
+            skip_vertex_shader_hash, skip_pixel_shader_hash,
+            VulkanPipelineCache::kSkipStandInNoSampler, pipeline);
+        return true;
+      }
+      current_samplers_pixel_.emplace_back(sampler_parameters, sampler);
+    }
+  }
 
   // hakuX-Boosted: now that the textures are known, the stand-in's choice for
   // this draw, as the word the shaders read (bits in
@@ -5112,6 +5165,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // interpreter does not write).
     interpreter_program_draw.head[2] =
         regs.Get<reg::PA_CL_CLIP_CNTL>().vtx_kill_or ? 1 : 0;
+    if (stand_in_program) {
+      // The pixel shader's program behind the vertex shader's, the pixel
+      // stage's word, and its textures.
+      interpreter_program_draw.pixel = &pixel_shader->GetUcodeProgram();
+      interpreter_program_draw.head[3] =
+          VulkanPipelineCache::GetProgramPixelWord(
+              pixel_shader_translation->modification());
+      interpreter_program_draw.pixel_textures =
+          &program_pixel_texture_bindings_;
+    }
   }
   {
     uint32_t ucode_base_dwords = 0, cf_instr_count = 0;
@@ -8431,11 +8494,19 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     const Shader::ConstantRegisterMap& float_constant_map_pixel =
         pixel_shader->constant_register_map();
     float_constant_count_pixel = float_constant_map_pixel.float_count;
+    // hakuX-Boosted: the pixel interpreter indexes all 256 by number: for it
+    // the map is every constant, which the upload below then writes in order.
+    const bool pixel_constants_full =
+        interpreter_program && interpreter_program->pixel;
+    if (pixel_constants_full) {
+      float_constant_count_pixel = 256;
+    }
     for (uint32_t i = 0; i < 4; ++i) {
-      if (current_float_constant_map_pixel_[i] !=
-          float_constant_map_pixel.float_bitmap[i]) {
-        current_float_constant_map_pixel_[i] =
-            float_constant_map_pixel.float_bitmap[i];
+      const uint64_t float_bitmap = pixel_constants_full
+                                        ? ~uint64_t(0)
+                                        : float_constant_map_pixel.float_bitmap[i];
+      if (current_float_constant_map_pixel_[i] != float_bitmap) {
+        current_float_constant_map_pixel_[i] = float_bitmap;
         if (float_constant_count_pixel) {
           current_constant_buffers_up_to_date_ &= ~(
               UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFloatPixel);
@@ -8651,8 +8722,18 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   // could otherwise happen if the real shaders finished translating mid-draw).
   // The no-op placeholder PS never samples; the interpreter VS never samples.
   // (Both flags stay false when vulkan_placeholder_pipelines is off.)
+  // hakuX-Boosted: the pixel interpreter's sixteen textures and eight
+  // samplers, which the caller put in program_pixel_texture_bindings_ and
+  // current_samplers_pixel_.
+  const std::vector<VulkanShader::TextureBinding>* program_pixel_textures =
+      interpreter_program ? interpreter_program->pixel_textures : nullptr;
+  const bool stand_in_bindings = stand_in_texture || program_pixel_textures;
   if (placeholder_pixel_shader) {
-    if (stand_in_texture) {
+    if (program_pixel_textures) {
+      textures_pixel = program_pixel_textures;
+      texture_count_pixel = uint32_t(program_pixel_textures->size());
+      sampler_count_pixel = ucode_program::kMaxTextures;
+    } else if (stand_in_texture) {
       // hakuX-Boosted: a stand-in pixel shader samples one texture with one
       // sampler, which the caller chose and put in current_samplers_pixel_.
       stand_in_texture_bindings_.assign(1, *stand_in_texture);
@@ -8830,7 +8911,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
 
   // hakuX-Boosted: upstream's reuse gate goes by the guest shader, which a
   // stand-in's set and the real set have in common: always write a stand-in's.
-  if (stand_in_texture && cvars::vulkan_texture_descriptor_reuse_edge) {
+  if (stand_in_bindings && cvars::vulkan_texture_descriptor_reuse_edge) {
     current_graphics_descriptor_set_values_up_to_date_ &=
         ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
   }
@@ -9159,7 +9240,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     // rationale): always refresh edge's snapshot, then keep the hash state
     // either correct-and-valid (hash mode) or marked invalid (edge mode).
     // hakuX-Boosted: a stand-in's set is not the pixel shader's.
-    current_textures_pixel_shader_ = stand_in_texture ? nullptr : pixel_shader;
+    current_textures_pixel_shader_ = stand_in_bindings ? nullptr : pixel_shader;
     current_written_samplers_pixel_ = current_samplers_pixel_;
     if (cvars::vulkan_texture_descriptor_reuse_edge) {
       current_texture_descriptor_set_hash_valid_pixel_ = false;

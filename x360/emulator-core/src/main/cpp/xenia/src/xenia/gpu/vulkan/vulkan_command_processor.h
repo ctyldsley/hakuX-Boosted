@@ -579,6 +579,10 @@ class VulkanCommandProcessor final : public CommandProcessor {
     const ucode_program::Program* vertex = nullptr;
     const ucode_program::Program* pixel = nullptr;
     uint32_t head[ucode_program::kHeadElements * 4] = {};
+    // With a pixel program: the textures of its slots, in binding order
+    // (unsigned and signed for each); the samplers are in
+    // current_samplers_pixel_.
+    const std::vector<VulkanShader::TextureBinding>* pixel_textures = nullptr;
   };
   // *_bindings_ready is IssueDraw's per-draw readiness snapshot, the same one
   // the sampler collection used - re-reading bindings_ready() here would race
@@ -1244,6 +1248,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // hakuX-Boosted: the pixel stage's texture list of a draw with a stand-in
   // pixel shader (see UpdateBindings).
   std::vector<VulkanShader::TextureBinding> stand_in_texture_bindings_;
+  // hakuX-Boosted: the same for the pixel side of the guest shader
+  // interpreter (vulkan_placeholder_ps_mode = 3), filled by IssueDraw.
+  std::vector<VulkanShader::TextureBinding> program_pixel_texture_bindings_;
   // Whether the descriptor sets currently bound to the command buffer - only
   // low bits for the descriptor set layouts that remained the same are kept
   // when changing the pipeline layout. May be out of sync with

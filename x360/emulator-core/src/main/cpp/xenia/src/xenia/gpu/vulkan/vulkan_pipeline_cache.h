@@ -101,6 +101,11 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     k2D,
     // A cube texture, times the vertex colour.
     kCube,
+    // hakuX-Boosted: not an approximation: the guest pixel shader's own
+    // microcode, run by the guest shader interpreter, version 2
+    // (vulkan_placeholder_ps_mode = 3, shaders/ucode_program_pixel.glsli).
+    // Only with that interpreter's vertex stage.
+    kProgram,
   };
   struct StandIn {
     static constexpr uint32_t kNoInterpolator = 0xFF;
@@ -460,6 +465,31 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
       VulkanShader& vertex_shader,
       Shader::HostVertexShaderType host_vertex_shader_type,
       xenos::PrimitiveType host_primitive_type);
+
+  // hakuX-Boosted: why the pixel side of the interpreter cannot draw this
+  // pixel shader's pixels (the placeholder then gets the stand-in it would
+  // have had with vulkan_placeholder_ps_mode = 2); 0 if it can.
+  enum ProgramPixelRefusal : uint32_t {
+    kPixelRefusalMalformed = 1u << 0,
+    kPixelRefusalTooLarge = 1u << 1,
+    kPixelRefusalFetchQuery = 1u << 2,
+    kPixelRefusalMemoryExport = 1u << 3,
+    kPixelRefusalTooManyTextures = 1u << 4,
+    kPixelRefusalTextureKind = 1u << 5,
+    kPixelRefusalDepthOutput = 1u << 6,
+    kPixelRefusalPointSprite = 1u << 7,
+    kPixelRefusalDepthMode = 1u << 8,
+    kPixelRefusalBlendPremultiply = 1u << 9,
+    kPixelRefusalResolutionScale = 1u << 10,
+    kPixelRefusalSetting = 1u << 11,
+    kPixelRefusalNoModule = 1u << 12,
+    kPixelRefusalCount = 13,
+  };
+  uint32_t GetProgramPixelRefusal(VulkanShader& vertex_shader,
+                                  VulkanShader& pixel_shader,
+                                  uint64_t pixel_shader_modification);
+  // The pixel stage's per-draw word (shaders/ucode_program_pixel.glsli).
+  static uint32_t GetProgramPixelWord(uint64_t pixel_shader_modification);
 
   // True while this draw must be fed the ucode interpreter's inputs (full float
   // constants + ucode location). False once hot-swapped to the real VS.
@@ -974,6 +1004,12 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // control points, quad patch][equal spacing, fractional even spacing].
   VkShaderModule ucode_program_vs_ = VK_NULL_HANDLE;
   VkShaderModule ucode_program_point_strip_vs_ = VK_NULL_HANDLE;
+  VkShaderModule ucode_program_ps_ = VK_NULL_HANDLE;
+  // For the log: placeholders whose pixels the interpreter draws, those of
+  // vulkan_placeholder_ps_mode = 3 it refused, and why (ProgramPixelRefusal).
+  uint64_t placeholders_program_pixel_ = 0;
+  uint64_t placeholders_program_pixel_refused_ = 0;
+  uint64_t program_pixel_refusals_[kPixelRefusalCount] = {};
   VkShaderModule ucode_program_ds_[4][2] = {};
   // Interpreter placeholders made with it, for the once-a-second line.
   uint64_t placeholders_program_ = 0;
