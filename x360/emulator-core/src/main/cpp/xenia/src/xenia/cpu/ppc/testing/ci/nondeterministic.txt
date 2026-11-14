@@ -1,3 +1,8 @@
 # hakuX-Boosted: tests whose final state differs from one run to the next
 # with the same settings (they read a clock), left out of the comparison of
 # states between runs. They still run and their own assertions still count.
+
+# Its MEMORY_IN line is written in a form the runner's parser does not read
+# as intended ("[00, 00, ...]"), and the memory it ends with depends on which
+# tests ran before it in the same process.
+stwbrx_1

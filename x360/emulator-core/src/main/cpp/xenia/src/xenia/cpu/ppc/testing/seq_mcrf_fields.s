@@ -21,7 +21,7 @@ mcrf_fields_4:
   mfcr r7
   blr
   #_ REGISTER_OUT r5 7
-  #_ REGISTER_OUT r7 0x4000B00B
+  #_ REGISTER_OUT r7 0x400B000B
 
 test_mcrf_fields_gt:
   #_ REGISTER_IN r3 9

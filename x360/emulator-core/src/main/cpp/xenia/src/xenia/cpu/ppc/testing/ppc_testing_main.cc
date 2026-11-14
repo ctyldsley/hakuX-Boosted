@@ -71,6 +71,9 @@ using namespace xe::literals;
 typedef std::vector<std::pair<std::string, std::string>> AnnotationList;
 
 constexpr uint32_t START_ADDRESS = 0x80000000;
+// hakuX-Boosted: how much of the stack below its top is cleared before a
+// test and hashed after it.
+constexpr uint32_t kStackDumpSize = 32 * 1024;
 
 // Load skip list from file
 std::unordered_set<std::string> LoadSkipList(
@@ -320,6 +323,13 @@ class TestRunner {
     uint32_t stack_size = 64 * 1024;
     uint32_t stack_address = START_ADDRESS - stack_size;
     uint32_t pcr_address = stack_address - 0x1000;
+    // hakuX-Boosted: every test starts from the same memory, so that the
+    // state it leaves (DumpState) depends on the test alone and not on the
+    // tests run before it. The stack grows down from stack_address; the
+    // scratch area is the one allocated above.
+    std::memset(memory_->TranslateVirtual(stack_address - kStackDumpSize), 0,
+                kStackDumpSize);
+    std::memset(memory_->TranslateVirtual(0x10001000), 0, 0xEFFF);
     thread_state_.reset(
         new ThreadState(processor_.get(), 0x100, stack_address, pcr_address));
 
@@ -410,7 +420,7 @@ class TestRunner {
   // hakuX-Boosted: one line with the state the test left: the general
   // registers with CTR (LR is left out: the runner sets it), the float
   // registers, the vector registers, the condition, XER, FPSCR and VSCR
-  // state, the scratch memory tests write to and the 64 KiB of stack.
+  // state, the scratch memory tests write to and the top 32 KiB of the stack.
   void DumpState(TestCase& test_case) {
     if (cvars::test_state_dump.empty()) {
       return;
@@ -432,8 +442,9 @@ class TestRunner {
     flags = Hash(&ctx->vscr_sat, 1, flags);
     flags = Hash(&ctx->vscr_vec, sizeof(ctx->vscr_vec), flags);
     uint64_t mem = Hash(memory_->TranslateVirtual(0x10001000), 0xEFFF);
-    mem = Hash(memory_->TranslateVirtual(START_ADDRESS - 64 * 1024),
-               64 * 1024, mem);
+    mem = Hash(memory_->TranslateVirtual(START_ADDRESS - 64 * 1024 -
+                                         kStackDumpSize),
+               kStackDumpSize, mem);
     fprintf(state_dump_file_,
             "%s gpr=%016llx fpr=%016llx vr=%016llx flags=%016llx "
             "mem=%016llx\n",

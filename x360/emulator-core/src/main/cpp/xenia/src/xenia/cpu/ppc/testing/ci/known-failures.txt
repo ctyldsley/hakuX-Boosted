@@ -2,7 +2,8 @@
 # claude/integration-1113, with every translator setting at its default.
 # They are skipped in CI so that a red run always means a new difference.
 # One test name a line, as in ../skip.txt. "name unless <flag>" skips the
-# test only in runs that are not given that flag.
+# test only in runs that are not given that flag; "name if <flag>" only in
+# runs that are.
 
 # stwcx. to an address other than the one lwarx reserved must fail without
 # storing. With a64_native_reserved_ops (the default) the store-conditional
@@ -14,3 +15,12 @@ stwcx_address_mismatch
 mcrf_fields_cr7_to_cr3 unless --ppc_mcrf_copies_field=true
 mcrf_fields_gt unless --ppc_mcrf_copies_field=true
 mcrf_fields_zero_source unless --ppc_mcrf_copies_field=true
+
+# Upstream's own mcrf tests that copy from a field other than cr0 expect what
+# upstream's translation gives (a compare of the source field against zero),
+# not a copy of the field: mcrf_3 expects "greater" in cr0 after copying a
+# field that holds "equal". They fail with the exact translation.
+mcrf_3 if --ppc_mcrf_copies_field=true
+mcrf_3_constant if --ppc_mcrf_copies_field=true
+mcrf_5 if --ppc_mcrf_copies_field=true
+mcrf_5_constant if --ppc_mcrf_copies_field=true

@@ -40,10 +40,16 @@ done < "$work/all"
 
 # Upstream's skip list and this fork's own (known-failures.txt) as one file.
 # A line "name unless <flag>" of known-failures.txt applies only to runs
-# without that flag.
+# without that flag, "name if <flag>" only to runs with it.
 grep -h -v '^#' "$tests/skip.txt" | grep . > "$work/skip"
-grep -v '^#' "$here/known-failures.txt" | grep . | while read -r name unless flag; do
-  if [ -z "$unless" ] || ! echo " $* " | grep -q -F -- " $flag "; then echo "$name"; fi
+grep -v '^#' "$here/known-failures.txt" | grep . | while read -r name when flag; do
+  has=0
+  if echo " $* " | grep -q -F -- " $flag "; then has=1; fi
+  case "$when" in
+    '') echo "$name" ;;
+    unless) [ "$has" = 0 ] && echo "$name" ;;
+    if) [ "$has" = 1 ] && echo "$name" ;;
+  esac
 done >> "$work/skip"
 
 pids=()

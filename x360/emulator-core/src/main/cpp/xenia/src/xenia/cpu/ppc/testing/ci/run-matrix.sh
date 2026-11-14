@@ -35,7 +35,7 @@ if ! LABEL=reference-again STATE_REF="$work/reference.state" SUITES="${STABLE_SU
 fi
 echo "::endgroup::"
 
-while IFS='|' read -r label suites flags; do
+while IFS=';' read -r label suites flags; do
   case $label in ''|'#'*) continue ;; esac
   label=$(echo "$label" | xargs)
   suites=$(echo "$suites" | xargs)
