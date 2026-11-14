@@ -25,6 +25,7 @@
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/exception_handler.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/threading.h"
@@ -84,6 +85,11 @@ DEFINE_uint32(memory_watch_arm_ahead_spurious_limit, 4,
               "pages that were armed ahead and never asked for, stop arming "
               "ahead in that block of 64 host pages.",
               "Memory");
+DEFINE_bool(memory_watch_lean_fault_handler, false,
+            "On a fault inside guest memory, skip the search of the fibre "
+            "stack registry (a mutex and a walk of every fibre stack) that "
+            "the signal handler otherwise makes before anything else.",
+            "Memory");
 DEFINE_bool(memory_watch_uffd, false,
             "Keep write watches with userfaultfd write-protection instead of "
             "mprotect where the kernel and Android allow it (falls back to "
@@ -309,6 +315,12 @@ bool Memory::Initialize() {
   // anything in them is watched. Where it cannot be had the heaps keep to
   // mprotect, and the reason is in the log.
   xe::memory::set_watch_stats_enabled(cvars::memory_watch_log);
+  if (cvars::memory_watch_lean_fault_handler) {
+    // The whole mapping: the 4 GB of guest virtual views and the 512 MB
+    // physical view after them. No fibre stack can lie inside it.
+    ExceptionHandler::SetNoStackOverflowRange(
+        virtual_membase_, physical_membase_ + 0x20000000ull);
+  }
   if (cvars::memory_watch_uffd) {
     if (xe::memory::WriteWatchInitialize() &&
         xe::memory::WriteWatchRegister(virtual_membase_ + 0xA0000000ull,
@@ -2575,14 +2587,15 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
             // Write-protected by the kernel exactly when write-watched.
             can_bridge = write_watched;
           } else if (protect_access == xe::memory::PageAccess::kReadOnly) {
-            // Read-only on the host: a page the guest holds read-only, or a
-            // writable one with a write watch; in both cases only while no
-            // read watch has it at no access.
+            // Read-only on the host for certain: a page the guest holds
+            // read-write that has a write watch and no read watch (which
+            // would have it at no access). A page the guest itself holds
+            // read-only should be read-only on the host too, but that rests
+            // on the guest's protection calls and not on this code, so the
+            // run does not cross it.
             can_bridge =
-                !read_watched &&
-                (current_page_access == xe::memory::PageAccess::kReadOnly ||
-                 (current_page_access == xe::memory::PageAccess::kReadWrite &&
-                  write_watched));
+                !read_watched && write_watched &&
+                current_page_access == xe::memory::PageAccess::kReadWrite;
           } else {
             // No access on the host for certain only under a read watch (a
             // page the guest has released may still be accessible).

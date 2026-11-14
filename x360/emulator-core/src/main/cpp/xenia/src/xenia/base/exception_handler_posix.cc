@@ -40,9 +40,27 @@ constexpr size_t kMaxHandlerCount = 8;
 // Executed in order.
 std::pair<ExceptionHandler::Handler, void*> handlers_[kMaxHandlerCount];
 
+// hakuX-Boosted: see ExceptionHandler::SetNoStackOverflowRange. Both zero
+// until it is called, which no address is inside.
+static uintptr_t no_stack_overflow_begin_ = 0;
+static uintptr_t no_stack_overflow_end_ = 0;
+
+void ExceptionHandler::SetNoStackOverflowRange(const void* begin,
+                                               const void* end) {
+  no_stack_overflow_end_ = 0;
+  no_stack_overflow_begin_ = reinterpret_cast<uintptr_t>(begin);
+  no_stack_overflow_end_ = reinterpret_cast<uintptr_t>(end);
+}
+
 static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
                                      void* signal_context) {
+  // hakuX-Boosted: the address test comes first, so a fault inside the range
+  // given to SetNoStackOverflowRange skips the registry's mutex and search.
+  const uintptr_t fault_address_for_stack_check =
+      reinterpret_cast<uintptr_t>(signal_info->si_addr);
   if (signal_number == SIGSEGV &&
+      !(fault_address_for_stack_check >= no_stack_overflow_begin_ &&
+        fault_address_for_stack_check < no_stack_overflow_end_) &&
       xe::threading::Fiber::IsStackOverflowFault(signal_info->si_addr)) {
     // Crash-safe diagnostic, the process is going down on the default action.
     char buf[96];
