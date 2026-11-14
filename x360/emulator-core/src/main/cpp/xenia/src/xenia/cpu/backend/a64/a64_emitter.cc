@@ -97,6 +97,17 @@ DEFINE_bool(
     "after it is set.",
     "a64");
 
+// hakuX-Boosted: instruction selection that gives the same results in fewer
+// instructions; each use is marked with the setting's name.
+DEFINE_bool(
+    a64_tight_sequences, false,
+    "Shorter forms of some sequences, with the same results: AND, OR and "
+    "XOR of a 64-bit value with a constant use ARM64's immediate form when "
+    "the constant has one (a mask of consecutive bits, for one) instead of "
+    "first loading the constant into a register. Takes effect for functions "
+    "translated after it is set.",
+    "a64");
+
 // hakuX-Boosted: see A64Emitter::PushStackpoint.
 DEFINE_bool(
     a64_compact_stackpoint_push, false,
@@ -155,9 +166,12 @@ static constexpr size_t kMaxCodeSize = 4_MiB;
 // Register maps:
 // GPR allocatable registers: x22, x23, x24, x25, x26, x27, x28
 // (x19=backend context, x20=context, x21=membase are reserved)
-const uint32_t A64Emitter::gpr_reg_map_[GPR_COUNT] = {
-    22, 23, 24, 25, 26, 27, 28,
+// hakuX-Boosted: with a64_extended_gpr_pool, x9-x15 as well. They follow
+// the original seven so that an index means the same register either way.
+const uint32_t A64Emitter::gpr_reg_map_[GPR_COUNT_EXTENDED] = {
+    22, 23, 24, 25, 26, 27, 28, 9, 10, 11, 12, 13, 14, 15,
 };
+int A64Emitter::gpr_count_ = A64Emitter::GPR_COUNT;
 
 // VEC allocatable registers: v4-v15, v16-v31
 // (v0-v3 are scratch)
@@ -292,12 +306,16 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
 }
 
 bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
+  using hir::OpcodeSignatureType;  // for the GET_OPCODE_SIG_TYPE macros
   // hakuX-Boosted: the guest registers this function keeps in host
   // registers, as GuestRegisterPinningPass chose them. Empty unless
   // pin_guest_registers is on.
   load_expectations_ = builder->context_load_expectations().empty()
                            ? nullptr
                            : &builder->context_load_expectations();
+  pin_home_verify_ = builder->pin_home_verify().empty()
+                         ? nullptr
+                         : &builder->pin_home_verify();
   call_literals_.clear();
   pins_.clear();
   pins_live_ = false;
@@ -318,7 +336,7 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
       pin_written_mask |= pin.bit;
     }
     if (slot.reg_set == 0) {
-      if (slot.reg_index >= GPR_COUNT || (slot.type != hir::INT64_TYPE &&
+      if (slot.reg_index >= gpr_count_ || (slot.type != hir::INT64_TYPE &&
                                           slot.type != hir::INT8_TYPE)) {
         XELOGE("A64: bad pinned integer slot in {:08X}",
                current_guest_function_);
@@ -447,6 +465,7 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     // Reset FPCR tracking on each block entry (we don't know which
     // predecessor ran, so mode is unknown).
     ForgetFpcrMode();
+    flags_key_.valid = false;  // hakuX-Boosted: nor what the flags hold
 
     // Bind all labels targeting this block.
     auto label = block->label_head;
@@ -499,6 +518,64 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
           pin_cur_live_after_ = 0;
         }
       }
+      // hakuX-Boosted: pin_guest_registers_coalesce. An instruction whose
+      // result the allocator had computed straight into a pin's host
+      // register (its destination is that register, and it is not the load
+      // of the pin itself) ends the old value of that pin: the store that
+      // follows it in the same block is what made the allocator do this,
+      // and only pure instructions lie between. So a host helper called
+      // from inside this instruction's sequence neither writes that pin
+      // back (the register may already hold part of the result) nor reads
+      // it again (which would overwrite the result with the old value).
+      if (pin_by_liveness && pins_live_ && instr->dest &&
+          GET_OPCODE_SIG_TYPE_DEST(instr->opcode->signature) ==
+              hir::OPCODE_SIG_TYPE_V &&
+          instr->dest->reg.set) {
+        const bool is_int = instr->dest->type <= hir::INT64_TYPE;
+        const uint32_t index = static_cast<uint32_t>(instr->dest->reg.index);
+        const uint32_t host =
+            is_int ? (index < uint32_t(gpr_count_) ? gpr_reg_map_[index] : ~0u)
+                   : (index < uint32_t(VEC_COUNT) ? vec_reg_map_[index] : ~0u);
+        for (const auto& pin : pins_) {
+          const bool pin_is_int =
+              pin.type == hir::INT64_TYPE || pin.type == hir::INT8_TYPE;
+          if (pin_is_int != is_int || pin.host_reg != host) {
+            continue;
+          }
+          if (!(instr->GetOpcodeNum() == hir::OPCODE_LOAD_CONTEXT &&
+                static_cast<uint32_t>(instr->src1.offset) == pin.offset)) {
+            pin_cur_dirty_ &= ~pin.bit;
+            pin_cur_live_after_ &= ~pin.bit;
+          }
+          break;
+        }
+      }
+      // hakuX-Boosted: pin_guest_registers_coalesce_verify, the uses.
+      if (pin_home_verify_ && pins_live_) {
+        const uint32_t signature = instr->opcode->signature;
+        const hir::Value* sources[3] = {
+            GET_OPCODE_SIG_TYPE_SRC1(signature) == hir::OPCODE_SIG_TYPE_V
+                ? instr->src1.value
+                : nullptr,
+            GET_OPCODE_SIG_TYPE_SRC2(signature) == hir::OPCODE_SIG_TYPE_V
+                ? instr->src2.value
+                : nullptr,
+            GET_OPCODE_SIG_TYPE_SRC3(signature) == hir::OPCODE_SIG_TYPE_V
+                ? instr->src3.value
+                : nullptr,
+        };
+        for (int n = 0; n < 3; ++n) {
+          if (!sources[n] || (n > 0 && sources[n] == sources[0]) ||
+              (n > 1 && sources[n] == sources[1])) {
+            continue;
+          }
+          auto home = pin_home_verify_->find(sources[n]);
+          if (home != pin_home_verify_->end() &&
+              home->second.slot < pins_.size()) {
+            EmitPinHomeVerify(sources[n], pins_[home->second.slot]);
+          }
+        }
+      }
       // hakuX-Boosted: bring the context up to date before any instruction
       // that leaves this function's code, and read the pinned registers back
       // after any that returns here. See EmitPinnedFlush.
@@ -520,25 +597,116 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
       }
       // hakuX-Boosted: a compare that only feeds the branch after it leaves
       // its answer in the flags (see EmitCompareResult).
+      bool zero_test_taken = false;
+      FlagsKey compare_key;
       if (cvars::a64_fuse_compare_branch) {
-        if (const hir::Instr* branch = FindFusableBranch(instr)) {
+        bool nothing_written = true;
+        if (const hir::Instr* branch =
+                FindFusableBranch(instr, &nothing_written)) {
           fuse_compare_pending_ = true;
           fused_cond_valid_ = false;
+          fused_zero_test_ = false;
           fused_branch_ = branch;
           compiler::translation_stats.compares_fused.fetch_add(
               1, std::memory_order_relaxed);
+          // An equality test against zero whose register is certain to be
+          // unchanged at the branch: nothing is emitted here.
+          const hir::Opcode op = instr->GetOpcodeNum();
+          if (nothing_written &&
+              (op == hir::OPCODE_COMPARE_EQ || op == hir::OPCODE_COMPARE_NE)) {
+            const hir::Value* a = instr->src1.value;
+            const hir::Value* b = instr->src2.value;
+            if (a->IsConstant() && !b->IsConstant()) {
+              std::swap(a, b);
+            }
+            if (!a->IsConstant() && b->IsConstant() &&
+                (a->type == hir::INT32_TYPE || a->type == hir::INT64_TYPE) &&
+                b->IsConstantZero()) {
+              fused_zero_reg_ = MapReg(a, gpr_reg_map_, gpr_count_, "gpr");
+              fused_zero_is64_ = a->type == hir::INT64_TYPE;
+              fused_zero_test_ = true;
+              fused_cond_ = op == hir::OPCODE_COMPARE_EQ ? EQ : NE;
+              fused_cond_valid_ = true;
+              fuse_compare_pending_ = false;
+              zero_test_taken = true;
+            }
+          }
+        }
+        // The flags cache: the same compare as the one the flags hold needs
+        // no second cmp.
+        if (!zero_test_taken) {
+          compare_key = MakeFlagsKey(instr);
+          if (compare_key.valid && compare_key == flags_key_) {
+            skip_next_cmp_ = true;
+            compiler::translation_stats.compares_reused_flags.fetch_add(
+                1, std::memory_order_relaxed);
+          }
         }
       }
       last_opcode = instr->GetOpcodeNum();
       const hir::Instr* new_tail = instr;
       bool selected = false;
       try {
-        selected = SelectSequence(this, instr, &new_tail);
+        if (zero_test_taken) {
+          selected = true;
+          new_tail = instr->next;
+        } else {
+          selected = SelectSequence(this, instr, &new_tail);
+        }
+        skip_next_cmp_ = false;
+        // What the flags hold now.
+        if (compare_key.valid) {
+          flags_key_ = compare_key;
+        } else if (!zero_test_taken) {
+          switch (instr->GetOpcodeNum()) {
+            case hir::OPCODE_SOURCE_OFFSET:
+            case hir::OPCODE_COMMENT:
+            case hir::OPCODE_NOP:
+            case hir::OPCODE_STORE_CONTEXT:
+            case hir::OPCODE_STORE_LOCAL:
+            case hir::OPCODE_LOAD_LOCAL:
+            case hir::OPCODE_CONTEXT_BARRIER:
+              // These write no flag in any mode (see FindFusableBranch).
+              break;
+            default:
+              flags_key_.valid = false;
+              break;
+          }
+        }
         // hakuX-Boosted: a compare sequence that did not take the offer to
         // fuse has put its answer in the register as usual.
         fuse_compare_pending_ = false;
         if (selected && pin_sync_kind == PinSync::kFlushAndReload) {
           EmitPinnedReload(pin_cur_live_after_);
+        }
+        // hakuX-Boosted: pin_guest_registers_coalesce_verify. A value the
+        // setting would have computed into a pin: write the pin here, where
+        // the setting would have written it, from the value's own register.
+        if (selected && pin_home_verify_ && pins_live_ && instr->dest &&
+            GET_OPCODE_SIG_TYPE_DEST(instr->opcode->signature) ==
+                hir::OPCODE_SIG_TYPE_V) {
+          auto home = pin_home_verify_->find(instr->dest);
+          if (home != pin_home_verify_->end() && home->second.is_def &&
+              home->second.slot < pins_.size()) {
+            const auto& pin = pins_[home->second.slot];
+            const uint32_t index =
+                static_cast<uint32_t>(instr->dest->reg.index);
+            switch (pin.type) {
+              case hir::INT64_TYPE:
+                mov(XReg(pin.host_reg), XReg(gpr_reg_map_[index]));
+                break;
+              case hir::INT8_TYPE:
+                mov(WReg(pin.host_reg), WReg(gpr_reg_map_[index]));
+                break;
+              case hir::FLOAT64_TYPE:
+                fmov(DReg(pin.host_reg), DReg(vec_reg_map_[index]));
+                break;
+              default:
+                orr(VReg(pin.host_reg).b16, VReg(vec_reg_map_[index]).b16,
+                    VReg(vec_reg_map_[index]).b16);
+                break;
+            }
+          }
         }
       } catch (const Xbyak_aarch64::Error& e) {
         // Uncaught this aborts the process with no context, so name the opcode
@@ -713,7 +881,10 @@ void A64Emitter::ResetPerFunctionState() {
   block_labels_.clear();
   fuse_compare_pending_ = false;
   fused_cond_valid_ = false;
+  fused_zero_test_ = false;
   fused_branch_ = nullptr;
+  flags_key_.valid = false;
+  skip_next_cmp_ = false;
 
   // Clean up HIR->xbyak label map. HIR label ids restart at each function, so
   // stale entries would hand the next function this one's labels.
@@ -773,8 +944,106 @@ bool A64Emitter::UseShortBranch(const Xbyak_aarch64::Label& label,
 // (str, or a register move for a pinned slot), spills to locals and the
 // barrier the front end puts before the branch (nothing, or a pinned
 // write-back and reload, which are stores and loads).
+namespace {
+bool IsIntegerCompare(hir::Opcode opcode) {
+  switch (opcode) {
+    case hir::OPCODE_COMPARE_EQ:
+    case hir::OPCODE_COMPARE_NE:
+    case hir::OPCODE_COMPARE_SLT:
+    case hir::OPCODE_COMPARE_SLE:
+    case hir::OPCODE_COMPARE_SGT:
+    case hir::OPCODE_COMPARE_SGE:
+    case hir::OPCODE_COMPARE_ULT:
+    case hir::OPCODE_COMPARE_ULE:
+    case hir::OPCODE_COMPARE_UGT:
+    case hir::OPCODE_COMPARE_UGE:
+      return true;
+    default:
+      return false;
+  }
+}
+}  // namespace
+
+// hakuX-Boosted: the key of a 32-bit or 64-bit integer compare, for the
+// flags cache. (8-bit and 16-bit compares extend their operands into
+// scratch registers first and are left alone.) A constant operand is keyed
+// by its bits, a value by its identity: HIR values are assigned once, and a
+// value that is still being used is still in its register (a spilled value
+// comes back under a new identity; a value living in a pinned register has
+// no use after that register is next written).
+A64Emitter::FlagsKey A64Emitter::MakeFlagsKey(const hir::Instr* compare) {
+  FlagsKey key;
+  if (!IsIntegerCompare(compare->GetOpcodeNum()) || !compare->src1.value ||
+      !compare->src2.value) {
+    return key;
+  }
+  const hir::TypeName type = compare->src1.value->type;
+  if (type != hir::INT32_TYPE && type != hir::INT64_TYPE) {
+    return key;
+  }
+  key.type = type;
+  const hir::Value* operands[2] = {compare->src1.value, compare->src2.value};
+  for (int n = 0; n < 2; ++n) {
+    if (operands[n]->IsConstant()) {
+      key.constant[n] = type == hir::INT32_TYPE
+                            ? static_cast<uint32_t>(operands[n]->constant.i32)
+                            : static_cast<uint64_t>(operands[n]->constant.i64);
+    } else {
+      key.value[n] = operands[n];
+    }
+  }
+  key.valid = true;
+  return key;
+}
+
+bool A64Emitter::FlagsHoldCompare(const hir::Value* result,
+                                  Xbyak_aarch64::Cond* cond) {
+  if (!flags_key_.valid || !result || result->IsConstant() || !result->def ||
+      !(MakeFlagsKey(result->def) == flags_key_)) {
+    return false;
+  }
+  switch (result->def->GetOpcodeNum()) {
+    case hir::OPCODE_COMPARE_EQ:
+      *cond = EQ;
+      break;
+    case hir::OPCODE_COMPARE_NE:
+      *cond = NE;
+      break;
+    case hir::OPCODE_COMPARE_SLT:
+      *cond = LT;
+      break;
+    case hir::OPCODE_COMPARE_SLE:
+      *cond = LE;
+      break;
+    case hir::OPCODE_COMPARE_SGT:
+      *cond = GT;
+      break;
+    case hir::OPCODE_COMPARE_SGE:
+      *cond = GE;
+      break;
+    case hir::OPCODE_COMPARE_ULT:
+      *cond = LO;
+      break;
+    case hir::OPCODE_COMPARE_ULE:
+      *cond = LS;
+      break;
+    case hir::OPCODE_COMPARE_UGT:
+      *cond = HI;
+      break;
+    case hir::OPCODE_COMPARE_UGE:
+      *cond = HS;
+      break;
+    default:
+      return false;
+  }
+  compiler::translation_stats.branches_on_flags.fetch_add(
+      1, std::memory_order_relaxed);
+  return true;
+}
+
 const hir::Instr* A64Emitter::FindFusableBranch(
-    const hir::Instr* compare) const {
+    const hir::Instr* compare, bool* nothing_written) const {
+  *nothing_written = true;
   switch (compare->GetOpcodeNum()) {
     case hir::OPCODE_COMPARE_EQ:
     case hir::OPCODE_COMPARE_NE:
@@ -803,10 +1072,21 @@ const hir::Instr* A64Emitter::FindFusableBranch(
       case hir::OPCODE_SOURCE_OFFSET:
       case hir::OPCODE_COMMENT:
       case hir::OPCODE_NOP:
-      case hir::OPCODE_STORE_CONTEXT:
       case hir::OPCODE_STORE_LOCAL:
-      case hir::OPCODE_LOAD_LOCAL:
       case hir::OPCODE_CONTEXT_BARRIER:
+        continue;
+      case hir::OPCODE_STORE_CONTEXT:
+        if (!pins_.empty()) {
+          const uint32_t offset = static_cast<uint32_t>(i->src1.offset);
+          for (const auto& pin : pins_) {
+            if (pin.offset == offset) {
+              *nothing_written = false;
+            }
+          }
+        }
+        continue;
+      case hir::OPCODE_LOAD_LOCAL:
+        *nothing_written = false;
         continue;
       case hir::OPCODE_BRANCH_TRUE:
       case hir::OPCODE_BRANCH_FALSE:
@@ -1162,11 +1442,34 @@ void A64Emitter::CallNativeSafe(void* fn) {
   // GuestToHostThunk: x0=target function, x1/x2=args (set by caller).
   // The thunk rearranges: saves x0 in x9, sets x0=context, calls x9.
   mov(x0, reinterpret_cast<uint64_t>(fn));
-  mov(x9, reinterpret_cast<uint64_t>(backend()->guest_to_host_thunk()));
-  blr(x9);
+  // hakuX-Boosted: x16 with the extended pool, see HostCallReg.
+  const XReg thunk_reg = HostCallReg();
+  mov(thunk_reg, reinterpret_cast<uint64_t>(backend()->guest_to_host_thunk()));
+  blr(thunk_reg);
   if (sync_pins) {
     EmitPinnedReload(pin_cur_live_after_);
   }
+}
+
+uint32_t A64Emitter::EmitSaveExtendedGprsForBareCall() {
+  if (!extended_gpr_pool()) {
+    return 0;
+  }
+  stp(x9, x10, pre_ptr(sp, -64));
+  stp(x11, x12, ptr(sp, 16));
+  stp(x13, x14, ptr(sp, 32));
+  str(x15, ptr(sp, 48));
+  return 64;
+}
+
+void A64Emitter::EmitRestoreExtendedGprsAfterBareCall() {
+  if (!extended_gpr_pool()) {
+    return;
+  }
+  ldr(x15, ptr(sp, 48));
+  ldp(x13, x14, ptr(sp, 32));
+  ldp(x11, x12, ptr(sp, 16));
+  ldp(x9, x10, post_ptr(sp, 64));
 }
 
 // hakuX-Boosted: pinned guest registers (pin_guest_registers).
@@ -1348,6 +1651,57 @@ void A64Emitter::EmitPinnedVerify(const PinnedGuestRegister& pin) {
   pin_cur_live_after_ |= pin.bit;
   CallNativeSafe(reinterpret_cast<void*>(&ReportPinnedMismatch));
   pin_cur_live_after_ = saved_live_after;
+  L(same);
+}
+
+// (The mismatch path below calls a host function, which leaves the flags
+// undefined: whatever they were known to hold is forgotten.)
+static uint64_t ReportPinHomeMismatch(void* raw_context, uint64_t function,
+                                      uint64_t offset) {
+  const uint64_t count =
+      compiler::translation_stats.verify_mismatches.fetch_add(
+          1, std::memory_order_relaxed);
+  if (count < 64) {
+    XELOGE(
+        "TranslatorVerify: pin_guest_registers_coalesce would have used a "
+        "pinned register whose contents had changed: context offset {:#x} in "
+        "guest function {:08X}",
+        offset, static_cast<uint32_t>(function));
+  }
+  return 0;
+}
+
+void A64Emitter::EmitPinHomeVerify(const hir::Value* value,
+                                   const PinnedGuestRegister& pin) {
+  ForgetFpcrMode();  // the report goes through the thunk, as EmitPinnedVerify
+  flags_key_.valid = false;
+  Label& same = NewCachedLabel();
+  const uint32_t index = static_cast<uint32_t>(value->reg.index);
+  switch (pin.type) {
+    case hir::INT64_TYPE:
+      eor(x0, XReg(gpr_reg_map_[index]), XReg(pin.host_reg));
+      break;
+    case hir::INT8_TYPE:
+      eor(w0, WReg(gpr_reg_map_[index]), WReg(pin.host_reg));
+      and_(x0, x0, 0xFF);
+      break;
+    case hir::FLOAT64_TYPE:
+      fmov(x0, DReg(vec_reg_map_[index]));
+      fmov(x1, DReg(pin.host_reg));
+      eor(x0, x0, x1);
+      break;
+    default:
+      eor(VReg(0).b16, VReg(vec_reg_map_[index]).b16,
+          VReg(pin.host_reg).b16);
+      umov(x0, VReg(0).d2[0]);
+      umov(x1, VReg(0).d2[1]);
+      orr(x0, x0, x1);
+      break;
+  }
+  cbz(x0, same);
+  mov(x1, static_cast<uint64_t>(current_guest_function_));
+  mov(x2, static_cast<uint64_t>(pin.offset));
+  CallNativeSafe(reinterpret_cast<void*>(&ReportPinHomeMismatch));
   L(same);
 }
 
@@ -1571,9 +1925,12 @@ void A64Emitter::EmitPreemptCheck(uint32_t guest_address) {
         if (sync_pins) {
           e.EmitPinnedFlush(flush_mask);
         }
-        e.mov(e.x9,
+        // hakuX-Boosted: x16 with the extended pool (pinned registers may
+        // sit in x9-x15 and only some are read back below).
+        const XReg thunk_reg = e.HostCallReg();
+        e.mov(thunk_reg,
               reinterpret_cast<uint64_t>(e.backend()->guest_to_host_thunk()));
-        e.blr(e.x9);
+        e.blr(thunk_reg);
         if (sync_pins) {
           e.EmitPinnedReload(reload_mask);
         }
@@ -1583,9 +1940,12 @@ void A64Emitter::EmitPreemptCheck(uint32_t guest_address) {
     // Diagnostic only: costs a materialize + store on every loop back-edge, so
     // it stays off unless a wedge is being chased.
     static_assert(offsetof(ppc::PPCContext, last_safepoint_pc) < 16384);
-    mov(w9, guest_address);
-    str(w9, ptr(x20, static_cast<uint32_t>(
-                         offsetof(ppc::PPCContext, last_safepoint_pc))));
+    // hakuX-Boosted: w17 with the extended pool, where w9 may be a pinned
+    // register.
+    const WReg pc_reg = extended_gpr_pool() ? w17 : w9;
+    mov(pc_reg, guest_address);
+    str(pc_reg, ptr(x20, static_cast<uint32_t>(
+                             offsetof(ppc::PPCContext, last_safepoint_pc))));
   }
   ldrb(w8, ptr(x20, flag_offset));
   cbnz(w8, do_yield);
@@ -1700,9 +2060,13 @@ void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
     // instead of here because adr's ±1 MiB range can't span body+tail in
     // large functions.
     //   x8 = return address (where to resume after fixup)
-    e.mov(e.x10, reinterpret_cast<uint64_t>(
-                     e.backend()->synchronize_guest_and_host_stack_helper()));
-    e.br(e.x10);
+    // hakuX-Boosted: x17 with the extended pool: the return site this goes
+    // back to runs with the pinned registers loaded, x10 may be one.
+    const XReg helper_reg = extended_gpr_pool() ? e.x17 : e.x10;
+    e.mov(helper_reg,
+          reinterpret_cast<uint64_t>(
+              e.backend()->synchronize_guest_and_host_stack_helper()));
+    e.br(helper_reg);
   });
   adr(x8, return_from_sync);
   b(sync_label);

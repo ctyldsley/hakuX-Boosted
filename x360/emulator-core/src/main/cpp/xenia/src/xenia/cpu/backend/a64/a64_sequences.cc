@@ -226,7 +226,11 @@ struct LOAD_CONTEXT_I8
       if (e.pin_verify()) {
         e.EmitPinnedVerify(*pin);
       }
-      e.mov(i.dest, WReg(pin->host_reg));
+      // hakuX-Boosted: pin_guest_registers_coalesce may have made the pin
+      // the value's own register, and then there is nothing to do.
+      if (i.dest.reg().getIdx() != pin->host_reg) {
+        e.mov(i.dest, WReg(pin->host_reg));
+      }
     } else {
       e.ldrb(i.dest, ptr(e.GetContextReg(), offset));
     }
@@ -260,7 +264,9 @@ struct LOAD_CONTEXT_I64
       if (e.pin_verify()) {
         e.EmitPinnedVerify(*pin);
       }
-      e.mov(i.dest, XReg(pin->host_reg));
+      if (i.dest.reg().getIdx() != pin->host_reg) {  // as LOAD_CONTEXT_I8
+        e.mov(i.dest, XReg(pin->host_reg));
+      }
     } else {
       e.ldr(i.dest, ptr(e.GetContextReg(), offset));
     }
@@ -286,7 +292,9 @@ struct LOAD_CONTEXT_F64
       if (e.pin_verify()) {
         e.EmitPinnedVerify(*pin);
       }
-      e.fmov(i.dest, DReg(pin->host_reg));
+      if (i.dest.reg().getIdx() != pin->host_reg) {  // as LOAD_CONTEXT_I8
+        e.fmov(i.dest, DReg(pin->host_reg));
+      }
       return;
     }
     e.ldr(i.dest, ptr(e.GetContextReg(), offset));
@@ -303,7 +311,9 @@ struct LOAD_CONTEXT_V128
       }
       auto pin_vreg = VReg(pin->host_reg);
       auto dst_vreg = VReg(i.dest.reg().getIdx());
-      e.orr(dst_vreg.b16, pin_vreg.b16, pin_vreg.b16);
+      if (i.dest.reg().getIdx() != pin->host_reg) {  // as LOAD_CONTEXT_I8
+        e.orr(dst_vreg.b16, pin_vreg.b16, pin_vreg.b16);
+      }
       return;
     }
     e.ldr(i.dest, ptr(e.GetContextReg(), offset));
@@ -328,7 +338,10 @@ struct STORE_CONTEXT_I8
       if (i.src2.is_constant) {
         e.mov(WReg(pin->host_reg),
               static_cast<uint64_t>(i.src2.constant() & 0xFF));
-      } else {
+      } else if (i.src2.reg().getIdx() != pin->host_reg) {
+        // hakuX-Boosted: (when the two are the same register,
+        // pin_guest_registers_coalesce had the value computed into the pin,
+        // and only values that are a clean 0 or 1 get that.)
         e.uxtb(WReg(pin->host_reg), i.src2);
       }
       if (!e.pin_verify()) {
@@ -385,7 +398,9 @@ struct STORE_CONTEXT_I64
     if (auto pin = e.FindPinnedGuestRegister(offset, hir::INT64_TYPE)) {
       if (i.src2.is_constant) {
         e.mov(XReg(pin->host_reg), static_cast<uint64_t>(i.src2.constant()));
-      } else {
+      } else if (i.src2.reg().getIdx() != pin->host_reg) {
+        // hakuX-Boosted: (the same register when
+        // pin_guest_registers_coalesce had the value computed into the pin.)
         e.mov(XReg(pin->host_reg), i.src2);
       }
       if (!e.pin_verify()) {
@@ -437,7 +452,7 @@ struct STORE_CONTEXT_F64
         pc.d = i.src2.constant();
         e.mov(e.x0, pc.u);
         e.fmov(DReg(pin->host_reg), e.x0);
-      } else {
+      } else if (i.src2.reg().getIdx() != pin->host_reg) {
         e.fmov(DReg(pin->host_reg), i.src2);
       }
       if (!e.pin_verify()) {
@@ -469,7 +484,9 @@ struct STORE_CONTEXT_V128
       } else {
         auto pin_vreg = VReg(pin->host_reg);
         auto src_vreg = VReg(i.src2.reg().getIdx());
-        e.orr(pin_vreg.b16, src_vreg.b16, src_vreg.b16);
+        if (i.src2.reg().getIdx() != pin->host_reg) {
+          e.orr(pin_vreg.b16, src_vreg.b16, src_vreg.b16);
+        }
       }
       if (!e.pin_verify()) {
         return;
@@ -590,8 +607,112 @@ struct ADD_I64 : Sequence<ADD_I64, I<OPCODE_ADD, I64Op, I64Op, I64Op>> {
 // inputs are handled entirely in software.
 enum class FpBinOp { Add, Sub, Mul, Div };
 
+// hakuX-Boosted: a64_tight_sequences. The same results as the four helpers
+// below, with the usual path cut from seven instructions to three.
+//
+// Those helpers test the inputs for NaN first, do the operation only when
+// none is one, and then test the result. But for add, subtract, multiply,
+// divide and fused multiply-add a NaN input always gives a NaN result, so
+// one test of the result finds both cases. Here the operation is done
+// first, into a register none of the inputs is in; if its result is a NaN
+// the code out of line decides which NaN PowerPC would give, from the
+// inputs, exactly as the helpers do: the first NaN input by position with
+// its quiet bit set, or the default NaN when no input was one (0 * inf,
+// inf - inf and the like).
+template <typename REG, typename OP>
+static void EmitFpOpWithPpcNanTight(A64Emitter& e, REG dest, const REG* srcs,
+                                    int count, OP&& op) {
+  const bool is64 = dest.getBit() == 64;
+  e.ChangeFpcrMode(FPCRMode::Fpu);
+  bool overlaps = false;
+  for (int n = 0; n < count; ++n) {
+    overlaps |= srcs[n].getIdx() == dest.getIdx();
+  }
+  // v3 is free: constant operands are loaded into v0 to v2.
+  const REG result = overlaps ? REG(3) : dest;
+  op(result);
+  e.fcmp(result, result);
+  auto& done = e.NewCachedLabel();
+  uint32_t src_idx[3] = {0, 0, 0};
+  for (int n = 0; n < count; ++n) {
+    src_idx[n] = srcs[n].getIdx();
+  }
+  const uint32_t dest_idx = dest.getIdx();
+  auto& nan = e.AddToTail([=, &done](A64Emitter& e, Xbyak_aarch64::Label&) {
+    for (int n = 0; n < count; ++n) {
+      Xbyak_aarch64::Label not_nan;
+      const REG src(src_idx[n]);
+      e.fcmp(src, src);
+      e.CodeGenerator::b(VC, not_nan);
+      if (is64) {
+        e.fmov(e.x0, DReg(src_idx[n]));
+        e.orr(e.x0, e.x0, static_cast<uint64_t>(1ull << 51));
+        e.fmov(DReg(dest_idx), e.x0);
+      } else {
+        e.fmov(e.w0, SReg(src_idx[n]));
+        e.orr(e.w0, e.w0, static_cast<uint64_t>(1u << 22));
+        e.fmov(SReg(dest_idx), e.w0);
+      }
+      e.CodeGenerator::b(done);
+      e.L(not_nan);
+    }
+    if (is64) {
+      e.mov(e.x0, static_cast<uint64_t>(0xFFF8000000000000ull));
+      e.fmov(DReg(dest_idx), e.x0);
+    } else {
+      e.mov(e.w0, static_cast<uint64_t>(0xFFC00000u));
+      e.fmov(SReg(dest_idx), e.w0);
+    }
+    e.CodeGenerator::b(done);
+  });
+  e.b(VS, nan);
+  if (overlaps) {
+    e.fmov(dest, result);
+  }
+  e.L(done);
+}
+
+template <typename REG>
+static void EmitFpBinOpTight(A64Emitter& e, REG dest, REG s1, REG s2,
+                             FpBinOp op) {
+  const REG srcs[2] = {s1, s2};
+  EmitFpOpWithPpcNanTight(e, dest, srcs, 2, [&](REG result) {
+    switch (op) {
+      case FpBinOp::Add:
+        e.fadd(result, s1, s2);
+        break;
+      case FpBinOp::Sub:
+        e.fsub(result, s1, s2);
+        break;
+      case FpBinOp::Mul:
+        e.fmul(result, s1, s2);
+        break;
+      case FpBinOp::Div:
+        e.fdiv(result, s1, s2);
+        break;
+    }
+  });
+}
+
+template <typename REG>
+static void EmitFmaTight(A64Emitter& e, REG dest, REG s1, REG s2, REG s3,
+                         bool is_sub) {
+  const REG srcs[3] = {s1, s2, s3};
+  EmitFpOpWithPpcNanTight(e, dest, srcs, 3, [&](REG result) {
+    if (is_sub) {
+      e.fnmsub(result, s1, s2, s3);
+    } else {
+      e.fmadd(result, s1, s2, s3);
+    }
+  });
+}
+
 static void EmitFpBinOpWithPpcNan_F32(A64Emitter& e, SReg dest, SReg s1,
                                       SReg s2, FpBinOp op) {
+  if (cvars::a64_tight_sequences) {  // hakuX-Boosted
+    EmitFpBinOpTight(e, dest, s1, s2, op);
+    return;
+  }
   // Ensure FPU FPCR (no flush-to-zero) for scalar operations.
   e.ChangeFpcrMode(FPCRMode::Fpu);
   auto& nan_path = e.NewCachedLabel();
@@ -643,6 +764,10 @@ static void EmitFpBinOpWithPpcNan_F32(A64Emitter& e, SReg dest, SReg s1,
 
 static void EmitFpBinOpWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1,
                                       DReg s2, FpBinOp op) {
+  if (cvars::a64_tight_sequences) {  // hakuX-Boosted
+    EmitFpBinOpTight(e, dest, s1, s2, op);
+    return;
+  }
   e.ChangeFpcrMode(FPCRMode::Fpu);
   auto& nan_path = e.NewCachedLabel();
   auto& done = e.NewCachedLabel();
@@ -699,6 +824,10 @@ static void EmitFpBinOpWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1,
 // rule, so NaN inputs are handled entirely in software.
 static void EmitFmaWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1, DReg s2,
                                   DReg s3, bool is_sub) {
+  if (cvars::a64_tight_sequences) {  // hakuX-Boosted
+    EmitFmaTight(e, dest, s1, s2, s3, is_sub);
+    return;
+  }
   e.ChangeFpcrMode(FPCRMode::Fpu);
   auto& nan_path = e.NewCachedLabel();
   auto& done = e.NewCachedLabel();
@@ -752,6 +881,10 @@ static void EmitFmaWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1, DReg s2,
 
 static void EmitFmaWithPpcNan_F32(A64Emitter& e, SReg dest, SReg s1, SReg s2,
                                   SReg s3, bool is_sub) {
+  if (cvars::a64_tight_sequences) {  // hakuX-Boosted
+    EmitFmaTight(e, dest, s1, s2, s3, is_sub);
+    return;
+  }
   e.ChangeFpcrMode(FPCRMode::Fpu);
   auto& nan_path = e.NewCachedLabel();
   auto& done = e.NewCachedLabel();
@@ -1663,6 +1796,16 @@ struct AND_I64 : Sequence<AND_I64, I<OPCODE_AND, I64Op, I64Op, I64Op>> {
     if (i.src1.is_constant && i.src2.is_constant) {
       e.mov(i.dest,
             static_cast<uint64_t>(i.src1.constant() & i.src2.constant()));
+    } else if (cvars::a64_tight_sequences && i.src2.is_constant &&
+               IsLogicalImmediate64(
+                   static_cast<uint64_t>(i.src2.constant()))) {
+      // hakuX-Boosted: a64_tight_sequences, the immediate form.
+      e.and_(i.dest, i.src1, static_cast<uint64_t>(i.src2.constant()));
+    } else if (cvars::a64_tight_sequences && i.src1.is_constant &&
+               !i.src2.is_constant &&
+               IsLogicalImmediate64(
+                   static_cast<uint64_t>(i.src1.constant()))) {
+      e.and_(i.dest, i.src2, static_cast<uint64_t>(i.src1.constant()));
     } else if (i.src2.is_constant) {
       // XenDroid: edge's xbyak_aarch64 has only a 32-bit and_imm meta-mnemonic,
       // so 64-bit AND-with-constant materializes the constant then and_ (edge idiom).
@@ -1823,6 +1966,16 @@ struct OR_I64 : Sequence<OR_I64, I<OPCODE_OR, I64Op, I64Op, I64Op>> {
     if (i.src1.is_constant && i.src2.is_constant) {
       e.mov(i.dest,
             static_cast<uint64_t>(i.src1.constant() | i.src2.constant()));
+    } else if (cvars::a64_tight_sequences && i.src2.is_constant &&
+               IsLogicalImmediate64(
+                   static_cast<uint64_t>(i.src2.constant()))) {
+      // hakuX-Boosted: a64_tight_sequences, the immediate form.
+      e.orr(i.dest, i.src1, static_cast<uint64_t>(i.src2.constant()));
+    } else if (cvars::a64_tight_sequences && i.src1.is_constant &&
+               !i.src2.is_constant &&
+               IsLogicalImmediate64(
+                   static_cast<uint64_t>(i.src1.constant()))) {
+      e.orr(i.dest, i.src2, static_cast<uint64_t>(i.src1.constant()));
     } else if (i.src2.is_constant) {
       e.mov(e.x0, static_cast<uint64_t>(i.src2.constant()));
       e.orr(i.dest, i.src1, e.x0);
@@ -1893,6 +2046,16 @@ struct XOR_I64 : Sequence<XOR_I64, I<OPCODE_XOR, I64Op, I64Op, I64Op>> {
     if (i.src1.is_constant && i.src2.is_constant) {
       e.mov(i.dest,
             static_cast<uint64_t>(i.src1.constant() ^ i.src2.constant()));
+    } else if (cvars::a64_tight_sequences && i.src2.is_constant &&
+               IsLogicalImmediate64(
+                   static_cast<uint64_t>(i.src2.constant()))) {
+      // hakuX-Boosted: a64_tight_sequences, the immediate form.
+      e.eor(i.dest, i.src1, static_cast<uint64_t>(i.src2.constant()));
+    } else if (cvars::a64_tight_sequences && i.src1.is_constant &&
+               !i.src2.is_constant &&
+               IsLogicalImmediate64(
+                   static_cast<uint64_t>(i.src1.constant()))) {
+      e.eor(i.dest, i.src2, static_cast<uint64_t>(i.src1.constant()));
     } else if (i.src2.is_constant) {
       e.mov(e.x0, static_cast<uint64_t>(i.src2.constant()));
       e.eor(i.dest, i.src1, e.x0);
@@ -4127,6 +4290,29 @@ struct MUL_ADD_V128
     EmitWithVmxFpcr(e, [&] {
       int d = i.dest.reg().getIdx();
 
+      // hakuX-Boosted: a64_tight_sequences, on cores whose flush-to-zero
+      // mode covers inputs: no copies of the operands and no stack slots.
+      // v2 = s3 (or -s3), fmla, the NaN test, and the lane by lane choice
+      // out of line reading the operands where they are.
+      if (cvars::a64_tight_sequences &&
+          e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {
+        const int t1 = SrcVReg(e, i.src1, 0);
+        const int t2 = SrcVReg(e, i.src2, 1);
+        const int t3 = SrcVReg(e, i.src3, 3);
+        const int srcs[3] = {t1, t2, t3};
+        // (Three constant operands would leave no scratch register for the
+        // test; the form below handles that.)
+        if (!(t1 == 0 && t2 == 1 && t3 == 3) || !cvars::a64_vmx_nan_fixup) {
+          e.mov(VReg(2).b16, VReg(t3).b16);
+          e.fmla(VReg(2).s4, VReg(t1).s4, VReg(t2).s4);
+          if (cvars::a64_vmx_nan_fixup) {
+            EmitVmxNanFixupTight(e, 2, srcs, 3);
+          }
+          e.mov(VReg(d).b16, VReg(2).b16);
+          return;
+        }
+      }
+
       // Flush s3 → v3, save to stack slot 2.
       int s3 = SrcVReg(e, i.src3, 3);
       if (s3 != 3) {
@@ -4225,6 +4411,29 @@ struct MUL_SUB_V128
     // Same as MUL_ADD but negate s3 before the fmla.
     EmitWithVmxFpcr(e, [&] {
       int d = i.dest.reg().getIdx();
+
+      // hakuX-Boosted: a64_tight_sequences, on cores whose flush-to-zero
+      // mode covers inputs: no copies of the operands and no stack slots.
+      // v2 = s3 (or -s3), fmla, the NaN test, and the lane by lane choice
+      // out of line reading the operands where they are.
+      if (cvars::a64_tight_sequences &&
+          e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {
+        const int t1 = SrcVReg(e, i.src1, 0);
+        const int t2 = SrcVReg(e, i.src2, 1);
+        const int t3 = SrcVReg(e, i.src3, 3);
+        const int srcs[3] = {t1, t2, t3};
+        // (Three constant operands would leave no scratch register for the
+        // test; the form below handles that.)
+        if (!(t1 == 0 && t2 == 1 && t3 == 3) || !cvars::a64_vmx_nan_fixup) {
+          e.fneg(VReg(2).s4, VReg(t3).s4);
+          e.fmla(VReg(2).s4, VReg(t1).s4, VReg(t2).s4);
+          if (cvars::a64_vmx_nan_fixup) {
+            EmitVmxNanFixupTight(e, 2, srcs, 3);
+          }
+          e.mov(VReg(d).b16, VReg(2).b16);
+          return;
+        }
+      }
 
       // Flush s3 → v3, save un-negated for NaN fixup.
       int s3 = SrcVReg(e, i.src3, 3);
@@ -4662,8 +4871,13 @@ struct RSQRT_F64 : Sequence<RSQRT_F64, I<OPCODE_RSQRT, F64Op, F64Op>> {
     // v16-v31). Pinned guest registers are written back first and read
     // again after; a no-op when nothing is pinned.
     e.EmitPinnedSyncBeforeBareHostCall();
-    e.mov(e.x9, reinterpret_cast<uint64_t>(PpcFrsqrte));
-    e.blr(e.x9);
+    // hakuX-Boosted: with a64_extended_gpr_pool the values held in x9-x15
+    // are saved round the call too, and the address goes in x16.
+    e.EmitSaveExtendedGprsForBareCall();
+    const XReg fn_reg = e.HostCallReg();
+    e.mov(fn_reg, reinterpret_cast<uint64_t>(PpcFrsqrte));
+    e.blr(fn_reg);
+    e.EmitRestoreExtendedGprsAfterBareCall();
     e.EmitPinnedSyncAfterBareHostCall();
     e.fmov(i.dest, e.x0);
   }
@@ -4770,16 +4984,23 @@ struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
     // hakuX-Boosted: as RSQRT_F64, round all four calls: no pinned register
     // is read or written between them.
     e.EmitPinnedSyncBeforeBareHostCall();
+    // hakuX-Boosted: as RSQRT_F64; sp moves by |moved| until the restore.
+    const int32_t moved =
+        static_cast<int32_t>(e.EmitSaveExtendedGprsForBareCall());
+    const XReg fn_reg = e.HostCallReg();
     for (int lane = 0; lane < 4; lane++) {
-      e.ldr(e.w0, Xbyak_aarch64::ptr(
-                      e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                                lane * 4));
-      e.mov(e.x9, reinterpret_cast<uint64_t>(PpcVrsqrtefpLane));
-      e.blr(e.x9);
-      e.str(e.w0, Xbyak_aarch64::ptr(
-                      e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                                lane * 4));
+      e.ldr(e.w0,
+            Xbyak_aarch64::ptr(
+                e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
+                          moved + lane * 4));
+      e.mov(fn_reg, reinterpret_cast<uint64_t>(PpcVrsqrtefpLane));
+      e.blr(fn_reg);
+      e.str(e.w0,
+            Xbyak_aarch64::ptr(
+                e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
+                          moved + lane * 4));
     }
+    e.EmitRestoreExtendedGprsAfterBareCall();
     e.EmitPinnedSyncAfterBareHostCall();
     e.ldr(QReg(i.dest.reg().getIdx()),
           Xbyak_aarch64::ptr(e.sp,

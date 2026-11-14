@@ -114,6 +114,18 @@ class HIRBuilder {
   };
   PinSyncState& pin_sync() { return pin_sync_; }
 
+  // hakuX-Boosted: pin_guest_registers_coalesce_verify. The values the
+  // register allocator would have kept in a pinned register's host register
+  // (RegisterAllocationPass::PlanPinHomes), which in that mode have a
+  // register of their own for the backend to compare with the pin.
+  struct PinHomeVerify {
+    uint8_t slot;  // index into pinned_context_slots()
+    bool is_def;   // computed into the pin, not loaded from it
+  };
+  std::unordered_map<const Value*, PinHomeVerify>& pin_home_verify() {
+    return pin_home_verify_;
+  }
+
   // hakuX-Boosted: context_constant_verify. Context loads the cross-block
   // constant pass would have replaced, with the constant it expects; the
   // backend compares the two.
@@ -401,6 +413,7 @@ class HIRBuilder {
   // hakuX-Boosted
   std::vector<PinnedContextSlot> pinned_context_slots_;
   PinSyncState pin_sync_;
+  std::unordered_map<const Value*, PinHomeVerify> pin_home_verify_;
   std::unordered_map<const Instr*, uint64_t> context_load_expectations_;
   uint32_t pass_stamp_ = 0;
   uint32_t pass_stamp_floor_ = UINT32_MAX;

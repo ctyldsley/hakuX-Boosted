@@ -12,9 +12,41 @@
 #include <cstring>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/cpu/compiler/translation_stats.h"
+
+// hakuX-Boosted: see RegisterAllocationPass::PlanPinHomes.
+DEFINE_bool(
+    pin_guest_registers_coalesce, false,
+    "With pin_guest_registers: a value loaded from a pinned guest register "
+    "is used from the pin's host register directly, and a value that is "
+    "about to be stored to a pinned guest register is computed straight "
+    "into the pin's host register, wherever the block's code allows it. "
+    "The register moves that pinning otherwise leaves in place of every "
+    "load and store then disappear, so that 'add r4, r4, r5' with all three "
+    "pinned becomes one host instruction. Takes effect for functions "
+    "translated after it is set.",
+    "CPU");
+DEFINE_bool(
+    pin_guest_registers_coalesce_verify, false,
+    "Self-check for pin_guest_registers_coalesce, for a checking run only: "
+    "every value the setting would keep in a pin's host register gets a "
+    "register of its own as well, the pin is written exactly where the "
+    "setting would write it, and each use of such a value first compares "
+    "the two. A difference means the setting would have used a pin whose "
+    "contents had changed; it is counted and logged (TranslatorVerify:). "
+    "Slower code. Takes effect for functions translated after it is set.",
+    "CPU");
+DEFINE_bool(
+    register_allocation_from_top, false,
+    "For the translator's tests, not for play: the register allocator hands "
+    "out the highest numbered free host register instead of the lowest, so "
+    "that the registers it otherwise reaches only in crowded blocks (x9-x15 "
+    "with a64_extended_gpr_pool) hold values in every test.",
+    "CPU");
 
 namespace xe {
 namespace cpu {
@@ -111,6 +143,17 @@ bool RegisterAllocationPass::Run(HIRBuilder* builder) {
       instr = instr->next;
     }
 
+    // hakuX-Boosted: which values of this block live in a pin.
+    pin_homes_.clear();
+    // (Only with pin_guest_registers_wide: the first form of pinning reloads
+    // every pin at every barrier and has no per-instruction masks for the
+    // backend to adjust.)
+    if (cvars::pin_guest_registers_coalesce &&
+        builder->pin_sync().by_liveness &&
+        !builder->pinned_context_slots().empty()) {
+      PlanPinHomes(builder, block);
+    }
+
     instr = block->instr_head;
     while (instr) {
       const auto info = instr->opcode;
@@ -136,6 +179,30 @@ bool RegisterAllocationPass::Run(HIRBuilder* builder) {
           if (preferred_reg.set) {
             has_preferred_reg = true;
             preferred_reg = instr->src1.value->reg;
+          }
+        }
+      }
+
+      // hakuX-Boosted: a value whose home is a pinned guest register's host
+      // register takes none of the allocator's. (Under the verify setting it
+      // takes one all the same, and the backend compares the two.)
+      if (GET_OPCODE_SIG_TYPE_DEST(signature) == OPCODE_SIG_TYPE_V &&
+          !pin_homes_.empty()) {
+        auto home = pin_homes_.find(instr->dest);
+        if (home != pin_homes_.end()) {
+          auto& stats = translation_stats;
+          (home->second.is_def ? stats.pin_coalesced_defs
+                               : stats.pin_coalesced_loads)
+              .fetch_add(1, std::memory_order_relaxed);
+          if (cvars::pin_guest_registers_coalesce_verify) {
+            builder->pin_home_verify()[instr->dest] =
+                {home->second.slot, home->second.is_def};
+          } else {
+            SortUsageList(instr->dest);
+            instr->dest->reg.set = home->second.set->set;
+            instr->dest->reg.index = home->second.reg_index;
+            instr = instr->next;
+            continue;
           }
         }
       }
@@ -335,8 +402,22 @@ bool RegisterAllocationPass::TryAllocateRegister(Value* value) {
   // Find the first free register, if any.
   // We have to ensure it's a valid one (in our count).
   uint32_t first_unused = 0;
-  bool none_used = xe::bit_scan_forward(
-      static_cast<uint32_t>(usage_set->availability.to_ulong()), &first_unused);
+  // hakuX-Boosted: register_allocation_from_top, for the tests. Bits at and
+  // above the set's count are never cleared, so they are masked off first.
+  uint32_t available =
+      static_cast<uint32_t>(usage_set->availability.to_ulong());
+  bool none_used;
+  if (cvars::register_allocation_from_top) {
+    if (usage_set->count < 32) {
+      available &= (uint32_t(1) << usage_set->count) - 1;
+    }
+    none_used = available != 0;
+    if (none_used) {
+      first_unused = 31 - static_cast<uint32_t>(__builtin_clz(available));
+    }
+  } else {
+    none_used = xe::bit_scan_forward(available, &first_unused);
+  }
   if (none_used && first_unused < usage_set->count) {
     // Available! Use it!
     value->reg.set = usage_set->set;
@@ -486,6 +567,293 @@ bool RegisterAllocationPass::SpillOneRegister(HIRBuilder* builder, Block* block,
   MarkRegAvailable(reg);
 
   return true;
+}
+
+// hakuX-Boosted: pin_guest_registers_coalesce.
+//
+// GuestRegisterPinningPass gives a guest register one host register for the
+// whole function, and the backend turns each load of it into a move from
+// that register and each store into a move to it. This decides, block by
+// block, which of those moves need not exist:
+//
+//   a load     v = LOAD_CONTEXT pin    v may *be* the pin's register, as long
+//                                      as every use of v comes before the
+//                                      register is next written;
+//   a store    STORE_CONTEXT pin, w    w may be computed straight into the
+//                                      pin's register by the instruction
+//                                      that defines it (D), which makes D
+//                                      the point where the register is
+//                                      written, earlier than the store (S).
+//
+// "The register is written" at: a store to the pin that is not coalesced
+// (at S); a coalesced store (at its D); and any instruction after which the
+// pin may have been reloaded from the context or the function left, which
+// is taken to be every volatile instruction and context barrier other than
+// conditional branches and the barriers in front of branches (a "clobber";
+// IsPinClobber). A use *by* the writing instruction itself is fine: sequences
+// read their sources before their destination can matter, which the
+// allocator already relies on when it hands a retiring source's register to
+// the destination.
+//
+// For a store to be coalesced, all of:
+//   1. w is defined in this block by D, before S, has the pin's type, and
+//      is not itself living in another pin;
+//   2. every instruction strictly between D and S is from a short list of
+//      pure ones (IsPureForCoalescing) that cannot call a host helper, and
+//      none of them reads or writes this pin. So nothing can observe that
+//      the pin changed at D and not at S: no load of it, no write-back of
+//      it, no reload;
+//   3. every value already living in the pin's register (earlier loads of
+//      it, the value an earlier coalesced store left there) has its last
+//      use at or before D;
+//   4. w itself has its last use at or before the next store to this pin or
+//      clobber after S, whichever comes first. (If the next store is then
+//      coalesced too, rule 3 applied to it makes sure its D comes no earlier
+//      than w's last use.)
+//   5. for the 8-bit pins (condition register and carry bytes), D is an
+//      instruction that leaves exactly 0 or 1 in the whole register, since
+//      the pin has to read as a zero-extended byte.
+//
+// A load lives in the pin if its last use is at or before the next write of
+// the register as defined above. Otherwise it gets a register of its own
+// and the move, as before.
+//
+// Values planned here never enter the allocator's own bookkeeping: they
+// hold a register the allocator never hands out (the pin's is reserved),
+// they are never spilled, and nothing is freed when they retire.
+namespace {
+
+bool IsPinClobber(const Instr* i) {
+  switch (i->opcode->num) {
+    case OPCODE_BRANCH_TRUE:
+    case OPCODE_BRANCH_FALSE:
+      // Volatile for the per-block passes, but a branch changes no register
+      // and what follows it in the block runs with the same registers.
+      return false;
+    case OPCODE_CONTEXT_BARRIER:
+      // The barrier the front end puts before a branch instruction is not a
+      // way out of the function with pin_guest_registers_wide (which this
+      // pass requires): the backend emits nothing for it, and context
+      // promotion carries values over it.
+      return !(i->flags & CONTEXT_BARRIER_FOR_BRANCH);
+    default:
+      return (i->opcode->flags & OPCODE_FLAG_VOLATILE) != 0;
+  }
+}
+
+// Instructions that may sit between the definition of a value and its store
+// to a pin when the two are coalesced: no host call from inside their
+// sequences, nothing that leaves the function.
+bool IsPureForCoalescing(const Instr* i) {
+  switch (i->opcode->num) {
+    case OPCODE_COMMENT:
+    case OPCODE_NOP:
+    case OPCODE_SOURCE_OFFSET:
+    case OPCODE_ASSIGN:
+    case OPCODE_CAST:
+    case OPCODE_ZERO_EXTEND:
+    case OPCODE_SIGN_EXTEND:
+    case OPCODE_TRUNCATE:
+    case OPCODE_LOAD_CONTEXT:
+    case OPCODE_STORE_CONTEXT:
+    case OPCODE_LOAD_LOCAL:
+    case OPCODE_STORE_LOCAL:
+    case OPCODE_COMPARE_EQ:
+    case OPCODE_COMPARE_NE:
+    case OPCODE_COMPARE_SLT:
+    case OPCODE_COMPARE_SLE:
+    case OPCODE_COMPARE_SGT:
+    case OPCODE_COMPARE_SGE:
+    case OPCODE_COMPARE_ULT:
+    case OPCODE_COMPARE_ULE:
+    case OPCODE_COMPARE_UGT:
+    case OPCODE_COMPARE_UGE:
+    case OPCODE_ADD:
+    case OPCODE_ADD_CARRY:
+    case OPCODE_SUB:
+    case OPCODE_AND:
+    case OPCODE_AND_NOT:
+    case OPCODE_OR:
+    case OPCODE_XOR:
+    case OPCODE_NOT:
+    case OPCODE_NEG:
+    case OPCODE_SHL:
+    case OPCODE_SHR:
+    case OPCODE_SHA:
+    case OPCODE_ROTATE_LEFT:
+    case OPCODE_SELECT:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Leaves 0 or 1 in the whole of an integer register.
+bool DefinesCleanBit(const Instr* i) {
+  switch (i->opcode->num) {
+    case OPCODE_COMPARE_EQ:
+    case OPCODE_COMPARE_NE:
+    case OPCODE_COMPARE_SLT:
+    case OPCODE_COMPARE_SLE:
+    case OPCODE_COMPARE_SGT:
+    case OPCODE_COMPARE_SGE:
+    case OPCODE_COMPARE_ULT:
+    case OPCODE_COMPARE_ULE:
+    case OPCODE_COMPARE_UGT:
+    case OPCODE_COMPARE_UGE:
+      return true;
+    default:
+      return false;
+  }
+}
+
+uint32_t LastUseOrdinal(const Value* value) {
+  uint32_t last = value->def ? value->def->ordinal : 0;
+  for (auto use = value->use_head; use; use = use->next) {
+    last = std::max(last, use->instr->ordinal);
+  }
+  return last;
+}
+
+}  // namespace
+
+void RegisterAllocationPass::PlanPinHomes(HIRBuilder* builder, Block* block) {
+  const auto& pinned = builder->pinned_context_slots();
+  const size_t pin_count = pinned.size();
+  // The values living in each pin's register that the next write of it has
+  // yet to be checked against.
+  struct Tenant {
+    const Value* value;
+    uint32_t last_use;
+    bool is_def;
+  };
+  std::vector<std::vector<Tenant>> tenants(pin_count);
+
+  const auto find_pin = [&](const Instr* i, TypeName type) -> int {
+    const uint32_t offset = static_cast<uint32_t>(i->src1.offset);
+    for (size_t n = 0; n < pin_count; ++n) {
+      if (pinned[n].offset == offset && pinned[n].type == type) {
+        return static_cast<int>(n);
+      }
+    }
+    return -1;
+  };
+  const auto set_for = [&](size_t n) {
+    return pinned[n].reg_set == 0 ? usage_sets_.int_set : usage_sets_.vec_set;
+  };
+  // The register of pin n is written at |ordinal|: tenants whose uses all
+  // come at or before it stay, the others get registers of their own.
+  const auto settle = [&](size_t n, uint32_t ordinal) {
+    for (const Tenant& tenant : tenants[n]) {
+      if (tenant.is_def) {
+        continue;  // settled when it was planned (rule 4)
+      }
+      if (tenant.last_use <= ordinal) {
+        pin_homes_[tenant.value] = {set_for(n), pinned[n].reg_index,
+                                    static_cast<uint8_t>(n), false};
+      }
+    }
+    tenants[n].clear();
+  };
+
+  for (Instr* i = block->instr_head; i; i = i->next) {
+    if (i->opcode == &OPCODE_LOAD_CONTEXT_info) {
+      const int n = find_pin(i, i->dest->type);
+      if (n >= 0 && set_for(n)) {
+        tenants[n].push_back({i->dest, LastUseOrdinal(i->dest), false});
+      }
+      continue;
+    }
+    if (i->opcode == &OPCODE_STORE_CONTEXT_info) {
+      Value* w = i->src2.value;
+      const int n = find_pin(i, w->type);
+      if (n < 0 || !set_for(n)) {
+        continue;
+      }
+      bool coalesce = !w->IsConstant() && w->def && w->def->block == block &&
+                      w->def->ordinal < i->ordinal &&
+                      w->def->opcode != &OPCODE_LOAD_CONTEXT_info &&
+                      !pin_homes_.count(w);
+      const Instr* def = coalesce ? w->def : nullptr;
+      if (coalesce && pinned[n].type == INT8_TYPE && !DefinesCleanBit(def)) {
+        coalesce = false;
+      }
+      // A value loaded from an unpinned slot may be read straight into the
+      // pin; one loaded from another pin lives there (or not at all).
+      if (!coalesce && !w->IsConstant() && w->def &&
+          w->def->block == block && w->def->ordinal < i->ordinal &&
+          w->def->opcode == &OPCODE_LOAD_CONTEXT_info &&
+          !pin_homes_.count(w) && pinned[n].type != INT8_TYPE) {
+        bool from_pin = false;
+        const uint32_t offset = static_cast<uint32_t>(w->def->src1.offset);
+        for (size_t m = 0; m < pin_count; ++m) {
+          if (pinned[m].offset == offset && pinned[m].type == w->type) {
+            from_pin = true;
+          }
+        }
+        if (!from_pin) {
+          coalesce = true;
+          def = w->def;
+        }
+      }
+      if (coalesce) {
+        // Rule 2.
+        for (const Instr* between = def->next; between != i;
+             between = between->next) {
+          if (!between || !IsPureForCoalescing(between)) {
+            coalesce = false;
+            break;
+          }
+          if ((between->opcode == &OPCODE_LOAD_CONTEXT_info &&
+               find_pin(between, between->dest->type) == n) ||
+              (between->opcode == &OPCODE_STORE_CONTEXT_info &&
+               find_pin(between, between->src2.value->type) == n)) {
+            coalesce = false;
+            break;
+          }
+        }
+      }
+      if (coalesce) {
+        // Rule 3.
+        for (const Tenant& tenant : tenants[n]) {
+          if (tenant.last_use > def->ordinal) {
+            coalesce = false;
+            break;
+          }
+        }
+      }
+      if (coalesce) {
+        // Rule 4.
+        uint32_t limit = UINT32_MAX;
+        for (const Instr* later = i->next; later; later = later->next) {
+          if (IsPinClobber(later) ||
+              (later->opcode == &OPCODE_STORE_CONTEXT_info &&
+               find_pin(later, later->src2.value->type) == n)) {
+            limit = later->ordinal;
+            break;
+          }
+        }
+        if (LastUseOrdinal(w) > limit) {
+          coalesce = false;
+        }
+      }
+      settle(n, coalesce ? def->ordinal : i->ordinal);
+      if (coalesce) {
+        pin_homes_[w] = {set_for(n), pinned[n].reg_index,
+                         static_cast<uint8_t>(n), true};
+        tenants[n].push_back({w, LastUseOrdinal(w), true});
+      }
+      continue;
+    }
+    if (IsPinClobber(i)) {
+      for (size_t n = 0; n < pin_count; ++n) {
+        settle(n, i->ordinal);
+      }
+    }
+  }
+  for (size_t n = 0; n < pin_count; ++n) {
+    settle(n, UINT32_MAX);
+  }
 }
 
 RegisterAllocationPass::RegisterSetUsage*

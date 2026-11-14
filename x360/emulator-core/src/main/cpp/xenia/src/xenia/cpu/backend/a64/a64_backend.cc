@@ -44,6 +44,17 @@
 #include "xenia/cpu/thread_state.h"
 #include "xenia/cpu/xex_module.h"
 
+// hakuX-Boosted: see A64Emitter::SetExtendedGprPool.
+DEFINE_bool(
+    a64_extended_gpr_pool, false,
+    "Fourteen host registers for integer values and pinned guest registers "
+    "instead of seven: x9-x15 join x22-x28. Sequences then use only x0-x8, "
+    "x16 and x17 as scratch, and the guest-to-host thunk saves x9-x15 round "
+    "a host call (they are caller-saved). It is what lets "
+    "pin_guest_registers_max_int go above 3. Read once, when the emulator "
+    "starts.",
+    "a64");
+
 DEFINE_int64(a64_max_stackpoints, 65536,
              "Max number of host->guest stack mappings we can record.", "a64");
 
@@ -310,7 +321,16 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   //   q30, q31     sp + 0x1A0
   //   x29, x30     sp + 0x1C0
   //   Total: 0x1D0 = 464 bytes (16-byte aligned)
-  const size_t g2h_stack = 464;
+  // hakuX-Boosted: with a64_extended_gpr_pool, x9-x15 above that (they may
+  // hold HIR values or pinned guest registers at a call from inside a
+  // sequence, and a C function does not keep them):
+  //   x9, x10      sp + 0x1D0
+  //   x11, x12     sp + 0x1E0
+  //   x13, x14     sp + 0x1F0
+  //   x15          sp + 0x200
+  //   Total: 0x210 = 528 bytes
+  const bool save_extended = A64Emitter::extended_gpr_pool();
+  const size_t g2h_stack = save_extended ? 528 : 464;
   sub(sp, sp, static_cast<uint32_t>(g2h_stack));
   code_offsets.prolog_stack_alloc = getSize();
 
@@ -331,12 +351,18 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   stp(Xbyak_aarch64::QReg(30), Xbyak_aarch64::QReg(31), ptr(sp, 0x1A0));
   // Save x29/x30 (FP/LR).
   stp(x29, x30, ptr(sp, 0x1C0));
+  if (save_extended) {
+    stp(x9, x10, ptr(sp, 0x1D0));
+    stp(x11, x12, ptr(sp, 0x1E0));
+    stp(x13, x14, ptr(sp, 0x1F0));
+    str(x15, ptr(sp, 0x200));
+  }
 
   code_offsets.body = getSize();
 
   // Call host function.
   // AAPCS64: x0=first arg. We set x0=context (from x20).
-  mov(x9, x0);   // x9 = target function (scratch)
+  mov(x9, x0);   // x9 = target function (scratch; saved above if it counts)
   mov(x0, x20);  // x0 = PPCContext* (our context reg)
   // x1, x2, x3 already hold args from the caller.
   blr(x9);
@@ -349,6 +375,12 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   code_offsets.epilog = getSize();
 
   // Restore.
+  if (save_extended) {
+    ldr(x15, ptr(sp, 0x200));
+    ldp(x13, x14, ptr(sp, 0x1F0));
+    ldp(x11, x12, ptr(sp, 0x1E0));
+    ldp(x9, x10, ptr(sp, 0x1D0));
+  }
   ldp(x29, x30, ptr(sp, 0x1C0));
   ldp(Xbyak_aarch64::QReg(30), Xbyak_aarch64::QReg(31), ptr(sp, 0x1A0));
   ldp(Xbyak_aarch64::QReg(28), Xbyak_aarch64::QReg(29), ptr(sp, 0x180));
@@ -552,6 +584,18 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
   code_offsets.body = getSize();
 
   // x19 = backend context pointer (already set up by HostToGuestThunk)
+
+  // hakuX-Boosted: with a64_extended_gpr_pool the return site this helper
+  // goes back to runs with pinned guest registers loaded, possibly in
+  // x9-x15, so the helper works in x1-x5 there (free after a guest call).
+  // The comments below name the registers of the original form.
+  const bool low = A64Emitter::extended_gpr_pool();
+  const XReg x10 = XReg(low ? 1 : 10);
+  const WReg w11 = WReg(low ? 2 : 11);
+  const WReg w13 = WReg(low ? 3 : 13);
+  const XReg x14 = XReg(low ? 4 : 14);
+  const WReg w14 = WReg(low ? 4 : 14);
+  const WReg w15 = WReg(low ? 5 : 15);
 
   // x10 = stackpoints array pointer
   ldr(x10, ptr(x19, static_cast<uint32_t>(
@@ -943,7 +987,11 @@ bool A64Backend::Initialize(Processor* processor) {
   gpr_set.id = 0;
   std::strcpy(gpr_set.name, "gpr");
   gpr_set.types = MachineInfo::RegisterSet::INT_TYPES;
-  gpr_set.count = A64Emitter::GPR_COUNT;
+  // hakuX-Boosted: or fourteen, with a64_extended_gpr_pool. Decided here,
+  // once, before the thunks below are generated: they and every function's
+  // code have to agree on it.
+  A64Emitter::SetExtendedGprPool(cvars::a64_extended_gpr_pool);
+  gpr_set.count = A64Emitter::gpr_count();
   // VEC set: v4-v15, v16-v31 (28 registers, v0-v3 scratch)
   auto& vec_set = machine_info_.register_sets[1];
   vec_set.id = 1;

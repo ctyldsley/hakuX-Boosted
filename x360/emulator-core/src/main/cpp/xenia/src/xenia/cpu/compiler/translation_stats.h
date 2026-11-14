@@ -92,6 +92,15 @@ struct TranslationStats {
   // pin_loads and pin_stores.
   std::atomic<uint64_t> pin_sync_loads{0};
   std::atomic<uint64_t> pin_sync_stores{0};
+  // pin_guest_registers_coalesce (static): loads of a pinned register that
+  // became no instruction at all, and values computed straight into one.
+  // a64_fuse_compare_branch (static): compares that reused the flags of
+  // the compare before them, and branches taken on the flags of a compare
+  // whose result has other uses.
+  std::atomic<uint64_t> compares_reused_flags{0};
+  std::atomic<uint64_t> branches_on_flags{0};
+  std::atomic<uint64_t> pin_coalesced_loads{0};
+  std::atomic<uint64_t> pin_coalesced_defs{0};
   // Static: blocks translated in functions with and without pinned
   // registers.
   std::atomic<uint64_t> blocks_pinned{0};

@@ -35,9 +35,10 @@ DEFINE_bool(
 DEFINE_int32(
     pin_guest_registers_max_int, 2,
     "With pin_guest_registers: the most integer guest registers one function "
-    "may pin. Each takes one of the seven host registers the allocator has "
-    "for integer values, so more pins mean more spills in busy blocks. "
-    "Clamped to 0..3.",
+    "may pin. Each takes one of the host registers the allocator has for "
+    "integer values, so more pins mean more spills in busy blocks. Clamped "
+    "to 0..3, or to 0..10 with a64_extended_gpr_pool (and "
+    "pin_guest_registers_wide).",
     "CPU");
 
 DEFINE_int32(
@@ -210,6 +211,7 @@ bool GuestRegisterPinningPass::Run(HIRBuilder* builder) {
   auto& pinned = builder->pinned_context_slots();
   pinned.clear();
   builder->pin_sync().Clear();
+  builder->pin_home_verify().clear();
   // The debugger reads and writes guest registers through the context.
   if (!cvars::pin_guest_registers || cvars::debug) {
     return true;
@@ -557,7 +559,11 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
   auto& stats = translation_stats;
   stats.pin_functions_considered.fetch_add(1, std::memory_order_relaxed);
 
-  int max_int = std::clamp(cvars::pin_guest_registers_max_int, 0, 3);
+  // hakuX-Boosted: the allocator keeps at least four integer registers for
+  // its own values: three pins of seven, ten of the fourteen that
+  // a64_extended_gpr_pool gives.
+  int max_int = std::clamp(cvars::pin_guest_registers_max_int, 0,
+                           int_register_count_ >= 14 ? 10 : 3);
   int max_vec = std::clamp(cvars::pin_guest_registers_max_vec, 0, 16);
   if (int_register_count_ < 7) {
     max_int = 0;
@@ -587,6 +593,12 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
   std::vector<bool> slot_is_flag;
   std::unordered_map<uint64_t, size_t> slot_index;
   std::vector<uint32_t> loop_end(block_count, UINT32_MAX);
+  // hakuX-Boosted: and the instruction in that block that is the loop's
+  // last back-edge. What follows it in the same block is outside the loop
+  // (a loop's exit code is usually in the block that holds its branch: a
+  // PowerPC conditional branch does not end a HIR block), and weighing it
+  // as loop code made a return after a loop look like a call inside it.
+  std::vector<uint32_t> loop_end_index(block_count, 0);
   bool any_loop = false;
   struct Access {
     uint32_t block;
@@ -681,10 +693,11 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
           }
           w.target = static_cast<int32_t>(it->second);
           if (it->second <= b) {
-            if (loop_end[it->second] == UINT32_MAX ||
-                loop_end[it->second] < b) {
-              loop_end[it->second] = b;
-            }
+            // (Blocks are visited in order and instructions in order, so the
+            // last back-edge seen is the furthest.)
+            loop_end[it->second] = b;
+            loop_end_index[it->second] =
+                static_cast<uint32_t>(code[b].size());
             any_loop = true;
           }
         }
@@ -843,11 +856,14 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
   // loads and stores, weighted by loop depth as in Run. Benefit: its
   // accesses, which become register moves. Cost: the loads and stores the
   // backend will emit to keep it in step.
+  // A loop covers its head block's first instruction to its last
+  // back-edge, inclusive.
   std::vector<int32_t> depth_delta(block_count + 1, 0);
+  std::vector<std::vector<uint32_t>> loop_ends_in(block_count);
   for (uint32_t head = 0; head < block_count; ++head) {
     if (loop_end[head] != UINT32_MAX) {
       depth_delta[head] += 1;
-      depth_delta[loop_end[head] + 1] -= 1;
+      loop_ends_in[loop_end[head]].push_back(loop_end_index[head]);
     }
   }
   std::vector<uint64_t> benefit(candidates.size(), 0);
@@ -865,9 +881,10 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
   int32_t depth = 0;
   for (uint32_t b = 0; b < block_count; ++b) {
     depth += depth_delta[b];
-    const uint64_t weight =
-        WeightForDepth(static_cast<uint32_t>(std::max(depth, 0)));
-    for (const auto& w : code[b]) {
+    for (uint32_t index = 0; index < code[b].size(); ++index) {
+      const auto& w = code[b][index];
+      const uint64_t weight =
+          WeightForDepth(static_cast<uint32_t>(std::max(depth, 0)));
       switch (w.kind) {
         case WideKind::kLoad:
         case WideKind::kStore:
@@ -883,6 +900,11 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
           break;
         default:
           break;
+      }
+      for (uint32_t end_index : loop_ends_in[b]) {
+        if (end_index == index) {
+          depth -= 1;
+        }
       }
     }
   }

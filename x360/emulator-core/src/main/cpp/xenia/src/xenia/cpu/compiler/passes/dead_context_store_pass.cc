@@ -35,6 +35,23 @@ DEFINE_int32(
     "3 on it. Takes effect for functions translated after it is set.",
     "CPU");
 
+// hakuX-Boosted
+DEFINE_bool(
+    dead_context_stores_over_preempt_checks, false,
+    "With eliminate_dead_context_stores: the cooperative scheduler's check "
+    "at a loop head (emitted when guest_scheduler is on) does not count as "
+    "reading the guest context. Without this no store inside a loop is ever "
+    "dead, because the check sits on every path round the loop. It is safe "
+    "for the guest's own execution: when the check yields, no guest code "
+    "runs on this thread's context before it resumes, and a store taken for "
+    "dead is one that every path overwrites before reading. What can see "
+    "the difference is something that inspects a thread's registers while "
+    "it is parked at such a yield (a debugger, a crash report, a title "
+    "reading another thread's context): it may find an older value in a "
+    "flag or register that the thread was about to overwrite. Takes effect "
+    "for functions translated after it is set.",
+    "CPU");
+
 DEFINE_bool(
     dead_context_store_verify, false,
     "Self-check for eliminate_dead_context_stores, for a checking run only: "
@@ -233,6 +250,10 @@ bool DeadContextStorePass::Run(HIRBuilder* builder) {
         if (!(i->flags & CONTEXT_BARRIER_FOR_BRANCH)) {
           item.kind = Kind::kReadsAll;
         }
+      } else if (num == OPCODE_CHECK_PREEMPT &&
+                 cvars::dead_context_stores_over_preempt_checks) {
+        // hakuX-Boosted: the scheduler's check reads nothing (see the
+        // setting's text): item.kind stays kOther.
       } else if (i->opcode->flags & OPCODE_FLAG_VOLATILE) {
         // Calls, conditional returns, traps, debug breaks, the scheduler's
         // check and anything else marked as leaving the function's code.

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <bitset>
+#include <unordered_map>
 #include <functional>
 #include <vector>
 
@@ -71,6 +72,19 @@ class RegisterAllocationPass : public CompilerPass {
   RegisterSetUsage* RegisterSetForValue(const hir::Value* value);
 
   void SortUsageList(hir::Value* value);
+
+  // hakuX-Boosted: pin_guest_registers_coalesce. Decides, for one block,
+  // which values live in the host register of a pinned guest register
+  // instead of one of the allocator's own (see the comment above the
+  // definition). The answers are in pin_homes_.
+  void PlanPinHomes(hir::HIRBuilder* builder, hir::Block* block);
+  struct PinHome {
+    RegisterSetUsage* set;
+    uint32_t reg_index;
+    uint8_t slot;     // index into the builder's pinned_context_slots()
+    bool is_def;      // computed into the pin (not a load of it)
+  };
+  std::unordered_map<const hir::Value*, PinHome> pin_homes_;
 
  private:
   struct {

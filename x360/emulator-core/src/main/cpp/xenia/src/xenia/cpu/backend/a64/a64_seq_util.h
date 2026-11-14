@@ -24,6 +24,8 @@
 DECLARE_bool(a64_vmx_nan_fixup);
 // hakuX-Boosted: see ComputeMemoryAddress.
 DECLARE_bool(a64_stack_access_no_fixup);
+DECLARE_bool(a64_tight_sequences);  // hakuX-Boosted
+DECLARE_bool(a64_fuse_compare_branch);
 DECLARE_bool(a64_stack_access_verify);
 
 #if XE_COMPILER_MSVC
@@ -46,6 +48,34 @@ using Xbyak_aarch64::QReg;
 using Xbyak_aarch64::VReg;
 using Xbyak_aarch64::WReg;
 using Xbyak_aarch64::XReg;
+
+// hakuX-Boosted: a64_tight_sequences. True if a 64-bit AND, ORR or EOR can
+// take |value| as its immediate: a pattern of 2, 4, 8, 16, 32 or 64 bits,
+// repeated to fill the register, that is a rotated run of ones (not all
+// zeros, not all ones).
+inline bool IsLogicalImmediate64(uint64_t value) {
+  if (value == 0 || value == ~uint64_t(0)) {
+    return false;
+  }
+  unsigned size = 64;
+  while (size > 2) {
+    const unsigned half = size / 2;
+    const uint64_t mask = (uint64_t(1) << half) - 1;
+    if ((value & mask) != ((value >> half) & mask)) {
+      break;
+    }
+    size = half;
+  }
+  const uint64_t mask =
+      size == 64 ? ~uint64_t(0) : (uint64_t(1) << size) - 1;
+  const uint64_t element = value & mask;
+  // A run of ones that does not wrap, or the complement of one (a run that
+  // wraps round the element).
+  const auto is_run = [](uint64_t x) {
+    return x != 0 && ((x + (x & (~x + 1))) & x) == 0;
+  };
+  return is_run(element) || is_run(~element & mask);
+}
 
 template <typename Fn>
 inline void EmitWithVmxFpcr(A64Emitter& e, Fn&& emit_op) {
@@ -671,6 +701,68 @@ inline void FixupVmxNan_V128_Fma(A64Emitter& e) {
 }
 
 // VMX float32x4 binary operations with full PPC semantics.
+// hakuX-Boosted: a64_tight_sequences. The NaN fix-up of a VMX float
+// operation whose result is in v|result| and whose operands are still in
+// the registers |srcs| (none of which is the result): the test in line,
+// the lane by lane choice out of line. The choice is FixupVmxNan_V128's:
+// for a lane whose result is a NaN, the first operand that is a NaN in that
+// lane, quieted, or the default NaN if none is. Returns false, having
+// emitted nothing, if the scratch registers v0, v1 and v3 are all operands.
+inline bool EmitVmxNanFixupTight(A64Emitter& e, int result, const int* srcs,
+                                 int count) {
+  using namespace Xbyak_aarch64;
+  int scratch = -1;
+  for (int candidate : {3, 0, 1}) {
+    bool taken = false;
+    for (int n = 0; n < count; ++n) {
+      taken |= srcs[n] == candidate;
+    }
+    if (!taken) {
+      scratch = candidate;
+      break;
+    }
+  }
+  if (scratch < 0) {
+    return false;
+  }
+  int src_idx[3] = {0, 0, 0};
+  for (int n = 0; n < count; ++n) {
+    src_idx[n] = srcs[n];
+  }
+  auto& done = e.NewCachedLabel();
+  auto& fix = e.AddToTail([=, &done](A64Emitter& e, Xbyak_aarch64::Label&) {
+    e.mov(e.w16, 0xFF000000u);
+    for (int lane = 0; lane < 4; lane++) {
+      Xbyak_aarch64::Label lane_ok;
+      e.umov(e.w0, VReg(result).s4[lane]);
+      e.lsl(e.w17, e.w0, 1);
+      e.cmp(e.w17, e.w16);
+      e.CodeGenerator::b(LS, lane_ok);
+      for (int n = 0; n < count; ++n) {
+        Xbyak_aarch64::Label not_nan;
+        e.umov(e.w0, VReg(src_idx[n]).s4[lane]);
+        e.lsl(e.w17, e.w0, 1);
+        e.cmp(e.w17, e.w16);
+        e.CodeGenerator::b(LS, not_nan);
+        e.orr(e.w0, e.w0, static_cast<uint64_t>(1u << 22));
+        e.ins(VReg(result).s4[lane], e.w0);
+        e.CodeGenerator::b(lane_ok);
+        e.L(not_nan);
+      }
+      e.mov(e.w0, 0xFFC00000u);
+      e.ins(VReg(result).s4[lane], e.w0);
+      e.L(lane_ok);
+    }
+    e.CodeGenerator::b(done);
+  });
+  e.fcmeq(VReg(scratch).s4, VReg(result).s4, VReg(result).s4);
+  e.uminv(SReg(scratch), VReg(scratch).s4);
+  e.fmov(e.w0, SReg(scratch));
+  e.cbz(e.w0, fix);
+  e.L(done);
+  return true;
+}
+
 enum class VmxFpBinOp { Add, Sub, Mul, Div };
 
 // Execute a VMX float32x4 binary operation with denormal flushing and PPC NaN
@@ -680,6 +772,39 @@ template <typename T1, typename T2>
 inline void EmitVmxFpBinOp_V128(A64Emitter& e, int dest_idx, const T1& src1,
                                 const T2& src2, VmxFpBinOp op) {
   EmitWithVmxFpcr(e, [&] {
+    // hakuX-Boosted: a64_tight_sequences, on cores whose flush-to-zero mode
+    // covers inputs (no software flushing, so the operands can be used
+    // where they are): the operation straight from the operands' registers
+    // into the destination, or into v2 when the destination is an operand.
+    if (cvars::a64_tight_sequences &&
+        e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {
+      const int t1 = SrcVReg(e, src1, 0);
+      const int t2 = SrcVReg(e, src2, 1);
+      const int result = (dest_idx == t1 || dest_idx == t2) ? 2 : dest_idx;
+      switch (op) {
+        case VmxFpBinOp::Add:
+          e.fadd(VReg(result).s4, VReg(t1).s4, VReg(t2).s4);
+          break;
+        case VmxFpBinOp::Sub:
+          e.fsub(VReg(result).s4, VReg(t1).s4, VReg(t2).s4);
+          break;
+        case VmxFpBinOp::Mul:
+          e.fmul(VReg(result).s4, VReg(t1).s4, VReg(t2).s4);
+          break;
+        case VmxFpBinOp::Div:
+          e.fdiv(VReg(result).s4, VReg(t1).s4, VReg(t2).s4);
+          break;
+      }
+      if (cvars::a64_vmx_nan_fixup) {
+        const int srcs[2] = {t1, t2};
+        // Two operands leave a scratch register free: cannot fail.
+        EmitVmxNanFixupTight(e, result, srcs, 2);
+      }
+      if (result != dest_idx) {
+        e.mov(VReg(dest_idx).b16, VReg(2).b16);
+      }
+      return;
+    }
     // Flush input denormals → v0=s1, v1=s2.
     int s1, s2;
     PrepareVmxFpSources(e, src1, src2, s1, s2);

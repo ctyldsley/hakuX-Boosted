@@ -14,6 +14,8 @@
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/hir/instr.h"
 
+DECLARE_bool(a64_fuse_compare_branch);  // hakuX-Boosted
+
 namespace xe {
 namespace cpu {
 namespace backend {
@@ -40,6 +42,24 @@ struct BRANCH_TRUE_I8
     // hakuX-Boosted: a64_fuse_compare_branch.
     Xbyak_aarch64::Cond cond;
     if (e.TakeFusedCompare(i.instr, &cond)) {
+      e.b(cond, e.GetLabel(i.src2.value->id));
+      return;
+    }
+    uint32_t zero_reg;
+    bool zero_is64, true_if_zero;
+    if (e.TakeFusedZeroTest(i.instr, &zero_reg, &zero_is64, &true_if_zero)) {
+      auto& label = e.GetLabel(i.src2.value->id);
+      if (zero_is64) {
+        true_if_zero ? e.cbz(XReg(zero_reg), label)
+                     : e.cbnz(XReg(zero_reg), label);
+      } else {
+        true_if_zero ? e.cbz(WReg(zero_reg), label)
+                     : e.cbnz(WReg(zero_reg), label);
+      }
+      return;
+    }
+    if (cvars::a64_fuse_compare_branch &&
+        e.FlagsHoldCompare(i.instr->src1.value, &cond)) {
       e.b(cond, e.GetLabel(i.src2.value->id));
       return;
     }
@@ -92,6 +112,25 @@ struct BRANCH_FALSE_I8
     // and odd encodings, so the opposite is the lowest bit flipped.
     Xbyak_aarch64::Cond cond;
     if (e.TakeFusedCompare(i.instr, &cond)) {
+      e.b(static_cast<Xbyak_aarch64::Cond>(cond ^ 1),
+          e.GetLabel(i.src2.value->id));
+      return;
+    }
+    uint32_t zero_reg;
+    bool zero_is64, true_if_zero;
+    if (e.TakeFusedZeroTest(i.instr, &zero_reg, &zero_is64, &true_if_zero)) {
+      auto& label = e.GetLabel(i.src2.value->id);
+      if (zero_is64) {
+        true_if_zero ? e.cbnz(XReg(zero_reg), label)
+                     : e.cbz(XReg(zero_reg), label);
+      } else {
+        true_if_zero ? e.cbnz(WReg(zero_reg), label)
+                     : e.cbz(WReg(zero_reg), label);
+      }
+      return;
+    }
+    if (cvars::a64_fuse_compare_branch &&
+        e.FlagsHoldCompare(i.instr->src1.value, &cond)) {
       e.b(static_cast<Xbyak_aarch64::Cond>(cond ^ 1),
           e.GetLabel(i.src2.value->id));
       return;
