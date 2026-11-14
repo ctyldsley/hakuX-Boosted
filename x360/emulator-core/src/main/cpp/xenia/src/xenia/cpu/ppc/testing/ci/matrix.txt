@@ -3,8 +3,12 @@
 #   label ; suites (a regular expression over file names, . for all) ; flags
 #
 # Every line is run after the reference (all defaults) and compared with it.
-# "." runs all 142 thousand tests; the narrower expressions keep the job's
-# length down where a setting touches only part of the translator. The seq_
+# "." runs all 142 thousand tests (about nine minutes a line on GitHub's
+# runner); the narrower expressions keep the job's length down. Six lines
+# run everything: the two stress lines of wide pinning, the ABI level of the
+# dead store pass, the defaults at 16 KiB, and everything together at both
+# page sizes. Every line was run over all the tests at least once in the
+# session that wrote it (boosted/notes/translator-wide.md). The seq_
 # suites (loops, calls, flags over blocks) run with every line.
 #
 # Markers at the end of the flags:
@@ -20,7 +24,7 @@
 short backward branches     ; ^(seq_|instr_(add|cmp|b|l|st|m|f)) ; --a64_short_backward_branches=true
 compact stackpoint push     ; ^(seq_|instr_(b|add|cmp|l|st)) ; --a64_compact_stackpoint_push=true
 thunk fpcr compare          ; ^(seq_|instr_(f|v|l|st|mt|mf)) ; --a64_thunk_fpcr_compare=true
-simplify skip (verify)      ; . ; --simplification_skip_unchanged_blocks=true --simplification_skip_verify=true
+simplify skip (verify)      ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr|t|v)) ; --simplification_skip_unchanged_blocks=true --simplification_skip_verify=true
 simplify skip               ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m)) ; --simplification_skip_unchanged_blocks=true
 pinning (verify)            ; ^(seq_|instr_(add|cmp|l|st|b|f|m)) ; --pin_guest_registers=true --a64_pin_verify=true
 pinning                     ; ^(seq_|instr_(add|cmp|l|st|b|f|m)) ; --pin_guest_registers=true
@@ -36,7 +40,7 @@ mcrf, exact                 ; ^(seq_|instr_m) ; --ppc_mcrf_copies_field=true
 # keep the context authoritative and compare every pinned register with it
 # at each read (they catch a missing reload; a missing write-back is caught
 # by the lines without verify).
-wide pinning (verify)       ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --a64_pin_verify=true
+wide pinning (verify)       ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr|t|v)) ; --pin_guest_registers=true --pin_guest_registers_wide=true --a64_pin_verify=true
 wide pinning                ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr)) ; --pin_guest_registers=true --pin_guest_registers_wide=true
 wide pinning, all           ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr)) ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --pin_guest_registers_max_vec=16
 wide stress (verify)        ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_stress=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --pin_guest_registers_max_vec=16 --a64_pin_verify=true
@@ -46,7 +50,7 @@ wide stress, preempt        ; ^(seq_|instr_(b|add|cmp|l|st)) ; --guest_scheduler
 
 # Dead context stores across blocks.
 dead stores, flags          ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|f|rl|sl|sr)) ; --eliminate_dead_context_stores=1
-dead stores, all            ; . ; --eliminate_dead_context_stores=2
+dead stores, all            ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr|t|v)) ; --eliminate_dead_context_stores=2
 dead stores (verify)        ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|f|rl|sl|sr)) ; --eliminate_dead_context_stores=2 --dead_context_store_verify=true
 # Level 3 takes the condition register fields the ABI leaves undefined at a
 # call or return for dead there, so the bits a function leaves in them at
@@ -60,7 +64,7 @@ dead stores, ABI (verify)   ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|rl|sl|
 # emits every function twice, which is what a function too large for short
 # forward branches gets.
 fuse, short branches        ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|f|l|st|rl|sl|sr|t)) ; --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true
-short forward, emit twice   ; . ; --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_short_forward_branches_test_retry=true
+short forward, emit twice   ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr|t|v)) ; --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_short_forward_branches_test_retry=true
 
 # Linked call sites.
 linked calls                ; ^(seq_|instr_(add|cmp|b|l|st|m)) ; --a64_linked_calls=true

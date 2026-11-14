@@ -228,7 +228,7 @@ jobs:
   ppc-tests:
     name: Translator tests (PowerPC on the ARM64 back end)
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 240
     env:
       XE: x360/emulator-core/src/main/cpp/xenia
     steps:
