@@ -176,30 +176,61 @@ struct Walk {
           default:
             break;
         }
-        uint32_t slot = 0;
-        for (; slot < program->textures.size(); ++slot) {
-          const Texture& texture = program->textures[slot];
-          if (texture.fetch_constant == tfetch.fetch_constant_index() &&
-              texture.dimension == tfetch.dimension()) {
+        program->texture_fetch_constants |= UINT32_C(1)
+                                            << tfetch.fetch_constant_index();
+        bool is_cube = tfetch.dimension() == xenos::FetchOpDimension::kCube;
+        // ShaderTranslator::TextureFetchUsesComputedLod.
+        bool computed_lod =
+            tfetch.use_computed_lod() &&
+            (shader_type == xenos::ShaderType::kPixel ||
+             tfetch.use_register_gradients());
+        Texture wanted;
+        wanted.used = true;
+        wanted.fetch_constant = uint8_t(tfetch.fetch_constant_index());
+        wanted.mag_filter = tfetch.mag_filter();
+        wanted.min_filter = tfetch.min_filter();
+        wanted.mip_filter = tfetch.mip_filter();
+        wanted.aniso_filter =
+            computed_lod ? tfetch.aniso_filter() : xenos::AnisoFilter::kDisabled;
+        if (wanted.aniso_filter != xenos::AnisoFilter::kUseFetchConst) {
+          wanted.aniso_filter =
+              std::min(wanted.aniso_filter, xenos::AnisoFilter::kMax_16_1);
+        }
+        uint32_t slot_first = is_cube ? kMaxTextures2D : 0;
+        uint32_t slot_end = is_cube ? kMaxTextures : kMaxTextures2D;
+        uint32_t slot = slot_first;
+        for (; slot < slot_end; ++slot) {
+          Texture& texture = program->textures[slot];
+          if (!texture.used) {
+            texture = wanted;
+            break;
+          }
+          if (texture.fetch_constant == wanted.fetch_constant &&
+              texture.mag_filter == wanted.mag_filter &&
+              texture.min_filter == wanted.min_filter &&
+              texture.mip_filter == wanted.mip_filter &&
+              texture.aniso_filter == wanted.aniso_filter) {
             break;
           }
         }
-        if (slot == program->textures.size()) {
-          if (slot >= kMaxTextures) {
-            features |= kFeatureTooManyTextures;
-            break;
+        if (slot == slot_end) {
+          features |= kFeatureTooManyTextures;
+          slot = kFetchTextureNoSlot;
+        }
+        // The components of the sample the destination uses (three bits a
+        // destination component: 0 to 3 name one).
+        uint32_t used_components = 0;
+        for (uint32_t i = 0; i < 4; ++i) {
+          uint32_t source = (tfetch.dest_swizzle() >> (3 * i)) & 7;
+          if (source < 4) {
+            used_components |= UINT32_C(1) << source;
           }
-          Texture texture;
-          texture.fetch_constant = uint8_t(tfetch.fetch_constant_index());
-          texture.dimension = tfetch.dimension();
-          texture.mag_filter = tfetch.mag_filter();
-          texture.min_filter = tfetch.min_filter();
-          texture.mip_filter = tfetch.mip_filter();
-          texture.aniso_filter = tfetch.aniso_filter();
-          program->textures.push_back(texture);
         }
         kind = FetchKind::kTexture;
-        info |= slot << kFetchTextureSlotShift;
+        info |= (slot << kFetchTextureSlotShift) |
+                (used_components << kFetchTextureUsedComponentsShift) |
+                (is_cube ? kFetchTextureCube : 0) |
+                (computed_lod ? kFetchTextureComputedLod : 0);
       } break;
       case ucode::FetchOpcode::kSetTextureLod:
         kind = FetchKind::kSetLod;

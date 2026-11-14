@@ -40,7 +40,9 @@ constexpr uint32_t kAluVectorOperandsShift = 24;
 
 // The fourth word of a fetch instruction's element. Bits 0:2 the kind; for a
 // vertex fetch bits 8:15 the vertex fetch constant; for a texture fetch bits
-// 4:7 the texture slot (Program::textures).
+// 4:7 the texture slot (Program::textures; kFetchTextureNoSlot if it has
+// none, and its result is then 0), bits 8:11 the components of the sample
+// the destination swizzle uses, and two flags.
 enum class FetchKind : uint32_t {
   kVertex = 0,
   kTexture = 1,
@@ -53,6 +55,12 @@ enum class FetchKind : uint32_t {
 constexpr uint32_t kFetchKindMask = 7;
 constexpr uint32_t kFetchVertexConstantShift = 8;
 constexpr uint32_t kFetchTextureSlotShift = 4;
+constexpr uint32_t kFetchTextureNoSlot = 15;
+constexpr uint32_t kFetchTextureUsedComponentsShift = 8;
+constexpr uint32_t kFetchTextureCube = UINT32_C(1) << 12;
+// The level of detail comes from gradients (the screen's or the registers'),
+// as ShaderTranslator::TextureFetchUsesComputedLod has it.
+constexpr uint32_t kFetchTextureComputedLod = UINT32_C(1) << 13;
 
 // What a shader does that the interpreter does not do as the translated
 // shader would. Which of these keep a shader from the interpreter is the
@@ -73,7 +81,8 @@ enum Feature : uint32_t {
   kFeatureExplicitLod = UINT32_C(1) << 6,
   // Memory export: the exports are dropped.
   kFeatureMemoryExport = UINT32_C(1) << 7,
-  // More different textures than kMaxTextures: the extra fetches read 0.
+  // More different textures (and samplers: a slot is both) than there are
+  // slots of their kind: the extra fetches read 0.
   kFeatureTooManyTextures = UINT32_C(1) << 8,
   // A 3D or stacked texture is fetched.
   kFeatureTexture3D = UINT32_C(1) << 9,
@@ -88,26 +97,34 @@ enum Feature : uint32_t {
   kFeatureVertexKill = UINT32_C(1) << 16,
 };
 
-constexpr uint32_t kMaxTextures = 8;
+// A slot is a texture and the sampler it is fetched with. The first
+// kMaxTextures2D are for 1D and 2D textures, the rest for cube textures
+// (shaders/ucode_program_pixel.glsli declares them so).
+constexpr uint32_t kMaxTextures2D = 6;
+constexpr uint32_t kMaxTexturesCube = 2;
+constexpr uint32_t kMaxTextures = kMaxTextures2D + kMaxTexturesCube;
 
 struct Texture {
-  // Which fetch constant and which kind of texture a slot samples.
-  uint8_t fetch_constant;
-  xenos::FetchOpDimension dimension;
-  // The filters of the first fetch that used the slot (kUseFetchConst where
-  // the instruction leaves them to the fetch constant), for the sampler.
-  xenos::TextureFilter mag_filter;
-  xenos::TextureFilter min_filter;
-  xenos::TextureFilter mip_filter;
-  xenos::AnisoFilter aniso_filter;
+  bool used = false;
+  // Which fetch constant a slot samples, and what the sampler is made from:
+  // the filters the instruction names (kUseFetchConst where it leaves them to
+  // the fetch constant), anisotropic filtering off where the level of detail
+  // is explicit, as the translator binds it.
+  uint8_t fetch_constant = 0;
+  xenos::TextureFilter mag_filter = xenos::TextureFilter::kUseFetchConst;
+  xenos::TextureFilter min_filter = xenos::TextureFilter::kUseFetchConst;
+  xenos::TextureFilter mip_filter = xenos::TextureFilter::kUseFetchConst;
+  xenos::AnisoFilter aniso_filter = xenos::AnisoFilter::kUseFetchConst;
 };
 
 struct Program {
   // Four words an element. Empty if the shader is kFeatureMalformed.
   std::vector<uint32_t> words;
   uint32_t features = 0;
-  // The slots the texture fetches were given, at most kMaxTextures.
-  std::vector<Texture> textures;
+  // The slots the texture fetches were given.
+  Texture textures[kMaxTextures];
+  // Bit for each fetch constant a texture fetch names, whatever its kind.
+  uint32_t texture_fetch_constants = 0;
   uint32_t instruction_count = 0;
   uint32_t texture_fetch_count = 0;
 

@@ -1,0 +1,450 @@
+// hakuX-Boosted: the pixel side of the guest shader interpreter, version 2
+// (ucode_program.glsli has the description). Included by
+// ucode_program.ps.glsl.
+//
+// It runs any guest pixel shader's microcode, so the pixels of a draw whose
+// real pipeline is still compiling are the guest shader's own and not an
+// approximation (vulkan_placeholder_ps_mode = 3). Its inputs are the sixteen
+// interpolators at locations 0 to 15, which is what the vertex side of
+// version 2 writes, so it is only ever paired with that.
+//
+// What it does around the guest code is SpirvShaderTranslator's
+// StartFragmentShaderInMain and CompleteFragmentShaderInMain for the host
+// render target path, and its texture fetch is ProcessTextureFetchInstruction,
+// with these differences, each of which keeps a shader or a draw from it
+// (VulkanPipelineCache::GetProgramPixelRefusal) unless noted:
+//   - no 1D, 3D or stacked textures, and at most six 2D and two cube
+//     textures (a texture fetched with two different sets of filters counts
+//     twice);
+//   - no getBCF, getCompTexLOD, getGradients, getWeights;
+//   - no depth output, no memory export;
+//   - no point sprite coordinates in the generated parameter (PsParamGen);
+//   - no draw resolution scale above 1, no texture_integer_num_format, no
+//     texture_gradient_exp_bias, no component swizzle done in the shader;
+//   - alpha to coverage is not done (not refused: such a draw is drawn
+//     without it), nor centroid interpolation.
+// Depth is never written here: the depth test and write are the pipeline's
+// fixed-function state.
+
+#define XE_UP_FLOAT_BINDING 2
+#include "ucode_program.glsli"
+
+layout(std140, set = 1, binding = 0) uniform xe_up_system_constants_block {
+  uvec4 xe_up_sys[35];
+};
+layout(std140, set = 1, binding = 4) uniform xe_up_fetch_constants_block {
+  uvec4 xe_up_fetch_constants[48];
+};
+
+// The slots (gpu/ucode_program.h): six 2D textures (guest 1D and 2D textures
+// are 2D array views on the host) and two cube textures, each as unsigned and
+// as signed data, then a sampler for each slot.
+layout(set = 3, binding = 0) uniform texture2DArray xe_up_texture_0_u;
+layout(set = 3, binding = 1) uniform texture2DArray xe_up_texture_0_s;
+layout(set = 3, binding = 2) uniform texture2DArray xe_up_texture_1_u;
+layout(set = 3, binding = 3) uniform texture2DArray xe_up_texture_1_s;
+layout(set = 3, binding = 4) uniform texture2DArray xe_up_texture_2_u;
+layout(set = 3, binding = 5) uniform texture2DArray xe_up_texture_2_s;
+layout(set = 3, binding = 6) uniform texture2DArray xe_up_texture_3_u;
+layout(set = 3, binding = 7) uniform texture2DArray xe_up_texture_3_s;
+layout(set = 3, binding = 8) uniform texture2DArray xe_up_texture_4_u;
+layout(set = 3, binding = 9) uniform texture2DArray xe_up_texture_4_s;
+layout(set = 3, binding = 10) uniform texture2DArray xe_up_texture_5_u;
+layout(set = 3, binding = 11) uniform texture2DArray xe_up_texture_5_s;
+layout(set = 3, binding = 12) uniform textureCube xe_up_texture_6_u;
+layout(set = 3, binding = 13) uniform textureCube xe_up_texture_6_s;
+layout(set = 3, binding = 14) uniform textureCube xe_up_texture_7_u;
+layout(set = 3, binding = 15) uniform textureCube xe_up_texture_7_s;
+layout(set = 3, binding = 16) uniform sampler xe_up_sampler_0;
+layout(set = 3, binding = 17) uniform sampler xe_up_sampler_1;
+layout(set = 3, binding = 18) uniform sampler xe_up_sampler_2;
+layout(set = 3, binding = 19) uniform sampler xe_up_sampler_3;
+layout(set = 3, binding = 20) uniform sampler xe_up_sampler_4;
+layout(set = 3, binding = 21) uniform sampler xe_up_sampler_5;
+layout(set = 3, binding = 22) uniform sampler xe_up_sampler_6;
+layout(set = 3, binding = 23) uniform sampler xe_up_sampler_7;
+
+#define XE_UP_FETCH_TEXTURE_SLOT_SHIFT 4u
+#define XE_UP_FETCH_TEXTURE_USED_SHIFT 8u
+#define XE_UP_FETCH_TEXTURE_CUBE 0x1000u
+#define XE_UP_FETCH_TEXTURE_COMPUTED_LOD 0x2000u
+
+// SpirvShaderTranslator kSysFlag_* bit values.
+#define XE_UP_SYS_FLAG_PRIMITIVE_POLYGONAL 0x40u
+#define XE_UP_SYS_FLAG_PRIMITIVE_LINE 0x80u
+#define XE_UP_SYS_FLAG_ALPHA_PASS_SHIFT 11
+#define XE_UP_SYS_FLAG_CONVERT_COLOR_0_TO_GAMMA 0x4000u
+
+// Bits of the pixel stage's per-draw word (xe_up_head[0].w).
+// The register given the generated parameter, if any.
+#define XE_UP_PIXEL_PARAM_GEN 0x1u
+#define XE_UP_PIXEL_PARAM_GEN_REGISTER_SHIFT 1u
+
+layout(location = 0) in vec4 xe_up_in_interpolators[16];
+
+layout(location = 0) out vec4 xe_up_out_color_0;
+layout(location = 1) out vec4 xe_up_out_color_1;
+layout(location = 2) out vec4 xe_up_out_color_2;
+layout(location = 3) out vec4 xe_up_out_color_3;
+
+vec4 xe_up_color[4];
+// Bit for each colour the guest code wrote on the way it took: the alpha test
+// is for pixels that wrote colour 0.
+uint xe_up_color_written;
+// What setTexLOD, setGradientH and setGradientV left.
+float xe_up_tfetch_lod;
+vec3 xe_up_tfetch_gradients_h;
+vec3 xe_up_tfetch_gradients_v;
+
+void XeUpExport(uint export_register, vec4 value, uint write_mask) {
+  if (export_register < 4u) {
+    xe_up_color_written |= 1u << export_register;
+    xe_up_color[export_register] =
+        mix(xe_up_color[export_register], value,
+            notEqual(uvec4(write_mask) & uvec4(1u, 2u, 4u, 8u), uvec4(0u)));
+  }
+  // Depth (61) and memory export (32 to 37) are not done by a placeholder.
+}
+
+uint XeUpFetchConstantWord(uint fetch_constant, uint word) {
+  uint index = fetch_constant * 6u + word;
+  return xe_up_fetch_constants[index >> 2][index & 3u];
+}
+
+// The console's piecewise linear gamma curve, both ways
+// (SpirvShaderTranslator::PWLGammaToLinear, LinearToPWLGamma).
+float XeUpPWLGammaToLinear(float gamma) {
+  gamma = clamp(gamma, 0.0, 1.0);
+  float scale, offset;
+  if (gamma < 96.0 / 255.0) {
+    if (gamma < 64.0 / 255.0) {
+      scale = 255.0 * 1024.0 / 1024.0;
+      offset = 0.0;
+    } else {
+      scale = 255.0 * 1024.0 / 512.0;
+      offset = -64.0;
+    }
+  } else {
+    if (gamma < 192.0 / 255.0) {
+      scale = 255.0 * 1024.0 / 256.0;
+      offset = -256.0;
+    } else {
+      scale = 255.0 * 1024.0 / 128.0;
+      offset = -1024.0;
+    }
+  }
+  float linear = gamma * scale + offset;
+  linear += floor(linear * (scale * (1.0 / (255.0 * 1024.0))));
+  return linear * (1.0 / 1023.0);
+}
+vec3 XeUpLinearToPWLGamma(vec3 linear) {
+  linear = clamp(linear, vec3(0.0), vec3(1.0));
+  vec3 result;
+  for (uint i = 0u; i < 3u; ++i) {
+    float v = linear[i];
+    float scale, offset;
+    if (v < 128.0 / 1023.0) {
+      if (v < 64.0 / 1023.0) {
+        scale = 1023.0;
+        offset = 0.0;
+      } else {
+        scale = 1023.0 / 2.0;
+        offset = 32.0 / 255.0;
+      }
+    } else {
+      if (v < 512.0 / 1023.0) {
+        scale = 1023.0 / 4.0;
+        offset = 64.0 / 255.0;
+      } else {
+        scale = 1023.0 / 8.0;
+        offset = 128.0 / 255.0;
+      }
+    }
+    result[i] = floor(v * scale) * (1.0 / 255.0) + offset;
+  }
+  return result;
+}
+
+// One sample of a slot's unsigned or signed texture. mode: 0 an explicit
+// level of detail, 1 gradients, 2 (cube only) the screen's own derivatives
+// and a bias.
+#define XE_UP_SAMPLE_2D(slot_index, texture_u, texture_s, slot_sampler)       \
+  case slot_index:                                                            \
+    if (is_signed) {                                                          \
+      return mode == 1u                                                       \
+                 ? textureGrad(sampler2DArray(texture_s, slot_sampler),       \
+                               coordinates, gradients_h.xy, gradients_v.xy)   \
+                 : textureLod(sampler2DArray(texture_s, slot_sampler),        \
+                              coordinates, lod);                              \
+    }                                                                         \
+    return mode == 1u                                                         \
+               ? textureGrad(sampler2DArray(texture_u, slot_sampler),         \
+                             coordinates, gradients_h.xy, gradients_v.xy)     \
+               : textureLod(sampler2DArray(texture_u, slot_sampler),          \
+                            coordinates, lod);
+#define XE_UP_SAMPLE_CUBE(slot_index, texture_u, texture_s, slot_sampler)     \
+  case slot_index:                                                            \
+    if (is_signed) {                                                          \
+      if (mode == 2u) {                                                       \
+        return texture(samplerCube(texture_s, slot_sampler), coordinates,     \
+                       lod);                                                  \
+      }                                                                       \
+      return mode == 1u                                                       \
+                 ? textureGrad(samplerCube(texture_s, slot_sampler),          \
+                               coordinates, gradients_h, gradients_v)         \
+                 : textureLod(samplerCube(texture_s, slot_sampler),           \
+                              coordinates, lod);                              \
+    }                                                                         \
+    if (mode == 2u) {                                                         \
+      return texture(samplerCube(texture_u, slot_sampler), coordinates, lod); \
+    }                                                                         \
+    return mode == 1u                                                         \
+               ? textureGrad(samplerCube(texture_u, slot_sampler),            \
+                             coordinates, gradients_h, gradients_v)           \
+               : textureLod(samplerCube(texture_u, slot_sampler), coordinates,\
+                            lod);
+
+vec4 XeUpSample(uint slot, bool is_signed, uint mode, vec3 coordinates,
+                vec3 gradients_h, vec3 gradients_v, float lod) {
+  switch (slot) {
+    XE_UP_SAMPLE_2D(0u, xe_up_texture_0_u, xe_up_texture_0_s, xe_up_sampler_0)
+    XE_UP_SAMPLE_2D(1u, xe_up_texture_1_u, xe_up_texture_1_s, xe_up_sampler_1)
+    XE_UP_SAMPLE_2D(2u, xe_up_texture_2_u, xe_up_texture_2_s, xe_up_sampler_2)
+    XE_UP_SAMPLE_2D(3u, xe_up_texture_3_u, xe_up_texture_3_s, xe_up_sampler_3)
+    XE_UP_SAMPLE_2D(4u, xe_up_texture_4_u, xe_up_texture_4_s, xe_up_sampler_4)
+    XE_UP_SAMPLE_2D(5u, xe_up_texture_5_u, xe_up_texture_5_s, xe_up_sampler_5)
+    XE_UP_SAMPLE_CUBE(6u, xe_up_texture_6_u, xe_up_texture_6_s,
+                      xe_up_sampler_6)
+    XE_UP_SAMPLE_CUBE(7u, xe_up_texture_7_u, xe_up_texture_7_s,
+                      xe_up_sampler_7)
+  }
+  return vec4(0.0);
+}
+
+void XeUpTextureFetch(uvec4 ins) {
+  uint info = ins.w;
+  uint slot = (info >> XE_UP_FETCH_TEXTURE_SLOT_SHIFT) & 15u;
+  uint used = (info >> XE_UP_FETCH_TEXTURE_USED_SHIFT) & 15u;
+  if (slot >= 8u || used == 0u) {
+    XeUpStoreFetchResult(ins, vec4(0.0));
+    return;
+  }
+  uint fetch_constant = (ins.x >> 20) & 31u;
+  bool is_cube = (info & XE_UP_FETCH_TEXTURE_CUBE) != 0u;
+  bool unnormalized = (ins.x & 0x2000000u) != 0u;
+  vec4 source =
+      xe_up_r[XeUpRegisterIndex((ins.x >> 5) & 63u, (ins.x & 0x800u) != 0u)];
+  uint swizzle = ins.x >> 26;
+  precise vec3 coordinates =
+      vec3(source[swizzle & 3u], source[(swizzle >> 2) & 3u],
+           is_cube ? source[(swizzle >> 4) & 3u] : 0.0);
+
+  // Half a texel offsets from the instruction and the rounding offset, in
+  // texels of the guest's size of the texture.
+  uint size_word = XeUpFetchConstantWord(fetch_constant, 2u);
+  vec2 size = vec2(float((size_word & 0x1FFFu) + 1u),
+                   float(((size_word >> 13) & 0x1FFFu) + 1u));
+  ivec3 offset_bits =
+      ivec3(bitfieldExtract(int(ins.z), 16, 5),
+            bitfieldExtract(int(ins.z), 21, 5),
+            bitfieldExtract(int(ins.z), 26, 5));
+  precise vec2 offset = vec2(offset_bits.xy) * 0.5 + 1.5 / 1024.0;
+  if (unnormalized) {
+    coordinates.xy = (coordinates.xy + offset) / size;
+  } else {
+    coordinates.xy = coordinates.xy + offset / size;
+  }
+  if (is_cube) {
+    // The guest's face coordinates and face number to a direction.
+    precise vec2 st = coordinates.xy * 2.0 + -3.0;
+    uint face =
+        uint(clamp(coordinates.z + float(offset_bits.z) * 0.5, 0.0, 5.0));
+    bool negative = (face & 1u) != 0u;
+    float face_sign = negative ? -1.0 : 1.0;
+    uint axis = face >> 1;
+    if (axis == 0u) {
+      coordinates = vec3(face_sign, -st.y, negative ? st.x : -st.x);
+    } else if (axis == 1u) {
+      coordinates = vec3(st.x, face_sign, negative ? -st.y : st.y);
+    } else {
+      coordinates = vec3(negative ? -st.x : st.x, -st.y, face_sign);
+    }
+  }
+
+  // The level of detail: the fetch constant's bias, the register's, the
+  // instruction's.
+  precise float lod =
+      float(bitfieldExtract(int(XeUpFetchConstantWord(fetch_constant, 4u)), 12,
+                            10)) *
+      (1.0 / 32.0);
+  if ((ins.y & 0x20000000u) != 0u) {
+    lod = xe_up_tfetch_lod + lod;
+  }
+  lod += float(bitfieldExtract(int(ins.z), 2, 7)) * (1.0 / 16.0);
+  bool computed_lod = (info & XE_UP_FETCH_TEXTURE_COMPUTED_LOD) != 0u;
+  bool register_gradients = (ins.z & 1u) != 0u;
+  uint mode = computed_lod ? ((is_cube && !register_gradients) ? 2u : 1u) : 0u;
+  precise vec3 gradients_h = vec3(0.0);
+  precise vec3 gradients_v = vec3(0.0);
+  if (mode == 1u) {
+    float gradient_scale = exp2(lod);
+    if (is_cube) {
+      gradients_h = xe_up_tfetch_gradients_h;
+      gradients_v = xe_up_tfetch_gradients_v;
+    } else if (register_gradients) {
+      // The translator gives a 2D fetch setGradientV's as the horizontal and
+      // setGradientH's as the vertical; so does this.
+      gradients_h.xy = xe_up_tfetch_gradients_v.xy;
+      gradients_v.xy = xe_up_tfetch_gradients_h.xy;
+      if (unnormalized) {
+        gradients_h.xy /= size;
+        gradients_v.xy /= size;
+      }
+    } else {
+      gradients_h.xy = dFdxCoarse(coordinates.xy);
+      gradients_v.xy = dFdyCoarse(coordinates.xy);
+    }
+    gradients_h *= gradient_scale;
+    gradients_v *= gradient_scale;
+  }
+
+  // The signs of the components used: unsigned, signed (a view of its own),
+  // biased, gamma.
+  uint signs = (xe_up_sys[5u + (fetch_constant >> 4)][(fetch_constant >> 2) &
+                                                      3u] >>
+                (8u * (fetch_constant & 3u))) &
+               0xFFu;
+  bool any_signed = false, all_signed = true;
+  for (uint i = 0u; i < 4u; ++i) {
+    if ((used & (1u << i)) != 0u) {
+      bool component_signed = ((signs >> (2u * i)) & 3u) == 1u;
+      any_signed = any_signed || component_signed;
+      all_signed = all_signed && component_signed;
+    }
+  }
+  vec4 sample_unsigned = vec4(0.0), sample_signed = vec4(0.0);
+  if (!all_signed) {
+    sample_unsigned = XeUpSample(slot, false, mode, coordinates, gradients_h,
+                                 gradients_v, lod);
+  }
+  if (any_signed) {
+    sample_signed = XeUpSample(slot, true, mode, coordinates, gradients_h,
+                               gradients_v, lod);
+  }
+  float exponent_bias = ldexp(
+      1.0, bitfieldExtract(int(XeUpFetchConstantWord(fetch_constant, 3u)), 13,
+                           6));
+  precise vec4 result = vec4(0.0);
+  for (uint i = 0u; i < 4u; ++i) {
+    if ((used & (1u << i)) == 0u) {
+      continue;
+    }
+    uint sign = (signs >> (2u * i)) & 3u;
+    float component = sample_unsigned[i];
+    if (sign == 1u) {
+      component = sample_signed[i];
+    } else if (sign == 2u) {
+      component = component * 2.0 + -1.0;
+    } else if (sign == 3u) {
+      component = XeUpPWLGammaToLinear(component);
+    }
+    result[i] = component * exponent_bias;
+  }
+  XeUpStoreFetchResult(ins, result);
+}
+
+void XeUpFetch(uvec4 ins) {
+  uint kind = ins.w & XE_UP_FETCH_KIND_MASK;
+  if (kind == XE_UP_FETCH_KIND_TEXTURE) {
+    XeUpTextureFetch(ins);
+    return;
+  }
+  if (kind >= XE_UP_FETCH_KIND_SET_LOD &&
+      kind <= XE_UP_FETCH_KIND_SET_GRADIENTS_V) {
+    vec4 source =
+        xe_up_r[XeUpRegisterIndex((ins.x >> 5) & 63u, (ins.x & 0x800u) != 0u)];
+    uint swizzle = ins.x >> 26;
+    vec3 value = vec3(source[swizzle & 3u], source[(swizzle >> 2) & 3u],
+                      source[(swizzle >> 4) & 3u]);
+    if (kind == XE_UP_FETCH_KIND_SET_LOD) {
+      xe_up_tfetch_lod = value.x;
+    } else if (kind == XE_UP_FETCH_KIND_SET_GRADIENTS_H) {
+      xe_up_tfetch_gradients_h = value;
+    } else {
+      xe_up_tfetch_gradients_v = value;
+    }
+    return;
+  }
+  // A vertex fetch in a pixel shader, or a fetch this does not do: 0.
+  XeUpStoreFetchResult(ins, vec4(0.0));
+}
+
+void main() {
+  uint program = xe_up_head[0].y;
+  uint pixel_word = xe_up_head[0].w;
+  uint flags = xe_up_sys[0].x;
+  XeUpReset(program);
+  for (uint i = 0u; i < 16u; ++i) {
+    xe_up_r[i] = xe_up_in_interpolators[i];
+  }
+  if ((pixel_word & XE_UP_PIXEL_PARAM_GEN) != 0u) {
+    // The pixel's position, with the facing in X's sign and whether the
+    // primitive is a line in Z's.
+    vec2 position = abs(floor(gl_FragCoord.xy));
+    if ((flags & XE_UP_SYS_FLAG_PRIMITIVE_POLYGONAL) != 0u && !gl_FrontFacing) {
+      position.x = uintBitsToFloat(floatBitsToUint(position.x) ^ 0x80000000u);
+    }
+    xe_up_r[(pixel_word >> XE_UP_PIXEL_PARAM_GEN_REGISTER_SHIFT) & 15u] =
+        vec4(position,
+             uintBitsToFloat((flags & XE_UP_SYS_FLAG_PRIMITIVE_LINE) != 0u
+                                 ? 0x80000000u
+                                 : 0u),
+             0.0);
+  }
+  for (uint i = 0u; i < 4u; ++i) {
+    xe_up_color[i] = vec4(0.0);
+  }
+  xe_up_color_written = 0u;
+  xe_up_tfetch_lod = 0.0;
+  xe_up_tfetch_gradients_h = vec3(0.0);
+  xe_up_tfetch_gradients_v = vec3(0.0);
+
+  XeUpRun(program);
+
+  if (xe_up_kill) {
+    discard;
+  }
+  if ((xe_up_color_written & 1u) != 0u) {
+    // The guest alpha test on colour 0: three bits say which of less, equal
+    // and greater pass; all three is no test, less and greater is not equal.
+    uint function = (flags >> XE_UP_SYS_FLAG_ALPHA_PASS_SHIFT) & 7u;
+    if (function != 7u) {
+      float alpha = xe_up_color[0].a;
+      float reference = uintBitsToFloat(xe_up_sys[11].y);
+      bool pass;
+      if (function == 5u) {
+        pass = alpha != reference;
+      } else {
+        pass = ((function & 1u) != 0u && alpha < reference) ||
+               ((function & 2u) != 0u && alpha == reference) ||
+               ((function & 4u) != 0u && alpha > reference);
+      }
+      if (!pass) {
+        discard;
+      }
+    }
+  }
+  // The render targets' exponent biases, and gamma where a target is
+  // gamma-encoded.
+  for (uint i = 0u; i < 4u; ++i) {
+    vec4 color = xe_up_color[i] * uintBitsToFloat(xe_up_sys[13][i]);
+    if ((flags & (XE_UP_SYS_FLAG_CONVERT_COLOR_0_TO_GAMMA << i)) != 0u) {
+      color.rgb = XeUpLinearToPWLGamma(color.rgb);
+    }
+    xe_up_color[i] = color;
+  }
+  xe_up_out_color_0 = xe_up_color[0];
+  xe_up_out_color_1 = xe_up_color[1];
+  xe_up_out_color_2 = xe_up_color[2];
+  xe_up_out_color_3 = xe_up_color[3];
+}

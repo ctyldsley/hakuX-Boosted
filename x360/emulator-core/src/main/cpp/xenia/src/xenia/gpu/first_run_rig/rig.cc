@@ -161,6 +161,8 @@ struct Test {
   std::vector<uint32_t> ucode;
   // Changes to the environment for this test.
   std::function<void(Environment&)> prepare;
+  // Pixel tests: the register given the generated parameter, or -1.
+  int param_gen_register = -1;
   // Largest difference allowed, relative to the larger magnitude (and
   // absolute below 1).
   float tolerance = 2e-5f;
@@ -634,6 +636,336 @@ void AddVertexTests(std::vector<Test>& tests) {
 }
 
 // -----------------------------------------------------------------------------
+// Pixel test shaders. Registers 0 to 15 start as the interpolators.
+// -----------------------------------------------------------------------------
+
+Test MakePixelTest(const std::string& name,
+                   const std::function<void(Asm&)>& body,
+                   std::function<void(Environment&)> prepare = nullptr) {
+  Test test;
+  test.name = name;
+  test.type = xe::gpu::xenos::ShaderType::kPixel;
+  Asm assembler;
+  body(assembler);
+  assembler.End();
+  test.ucode = assembler.Assemble();
+  test.prepare = std::move(prepare);
+  return test;
+}
+
+// A fetch instruction that only sets state: setTexLOD (24), setGradientH
+// (25), setGradientV (26).
+Ins SetFetchState(uint32_t opcode, uint32_t src, const char* swizzle) {
+  Ins ins;
+  ins.is_fetch = true;
+  ins.dwords[0] = opcode | (src << 5) |
+                  ((ComponentIndex(swizzle[0]) |
+                    (ComponentIndex(swizzle[1]) << 2) |
+                    (ComponentIndex(swizzle[2]) << 4))
+                   << 26);
+  return ins;
+}
+
+void SetSigns(Environment& environment, uint32_t fetch_constant,
+              uint32_t signs) {
+  uint32_t& word =
+      environment.system_constants.texture_swizzled_signs[fetch_constant >> 2];
+  uint32_t shift = 8 * (fetch_constant & 3);
+  word = (word & ~(UINT32_C(0xFF) << shift)) | (signs << shift);
+}
+
+void AddPixelTests(std::vector<Test>& tests) {
+  auto export_colors = [](Asm& assembler, uint32_t first_register) {
+    assembler.Exec(std::vector<Alu>{Export(0, R(first_register)),
+                                    Export(1, R(first_register + 1)),
+                                    Export(2, R(first_register + 2)),
+                                    Export(3, R(first_register + 3))});
+  };
+  tests.push_back(MakePixelTest(
+      "ps_passthrough", [&](Asm& assembler) { export_colors(assembler, 0); }));
+  tests.push_back(MakePixelTest("ps_one_color_masked", [](Asm& assembler) {
+    assembler.Exec(std::vector<Alu>{Export(0, R(1), "x_z_"),
+                                    Export(2, R(2, "wzyx"), "_y_w")});
+  }));
+
+  // Arithmetic, as the vertex tests have it, on the interpolators.
+  {
+    std::mt19937 rng(77);
+    for (uint32_t i = 0; i < 60; ++i) {
+      std::vector<Alu> alus;
+      uint32_t count = 2 + rng() % 9;
+      for (uint32_t j = 0; j < count; ++j) {
+        alus.push_back(RandomAlu(rng, 16, i >= 30));
+        if (i >= 30 && rng() % 4 == 0) {
+          alus.back().predicated = true;
+          alus.back().predicate_condition = rng() % 2 != 0;
+        }
+      }
+      tests.push_back(MakePixelTest("ps_alu_random_" + std::to_string(i),
+                                    [&](Asm& assembler) {
+                                      assembler.Exec(alus);
+                                      export_colors(assembler, 2);
+                                    }));
+    }
+  }
+
+  // Kills: vector (kill_eq 24 to kill_ne 27) and scalar (kills_eq 35 to
+  // kills_one 39).
+  for (uint32_t op = 24; op <= 27; ++op) {
+    tests.push_back(MakePixelTest("ps_kill_vector_" + std::to_string(op),
+                                  [&](Asm& assembler) {
+                                    assembler.Exec(std::vector<Alu>{
+                                        Vec(11 /* floor */, 4, "xyzw",
+                                            R(1, "xyxy")),
+                                        Vec(op, 5, "xyzw", R(4),
+                                            R(4, "yxwz"))});
+                                    export_colors(assembler, 2);
+                                  }));
+  }
+  for (uint32_t op = 35; op <= 39; ++op) {
+    tests.push_back(MakePixelTest("ps_kill_scalar_" + std::to_string(op),
+                                  [&](Asm& assembler) {
+                                    assembler.Exec(std::vector<Alu>{
+                                        Vec(11 /* floor */, 4, "xyzw",
+                                            R(2, "xyxy")),
+                                        Scal(op, 5, "x___", R(4, "xyzw"))});
+                                    export_colors(assembler, 2);
+                                  }));
+  }
+
+  // The alpha test: every function, the reference inside the alphas drawn.
+  for (uint32_t function = 0; function < 8; ++function) {
+    tests.push_back(MakePixelTest(
+        "ps_alpha_test_" + std::to_string(function),
+        [&](Asm& assembler) {
+          assembler.Exec(std::vector<Alu>{
+              Vec(11 /* floor */, 4, "xyzw", R(1, "wwww")),
+              Export(0, R(4))});
+        },
+        [function](Environment& environment) {
+          environment.system_constants.flags = function << 11;
+          environment.system_constants.alpha_test_reference = 0.0f;
+        }));
+  }
+  // Without colour 0 there is no alpha test.
+  tests.push_back(MakePixelTest(
+      "ps_alpha_test_no_color_0",
+      [](Asm& assembler) {
+        assembler.Exec(std::vector<Alu>{Export(1, R(1))});
+      },
+      [](Environment& environment) {
+        environment.system_constants.flags = 0;
+      }));
+  // Exponent biases and gamma for each target.
+  for (uint32_t i = 0; i < 3; ++i) {
+    tests.push_back(MakePixelTest(
+        "ps_exp_bias_gamma_" + std::to_string(i),
+        [&](Asm& assembler) { export_colors(assembler, 1); },
+        [i](Environment& environment) {
+          environment.system_constants.flags =
+              (7 << 11) | (i == 0 ? 0x4000 * 0b0101 : (i == 1 ? 0x4000 * 0xF
+                                                              : 0x4000 * 2));
+          environment.system_constants.color_exp_bias[0] = 0.25f;
+          environment.system_constants.color_exp_bias[1] = 2.0f;
+          environment.system_constants.color_exp_bias[3] = 0.125f;
+        }));
+  }
+  // The generated parameter, for a filled primitive and for a line.
+  for (uint32_t i = 0; i < 3; ++i) {
+    Test test = MakePixelTest(
+        "ps_param_gen_" + std::to_string(i),
+        [&](Asm& assembler) { export_colors(assembler, 2); },
+        [i](Environment& environment) {
+          environment.system_constants.flags =
+              (7 << 11) | (i == 1 ? 0x40 : (i == 2 ? 0x80 : 0));
+        });
+    test.param_gen_register = 3 + int(i);
+    tests.push_back(test);
+  }
+
+  // Texture fetches. Fetch constants 0 to 3 are the four pairings of two
+  // textures and two samplers.
+  struct FetchCase {
+    const char* name;
+    uint32_t fetch_constant;
+    uint32_t dimension;
+    std::function<void(Ins&)> change;
+    std::function<void(Environment&)> prepare;
+    // 0 none, 1 setTexLOD, 2 setGradientH and V.
+    uint32_t state = 0;
+  };
+  const uint32_t k2D = 1, kCube = 3;
+  std::vector<FetchCase> cases = {
+      {"2d_plain_0", 0, k2D},
+      {"2d_plain_1", 1, k2D},
+      {"2d_plain_2", 2, k2D},
+      {"2d_plain_3", 3, k2D},
+      {"2d_unnormalized", 0, k2D,
+       [](Ins& ins) { ins.dwords[0] |= 1u << 25; }},
+      {"2d_offsets", 1, k2D,
+       [](Ins& ins) { ins.dwords[2] |= (3u << 16) | ((uint32_t(-5) & 31) << 21); }},
+      {"2d_unnormalized_offsets", 2, k2D,
+       [](Ins& ins) {
+         ins.dwords[0] |= 1u << 25;
+         ins.dwords[2] |= ((uint32_t(-2) & 31) << 16) | (7u << 21);
+       }},
+      {"2d_lod_bias", 0, k2D,
+       [](Ins& ins) { ins.dwords[2] |= (uint32_t(20) & 0x7F) << 2; }},
+      {"2d_lod_bias_negative", 0, k2D,
+       [](Ins& ins) { ins.dwords[2] |= (uint32_t(-9) & 0x7F) << 2; }},
+      {"2d_constant_lod_bias", 0, k2D, nullptr,
+       [](Environment& environment) {
+         environment.fetch_constants[4] |= (uint32_t(45) & 0x3FF) << 12;
+       }},
+      {"2d_explicit_lod", 0, k2D,
+       [](Ins& ins) { ins.dwords[1] &= ~(1u << 28); },
+       [](Environment& environment) {
+         environment.fetch_constants[4] |= (uint32_t(50) & 0x3FF) << 12;
+       }},
+      {"2d_register_lod", 0, k2D,
+       [](Ins& ins) {
+         ins.dwords[1] &= ~(1u << 28);
+         ins.dwords[1] |= 1u << 29;
+       },
+       nullptr, 1},
+      {"2d_register_lod_computed", 0, k2D,
+       [](Ins& ins) { ins.dwords[1] |= 1u << 29; }, nullptr, 1},
+      {"2d_register_gradients", 0, k2D, [](Ins& ins) { ins.dwords[2] |= 1; },
+       nullptr, 2},
+      {"2d_register_gradients_unnormalized", 0, k2D,
+       [](Ins& ins) {
+         ins.dwords[2] |= 1;
+         ins.dwords[0] |= 1u << 25;
+       },
+       nullptr, 2},
+      {"2d_signed", 0, k2D, nullptr,
+       [](Environment& environment) { SetSigns(environment, 0, 0x55); }},
+      {"2d_biased", 1, k2D, nullptr,
+       [](Environment& environment) { SetSigns(environment, 1, 0xAA); }},
+      {"2d_gamma", 2, k2D, nullptr,
+       [](Environment& environment) { SetSigns(environment, 2, 0xFF); }},
+      {"2d_mixed_signs", 3, k2D, nullptr,
+       [](Environment& environment) { SetSigns(environment, 3, 0x1B); }},
+      {"2d_mixed_signs_2", 0, k2D, nullptr,
+       [](Environment& environment) { SetSigns(environment, 0, 0xE4); }},
+      {"2d_exponent_bias", 0, k2D, nullptr,
+       [](Environment& environment) {
+         environment.fetch_constants[3] |= (uint32_t(3) & 0x3F) << 13;
+       }},
+      {"2d_exponent_bias_negative", 1, k2D, nullptr,
+       [](Environment& environment) {
+         environment.fetch_constants[6 + 3] |= (uint32_t(-4) & 0x3F) << 13;
+         SetSigns(environment, 1, 0x66);
+       }},
+      // The destination swizzle: w, z, 1, kept; then x alone with 0s.
+      {"2d_dest_swizzle", 0, k2D,
+       [](Ins& ins) {
+         ins.dwords[1] = (ins.dwords[1] & ~0xFFFu) | 3 | (2 << 3) | (5 << 6) |
+                         (7 << 9);
+       }},
+      {"2d_dest_swizzle_2", 1, k2D,
+       [](Ins& ins) {
+         ins.dwords[1] = (ins.dwords[1] & ~0xFFFu) | 4 | (0 << 3) | (4 << 6) |
+                         (0 << 9);
+       },
+       [](Environment& environment) { SetSigns(environment, 1, 0x39); }},
+      {"cube_plain_0", 0, kCube},
+      {"cube_plain_1", 1, kCube},
+      {"cube_plain_3", 3, kCube},
+      {"cube_offsets", 0, kCube,
+       [](Ins& ins) {
+         ins.dwords[2] |= (2u << 16) | ((uint32_t(-3) & 31) << 21) | (2u << 26);
+       }},
+      {"cube_unnormalized", 0, kCube,
+       [](Ins& ins) { ins.dwords[0] |= 1u << 25; }},
+      {"cube_explicit_lod", 1, kCube,
+       [](Ins& ins) {
+         ins.dwords[1] &= ~(1u << 28);
+         ins.dwords[1] |= 1u << 29;
+       },
+       nullptr, 1},
+      {"cube_register_gradients", 0, kCube,
+       [](Ins& ins) { ins.dwords[2] |= 1; }, nullptr, 2},
+      {"cube_lod_bias", 0, kCube,
+       [](Ins& ins) { ins.dwords[2] |= (uint32_t(24) & 0x7F) << 2; }},
+      {"cube_signed", 2, kCube, nullptr,
+       [](Environment& environment) { SetSigns(environment, 2, 0x55); }},
+      {"cube_mixed_signs", 1, kCube, nullptr,
+       [](Environment& environment) { SetSigns(environment, 1, 0x93); }},
+  };
+  for (const FetchCase& fetch_case : cases) {
+    tests.push_back(MakePixelTest(
+        std::string("ps_tfetch_") + fetch_case.name,
+        [&](Asm& assembler) {
+          std::vector<Ins> instructions;
+          // Texture coordinates over more than one copy of the texture.
+          instructions.push_back(
+              Vec(1 /* mul */, 4, "xyzw", R(0), R(9, "xxxw")).Encode());
+          instructions.push_back(
+              Vec(0 /* add */, 5, "xyzw", R(0, "xyzz"), R(3, "wwww")).Encode());
+          instructions.push_back(Vec(2, 6, "xyzw", R(1), R(1)).Encode());
+          if (fetch_case.state == 1) {
+            instructions.push_back(SetFetchState(24, 1, "yyy"));
+          } else if (fetch_case.state == 2) {
+            instructions.push_back(SetFetchState(25, 2, "xyz"));
+            instructions.push_back(SetFetchState(26, 3, "yzx"));
+          }
+          Ins fetch = TextureFetch(6, fetch_case.dimension == kCube ? 0 : 5,
+                                   fetch_case.fetch_constant,
+                                   fetch_case.dimension);
+          if (fetch_case.change) {
+            fetch_case.change(fetch);
+          }
+          instructions.push_back(fetch);
+          instructions.push_back(Export(0, R(6)).Encode());
+          instructions.push_back(Export(1, R(6, "wzyx")).Encode());
+          assembler.Exec(instructions);
+        },
+        fetch_case.prepare));
+  }
+  // Several textures in one shader, more fetches than textures, a fetch that
+  // is predicated away for some pixels, one in an exec a bool constant
+  // decides, and a slot used with two sets of filters.
+  tests.push_back(MakePixelTest(
+      "ps_tfetch_many",
+      [](Asm& assembler) {
+        std::vector<Ins> instructions;
+        instructions.push_back(TextureFetch(4, 0, 0, 1));
+        instructions.push_back(TextureFetch(5, 1, 1, 1, "yxz"));
+        instructions.push_back(TextureFetch(6, 0, 2, 3));
+        instructions.push_back(TextureFetch(7, 2, 3, 1));
+        instructions.push_back(TextureFetch(8, 1, 0, 1));
+        Ins point_filtered = TextureFetch(9, 0, 0, 1);
+        point_filtered.dwords[1] &= ~((3u << 12) | (3u << 14));
+        instructions.push_back(point_filtered);
+        instructions.push_back(
+            Vec(1 /* mul */, 4, "xyzw", R(4), R(5)).Encode());
+        instructions.push_back(
+            Vec(0 /* add */, 6, "xyzw", R(6), R(7)).Encode());
+        // setp_gt on a coordinate, then a fetch only where it holds.
+        instructions.push_back(Scal(29, 10, "____", R(1, "xxxx")).Encode());
+        Ins predicated = TextureFetch(8, 2, 1, 1);
+        // With an explicit level of detail: where the predicate differs
+        // inside a 2 by 2 block of pixels the screen's derivatives are
+        // undefined, for the translated shader as for the interpreter, and
+        // the two then differ there (seen: 15 pixels along the edge).
+        predicated.dwords[1] &= ~(1u << 28);
+        predicated.dwords[1] |= 1u << 31;
+        predicated.dwords[2] |= 1u << 31;
+        instructions.push_back(predicated);
+        assembler.Exec(instructions);
+        assembler.Exec(std::vector<Ins>{TextureFetch(9, 3, 2, 1, "yxz")},
+                       Asm::Condition::kBool, 40, true);
+        assembler.Exec(std::vector<Alu>{Export(0, R(4)), Export(1, R(6)),
+                                        Export(2, R(8)), Export(3, R(9))});
+      },
+      [](Environment& environment) {
+        SetSigns(environment, 1, 0x55);
+        SetSigns(environment, 3, 0xAA);
+      }));
+}
+
+// -----------------------------------------------------------------------------
 // Running.
 // -----------------------------------------------------------------------------
 
@@ -1036,6 +1368,8 @@ class VertexRunner {
   VkPipeline interpreter_pipeline_ = VK_NULL_HANDLE;
 };
 
+#include "xenia/gpu/first_run_rig/rig_pixel.h"
+
 }  // namespace rig
 
 int main(int argc, char** argv) {
@@ -1065,6 +1399,7 @@ int main(int argc, char** argv) {
 
   std::vector<rig::Test> tests;
   rig::AddVertexTests(tests);
+  rig::AddPixelTests(tests);
   if (options.list) {
     for (const rig::Test& test : tests) {
       std::printf("%s\n", test.name.c_str());
@@ -1076,6 +1411,7 @@ int main(int argc, char** argv) {
   device.Initialize();
   std::printf("device: %s\n", device.name);
   rig::VertexRunner vertex_runner(device, options);
+  rig::PixelRunner pixel_runner(device, options);
 
   std::mt19937 rng(360);
   uint32_t run = 0, failed = 0;
@@ -1087,7 +1423,7 @@ int main(int argc, char** argv) {
     ++run;
     bool ok = test.type == xe::gpu::xenos::ShaderType::kVertex
                   ? vertex_runner.Run(test, rng)
-                  : false;
+                  : pixel_runner.Run(test, rng);
     if (!ok) {
       ++failed;
     }

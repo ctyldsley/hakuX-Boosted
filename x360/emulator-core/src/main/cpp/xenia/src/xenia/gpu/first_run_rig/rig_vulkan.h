@@ -162,7 +162,8 @@ struct Device {
 
   Image MakeImage(VkFormat format, uint32_t width, uint32_t height,
                   uint32_t layers, VkImageUsageFlags usage,
-                  VkImageViewType view_type, bool cube = false) {
+                  VkImageViewType view_type, bool cube = false,
+                  uint32_t mips = 1) {
     Image image;
     image.format = format;
     image.width = width;
@@ -173,7 +174,7 @@ struct Device {
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.format = format;
     image_info.extent = {width, height, 1};
-    image_info.mipLevels = 1;
+    image_info.mipLevels = mips;
     image_info.arrayLayers = layers;
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -194,7 +195,8 @@ struct Device {
     view_info.image = image.image;
     view_info.viewType = view_type;
     view_info.format = format;
-    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0,
+                                  layers};
     RIG_VK(vkCreateImageView(device, &view_info, nullptr, &image.view));
     return image;
   }
