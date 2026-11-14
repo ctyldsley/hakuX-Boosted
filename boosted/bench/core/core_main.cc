@@ -8,6 +8,7 @@
 // its registry. A name this tree does not have is reported and the process
 // exits with status 3 without measuring, so a benchmark never silently runs
 // with a setting it was asked for missing.
+#include <sys/prctl.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -51,6 +52,13 @@ extern "C" __attribute__((visibility("default"))) int bench_core_main(
   }
   if (label.empty()) {
     label = "defaults";
+  }
+  // BENCH_TIMER_SLACK_NS: the kernel's timer slack for this thread and every
+  // thread it starts (the default is 50,000 ns: a timed sleep, however
+  // short, lasts at least about that long). A test of what a path is
+  // waiting on, not one of the core's settings.
+  if (const char* slack = std::getenv("BENCH_TIMER_SLACK_NS")) {
+    prctl(PR_SET_TIMERSLACK, std::strtoul(slack, nullptr, 10), 0, 0, 0);
   }
 
   std::vector<std::string> launch = {"bench_core"};
