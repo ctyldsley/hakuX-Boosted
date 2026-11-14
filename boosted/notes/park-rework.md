@@ -25,7 +25,8 @@ Base: `claude/integration-1115` at `5aea2e2`. Pushed only to
      once by a signal of the object it polls.
   5. The main thread's empty yields: the arithmetic says there is little
      there to win ("The main thread").
-  6. Bench rows, and the table of the first run ("Bench results").
+  6. Bench rows, and the table of the first green run, bench run 15 ("Bench
+     results").
 - In progress: nothing.
 - Next: the device runs under "What a device run must show". Then "What is
   next".
@@ -315,20 +316,82 @@ which is a poll loop.
 
 ## Bench results
 
-To be filled in from the first green run of this branch (see "Build"). The
-figures below until then are from the rig under `qemu-aarch64` in the cloud
-session, where the noise thread itself costs about 0.25 of a core and every
-timing is inflated: read only "parked or not".
+Runner numbers (a GitHub ARM64 runner), not phone numbers. They say what a
+path costs relative to another on a server core; nothing about frame rate
+or heat on a phone.
 
-| Run (never answered) | defaults | first gate + poll sites | adaptive gate + poll sites |
+### Bench run 15, commit `82aac63`
+
+https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43649224652, green.
+Cores busy for a waiter that is never answered, beside about 6,500 unrelated
+events a second (`_noisy`), by set of settings:
+
+| Waiter | defaults | `park_waits` (no poll sites) | first gate + poll sites | adaptive + poll sites | adaptive, max 500 us | adaptive + skew bound |
+|---|---|---|---|---|---|---|
+| `yield` | 1.02 | 0.025 | 0.079 | 0.026 | 0.032 | 0.026 |
+| `zero_delay` | 1.02 | 0.026 | 0.084 | 0.026 | 0.032 | 0.027 |
+| `zero_timeout_wait` | 1.01 | 0.037 | 0.212 | 0.036 | 0.051 | 0.037 |
+| `poll_sled` | 1.02 | 1.02 | 0.067 | 0.025 | 0.030 | 0.025 |
+| `poll_hint` | 1.01 | 1.02 | 0.068 | 0.025 | 0.031 | 0.026 |
+| `poll_plain` | 1.01 | 1.02 | 0.068 | 0.025 | 0.030 | 0.025 |
+| `spin_lock` | 1.02 | 1.01 | 0.069 | 0.024 | 0.030 | 0.026 |
+| `poll_clock` | 1.02 | 1.02 | 1.02 | 1.02 | 1.02 | 1.02 |
+
+Alone (`_quiet`) every parked shape is at 0.009 to 0.021 of a core with
+either gate, and `yield_nothing_ready` is 0.009 as before the rework.
+
+What the table says:
+
+- **Poll sites.** Without them (`park_waits` alone) every poll-loop shape
+  stays at a whole core. With them, and the recognition as fixed here, all
+  but the deadline loop are parked. That is the recognition fix, and it
+  does not depend on the gate.
+- **The adaptive gate against the first.** Beside the events the first gate
+  leaves 0.07 to 0.21 of a core busy and the adaptive one 0.025 to 0.037:
+  the first gate's wake path wakes the parked thread's dispatch thread for
+  the events, the adaptive one learns not to.
+- **The first gate did park here.** That is the caveat of this run: on the
+  runner a bare yield loop's looks are a couple of microseconds apart, so
+  "no event since the last look" usually holds even at 6,500 events a
+  second, and the first gate parks. On the phone it never held. The
+  difference is that the phone's waiting thread does a little work on each
+  pass, which puts its looks hundreds of microseconds apart. The scenario
+  `yield_with_work` (a few microseconds of additions before each yield) was
+  added after this run for that; under `qemu-aarch64` it shows the first
+  gate at a whole core and the adaptive one parked. Its runner figures are
+  in the next run.
+- **The deadline loop** is left alone, on purpose.
+- **Half the longest park** costs about a fifth more CPU (0.030 against
+  0.025).
+
+Latency, from the flag made true (a plain store, about 3 ms after the
+waiter last took one) to the waiter seeing it, microseconds, `_answered_noisy`:
+
+| Waiter | defaults, median / worst | adaptive + poll sites, median / 95th / worst | adaptive, max 500 us |
 |---|---|---|---|
-| `yield_quiet` | 1.0 | 0.18 | 0.20 |
-| `yield_noisy` | 1.4 | 1.14 | 0.58 |
-| `poll_sled_quiet` | 1.0 | 1.05 | 0.14 |
-| `poll_sled_noisy` | 1.3 | 0.84 (after the recognition fix) | 0.47 |
-| `poll_plain_noisy` | 1.3 | 0.85 | 0.45 |
-| `spin_lock_noisy` | 1.4 | 0.85 | 0.47 |
-| `poll_clock_noisy` | 1.3 | 1.4 | 1.4 |
+| `yield` | 0.3 / 38 | 63 / 930 / 1033 | 137 / 247 / 391 |
+| `poll_sled` | 0.2 / 0.4 | 536 / 728 / 758 | 319 / 500 / 508 |
+| `zero_timeout_wait` | 0.3 / 0.5 | 76 / 927 / 998 | 206 / 273 / 359 |
+| `zero_timeout_wait`, answered with its own event | 0.3 / 0.5 | 11 / 14 / 17 | 11 / 12 / 19 |
+
+- The worst case is the longest park, as designed: 1 ms, or 0.5 ms with
+  `max 500 us`.
+- A waiter that polls an object with a zero timeout is woken 11 us after
+  that object is signalled, whatever the noise.
+- **Two artefacts in this run's latency figures**, both the scenario's and
+  both fixed for the next run. The fixed 3 ms delay fell into step with the
+  1 ms parks (hence a median of 63 us beside a 95th percentile of 930: the
+  flag came just before a deadline most of the time). And the waiter went
+  straight from one wait to the next with no work between, so to the
+  scheduler the whole run was one burst and every park was the longest;
+  the rule "a quarter of the wait so far" was therefore not what was
+  measured. The delay is now varied and the waiter works for 0.8 ms after
+  each wait.
+- An answer followed by an unrelated event (`_answered_with_event_noisy`)
+  is no faster than a plain store with the adaptive gate (median 70 against
+  63): the thread has learnt from the noise to ignore events. The first
+  gate is faster there (10 us) because it wakes for every event, which is
+  what costs it the CPU above.
 
 ## What a device run must show
 
@@ -500,8 +563,8 @@ None is needed for this branch to work. Two would help:
 
 ## Build
 
-- `82aac63` (all the code): app run 137,
-  https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43649224679, and
-  bench run 15,
-  https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43649224652.
-  Results below when known.
+- `82aac63` (all the code): bench run 15, green,
+  https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43649224652. App
+  run 137, https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43649224679:
+  result below when known.
+- The commits after it change the bench's scenarios and these notes only.
