@@ -16,6 +16,14 @@ namespace xe {
 namespace cpu {
 namespace hir {
 
+// hakuX-Boosted: on OPCODE_CONTEXT_BARRIER. The front end puts a barrier in
+// front of every PowerPC branch instruction so that the per-block context
+// promotion does not carry a value, or drop a store, across a branch in the
+// middle of a block. Such a barrier says nothing about host code needing the
+// context; one without this flag (mfmsr, mtmsr, sc) does.
+enum ContextBarrierFlags {
+  CONTEXT_BARRIER_FOR_BRANCH = (1 << 0),
+};
 enum CallFlags {
   CALL_TAIL = (1 << 1),
   CALL_POSSIBLE_RETURN = (1 << 2),

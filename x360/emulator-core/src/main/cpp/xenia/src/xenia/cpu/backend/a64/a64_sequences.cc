@@ -27,6 +27,9 @@
 #include "xenia/cpu/hir/instr.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 
+// hakuX-Boosted: see A64Emitter::EmitDeadStoreVerify.
+DECLARE_bool(dead_context_store_verify);
+
 namespace xe {
 namespace cpu {
 namespace backend {
@@ -217,7 +220,21 @@ struct LOAD_CONTEXT_I8
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // ldrb wD, [x20, #offset]
     auto offset = static_cast<uint32_t>(i.src1.value);
-    e.ldrb(i.dest, ptr(e.GetContextReg(), offset));
+    // hakuX-Boosted: a pinned flag byte is read from its host register,
+    // which holds it zero-extended as ldrb would deliver it.
+    if (auto pin = e.FindPinnedGuestRegister(offset, hir::INT8_TYPE)) {
+      if (e.pin_verify()) {
+        e.EmitPinnedVerify(*pin);
+      }
+      e.mov(i.dest, WReg(pin->host_reg));
+    } else {
+      e.ldrb(i.dest, ptr(e.GetContextReg(), offset));
+    }
+    if (cvars::dead_context_store_verify) {
+      e.EmitDeadStoreVerify(XReg(i.dest.reg().getIdx()), offset, 1);
+    }
+    e.EmitContextConstantVerify(i.instr, XReg(i.dest.reg().getIdx()), offset,
+                                1);
   }
 };
 struct LOAD_CONTEXT_I16
@@ -244,9 +261,13 @@ struct LOAD_CONTEXT_I64
         e.EmitPinnedVerify(*pin);
       }
       e.mov(i.dest, XReg(pin->host_reg));
-      return;
+    } else {
+      e.ldr(i.dest, ptr(e.GetContextReg(), offset));
     }
-    e.ldr(i.dest, ptr(e.GetContextReg(), offset));
+    if (cvars::dead_context_store_verify) {
+      e.EmitDeadStoreVerify(i.dest, offset, 8);
+    }
+    e.EmitContextConstantVerify(i.instr, i.dest, offset, 8);
   }
 };
 struct LOAD_CONTEXT_F32
@@ -300,6 +321,20 @@ struct STORE_CONTEXT_I8
                I<OPCODE_STORE_CONTEXT, VoidOp, OffsetOp, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto offset = static_cast<uint32_t>(i.src1.value);
+    // hakuX-Boosted: as STORE_CONTEXT_I64. The upper bits of an 8-bit value
+    // in a register are not defined, so the byte is zero-extended into the
+    // pin: every later read sees what a load from the context would give.
+    if (auto pin = e.FindPinnedGuestRegister(offset, hir::INT8_TYPE)) {
+      if (i.src2.is_constant) {
+        e.mov(WReg(pin->host_reg),
+              static_cast<uint64_t>(i.src2.constant() & 0xFF));
+      } else {
+        e.uxtb(WReg(pin->host_reg), i.src2);
+      }
+      if (!e.pin_verify()) {
+        return;
+      }
+    }
     if (i.src2.is_constant) {
       e.mov(e.w0, static_cast<uint64_t>(i.src2.constant() & 0xFF));
       e.strb(e.w0, ptr(e.GetContextReg(), offset));
@@ -2534,7 +2569,7 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I16                                                            \
@@ -2559,7 +2594,7 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I32                                                            \
@@ -2586,7 +2621,7 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I64                                                            \
@@ -2611,7 +2646,7 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct _tag_##NAME {}
@@ -2638,7 +2673,7 @@ DEFINE_COMPARE_XX(COMPARE_NE, NE);
         e.sxtb(e.w1, i.src2);                                                  \
         e.cmp(e.w0, e.w1);                                                     \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I16                                                            \
@@ -2658,7 +2693,7 @@ DEFINE_COMPARE_XX(COMPARE_NE, NE);
         e.sxth(e.w1, i.src2);                                                  \
         e.cmp(e.w0, e.w1);                                                     \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I32                                                            \
@@ -2685,7 +2720,7 @@ DEFINE_COMPARE_XX(COMPARE_NE, NE);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I64                                                            \
@@ -2710,7 +2745,7 @@ DEFINE_COMPARE_XX(COMPARE_NE, NE);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct _tag_##NAME {}

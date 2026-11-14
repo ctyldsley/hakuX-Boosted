@@ -10,8 +10,13 @@
 #ifndef XENIA_CPU_PROCESSOR_H_
 #define XENIA_CPU_PROCESSOR_H_
 
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -62,6 +67,17 @@ enum class ExecutionState {
 };
 
 class Processor {
+ private:
+  // hakuX-Boosted: see QueueTranslateAhead.
+  void TranslateAheadMain();
+  void StopTranslateAhead();
+  std::thread ahead_thread_;
+  std::mutex ahead_mutex_;
+  std::condition_variable ahead_cv_;
+  std::deque<uint32_t> ahead_queue_;
+  bool ahead_stop_ = false;
+  bool ahead_started_ = false;
+
  public:
   Processor(Memory* memory, ExportResolver* export_resolver);
   ~Processor();
@@ -73,6 +89,30 @@ class Processor {
   ExportResolver* export_resolver() const { return export_resolver_; }
 
   bool Setup(std::unique_ptr<backend::Backend> backend);
+
+  // hakuX-Boosted: translate_ahead. Translating a function on the guest
+  // thread that first calls it is where much of a title's first-run stutter
+  // comes from. With the setting on, one helper thread translates functions
+  // before they are called: each time a function of the title's executable
+  // has been translated, the functions it calls directly that have no code
+  // yet are queued (QueueTranslateAhead, from the translator), and the
+  // helper resolves them like a guest thread would, at low priority.
+  //
+  //  - A guest thread that needs a function the helper is in the middle of
+  //    waits for it as it would for another guest thread (EntryTable), and
+  //    raises the helper to its own priority while it waits
+  //    (BoostTranslateAhead), so that a low-priority helper cannot hold up a
+  //    high-priority thread for longer than the translation takes.
+  //  - The helper's own translations queue nothing: one level ahead only.
+  //  - The queue is bounded; when it is full the oldest request is dropped.
+  //  - The destructor stops and joins the helper before it frees anything
+  //    (the modules first of all), and so must anything else that frees
+  //    what a translation reads.
+  void QueueTranslateAhead(uint32_t caller_address, uint32_t target_address);
+  // True on the helper thread.
+  static bool IsTranslateAheadThread();
+  // Called by a thread that finds the function it needs being compiled.
+  static void BoostTranslateAhead();
 
   // Runs any pre-launch logic once the module and thread have been setup.
   void PreLaunch();

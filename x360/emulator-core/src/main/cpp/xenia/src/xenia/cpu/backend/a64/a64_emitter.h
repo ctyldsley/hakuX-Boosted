@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "xenia/base/arena.h"
@@ -194,9 +195,10 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // above A64Emitter::EmitPinnedFlush in a64_emitter.cc for the rules.
   struct PinnedGuestRegister {
     uint32_t offset;    // offset in PPCContext
-    hir::TypeName type;  // INT64_TYPE, FLOAT64_TYPE or VEC128_TYPE
+    hir::TypeName type;  // INT64_TYPE, INT8_TYPE, FLOAT64_TYPE or VEC128_TYPE
     uint32_t host_reg;  // x or v register number
     bool written;       // the function stores to it
+    uint32_t bit;       // its bit in the masks below
   };
   // The pinned register for a context access of exactly this offset and
   // type, or null. Always null when nothing is pinned.
@@ -209,28 +211,75 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
     }
     return nullptr;
   }
+  // hakuX-Boosted: a64_fuse_compare_branch. An integer compare whose only
+  // use is the conditional branch that follows it (with nothing between
+  // that could change the flags) leaves its answer in the flags instead of
+  // a register: the compare's sequence calls EmitCompareResult, the
+  // branch's asks TakeFusedCompare.
+  void EmitCompareResult(const Xbyak_aarch64::WReg& dest,
+                         Xbyak_aarch64::Cond cond) {
+    if (fuse_compare_pending_) {
+      fuse_compare_pending_ = false;
+      fused_cond_ = cond;
+      fused_cond_valid_ = true;
+      return;
+    }
+    cset(dest, cond);
+  }
+  bool TakeFusedCompare(const hir::Instr* branch, Xbyak_aarch64::Cond* cond) {
+    if (!fused_cond_valid_ || fused_branch_ != branch) {
+      return false;
+    }
+    fused_cond_valid_ = false;
+    *cond = fused_cond_;
+    return true;
+  }
+
   // a64_pin_verify: stores to pinned registers also go to the context, and
   // loads compare the two.
   bool pin_verify() const { return pin_verify_; }
-  // Context <- pinned registers (those the function writes).
-  void EmitPinnedFlush();
-  // Pinned registers <- context.
-  void EmitPinnedReload();
+  // Context <- the pinned registers named by the mask.
+  void EmitPinnedFlush(uint32_t mask);
+  // The pinned registers named by the mask <- context.
+  void EmitPinnedReload(uint32_t mask);
+  // What a write-back and a reload at the instruction being emitted cover:
+  // without pin_guest_registers_wide every register the function writes and
+  // every register; with it, what the pass worked out for this instruction.
+  uint32_t pin_flush_mask() const { return pin_cur_dirty_; }
+  uint32_t pin_reload_mask() const { return pin_cur_live_after_; }
   // Round a host function called with a bare blr instead of through the
   // guest-to-host thunk (which is where CallNativeSafe does this itself).
   void EmitPinnedSyncBeforeBareHostCall() {
     if (pins_live_) {
-      EmitPinnedFlush();
+      EmitPinnedFlush(pin_cur_dirty_);
     }
   }
   void EmitPinnedSyncAfterBareHostCall() {
     if (pins_live_) {
-      EmitPinnedReload();
+      EmitPinnedReload(pin_cur_live_after_);
     }
   }
   // a64_pin_verify: compare the pinned register with the context copy and
   // report a difference. Clobbers x0, x1, v0 and nothing else.
   void EmitPinnedVerify(const PinnedGuestRegister& pin);
+  // hakuX-Boosted: context_constant_verify. After a context load the
+  // cross-block constant pass has an expectation for: report if the loaded
+  // value differs. Clobbers x0 to x2 and x17; no flag.
+  void EmitContextConstantVerify(const hir::Instr* load,
+                                 const Xbyak_aarch64::XReg& value,
+                                 uint32_t offset, uint32_t size);
+  const std::unordered_map<const hir::Instr*, uint64_t>* load_expectations_ =
+      nullptr;
+  // hakuX-Boosted: a64_stack_access_verify. With w17 holding 1 where a
+  // stack-pointer-based address was at or above 0xE0000000 and 0 elsewhere:
+  // count the former. Out of line, no call, no register changed but w17.
+  void EmitStackFixupVerify();
+  // hakuX-Boosted: dead_context_store_verify. After a context load of an
+  // 8-bit or 64-bit integer slot: report if the value is the marker that
+  // mode stores in place of a store it took for dead. Clobbers x0 to x2 and
+  // x17; no flag.
+  void EmitDeadStoreVerify(const Xbyak_aarch64::XReg& value, uint32_t offset,
+                           uint32_t size);
 
  protected:
   void* Emplace(const EmitFunctionInfo& func_info,
@@ -280,6 +329,30 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   static constexpr size_t kNearBranch14 = (size_t(1) << 15) - 16;
   bool IsNearBoundLabel(const Xbyak_aarch64::Label& label,
                         size_t max_distance) const;
+  // hakuX-Boosted: a64_short_forward_branches. True if a conditional branch
+  // to this label may take the one-instruction form: it is near and placed
+  // (as above), or it is a block label of this function not yet placed and
+  // this attempt at the function allows that (see Emit: a function too
+  // large for it is emitted a second time without).
+  bool UseShortBranch(const Xbyak_aarch64::Label& label, size_t max_distance);
+  std::unordered_set<const Xbyak_aarch64::Label*> block_labels_;
+  bool short_forward_ok_ = false;
+  // hakuX-Boosted: a64_linked_calls. The literals of this function's linked
+  // call sites, emitted after its tail code. linked_calls_ok_ is cleared
+  // for the second attempt at a function too large for a literal load to
+  // be certain to reach its literal.
+  struct CallLiteral {
+    uint32_t guest_target;
+    Xbyak_aarch64::Label* label;
+    uint32_t code_offset;
+  };
+  std::vector<CallLiteral> call_literals_;
+  bool linked_calls_ok_ = false;
+  // The locals' stack offsets are assigned once per function (see Emit).
+  bool locals_laid_out_ = false;
+  size_t locals_stack_size_ = 0;
+  bool used_short_forward19_ = false;
+  bool used_short_forward14_ = false;
 
   // hakuX-Boosted: what Emit's loop does round an instruction when guest
   // registers are pinned.
@@ -291,12 +364,30 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // from the end of the prologue to the last body instruction.
   bool pins_live_ = false;
   bool pin_verify_ = false;
+  // hakuX-Boosted: the masks for the instruction being emitted (see
+  // pin_flush_mask), and the reload mask of the last instruction that was a
+  // way out and back in, for the resume stub of its return site.
+  uint32_t pin_cur_dirty_ = 0;
+  uint32_t pin_cur_live_after_ = 0;
+  uint32_t pin_last_sync_reload_ = 0;
+  // log_translation_stats: count executed blocks (see EmitBlockCounter).
+  bool count_blocks_ = false;
+  void EmitBlockCounter();
   struct PinnedResumeStub {
     uint32_t guest_address;
     Xbyak_aarch64::Label* target;
     uint32_t code_offset;
+    uint32_t reload_mask;
   };
   std::vector<PinnedResumeStub> pinned_resume_stubs_;
+
+  // hakuX-Boosted: see EmitCompareResult.
+  bool fuse_compare_pending_ = false;
+  bool fused_cond_valid_ = false;
+  Xbyak_aarch64::Cond fused_cond_ = Xbyak_aarch64::EQ;
+  const hir::Instr* fused_branch_ = nullptr;
+  // The branch a compare may be fused with, or null.
+  const hir::Instr* FindFusableBranch(const hir::Instr* compare) const;
 
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;
   bool synchronize_stack_on_next_instruction_ = false;

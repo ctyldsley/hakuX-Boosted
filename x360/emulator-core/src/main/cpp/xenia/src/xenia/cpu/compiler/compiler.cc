@@ -102,6 +102,8 @@ void CountContextAccess(uint64_t offset, bool is_store) {
 void CountFinishedHir(hir::HIRBuilder* builder) {
   uint64_t blocks = 0;
   uint64_t instrs = 0;
+  // hakuX-Boosted: static block counts by whether the function is pinned.
+  // (The dynamic counts are made by the emitted code.)
   for (auto block = builder->first_block(); block; block = block->next) {
     ++blocks;
     for (auto i = block->instr_head; i; i = i->next) {
@@ -113,6 +115,9 @@ void CountFinishedHir(hir::HIRBuilder* builder) {
       }
     }
   }
+  (builder->pinned_context_slots().empty() ? translation_stats.blocks_unpinned
+                                           : translation_stats.blocks_pinned)
+      .fetch_add(blocks, std::memory_order_relaxed);
   hir_blocks.fetch_add(blocks, std::memory_order_relaxed);
   hir_instrs.fetch_add(instrs, std::memory_order_relaxed);
 }
@@ -151,20 +156,74 @@ std::string FormatExtraStats() {
       get(t.pin_vr_slots), get(t.pin_loads), get(t.pin_stores),
       get(t.pin_sync_sites), get(t.pin_resume_stubs),
       get(t.pin_resume_entries), get(t.pin_verify_mismatches));
-  for (size_t n = 0; n < 33; ++n) {
+  for (size_t n = 0; n < 34; ++n) {
     const uint64_t count = get(t.pin_by_gpr[n]);
     if (count) {
       line += n < 32 ? fmt::format(" r{} {}", n, count)
-                     : fmt::format(" ctr {}", count);
+                     : fmt::format(" {} {}", n == 32 ? "ctr" : "lr", count);
     }
   }
+  // What pin_guest_registers_wide adds, and how much of the code pinning
+  // reaches: statically (blocks translated) and, in code translated while
+  // this setting was on, dynamically (blocks executed).
+  const uint64_t static_pinned = get(t.blocks_pinned);
+  const uint64_t static_all = static_pinned + get(t.blocks_unpinned);
+  const uint64_t run_pinned = t.blocks_run_pinned;
+  const uint64_t run_all = run_pinned + t.blocks_run_unpinned;
+  line += fmt::format(
+      "; wide: {} pinned functions have no loop, {} flag slots, sync loads "
+      "{} and stores {} emitted; blocks translated in pinned functions {} "
+      "of {} ({:.1f}%); blocks executed in pinned functions {} of {} "
+      "({:.1f}%)",
+      get(t.pin_functions_pinned_no_loop), get(t.pin_flag_slots),
+      get(t.pin_sync_loads), get(t.pin_sync_stores), static_pinned,
+      static_all, static_all ? 100.0 * static_pinned / static_all : 0.0,
+      run_pinned, run_all, run_all ? 100.0 * run_pinned / run_all : 0.0);
   line += fmt::format(
       "; simplification: {} block walks, {} skipped, {} skip mismatches",
       get(t.simplify_block_walks), get(t.simplify_block_skips),
       get(t.simplify_skip_mismatches));
+  line += fmt::format(
+      "; translate ahead: {} queued, {} dropped, {} already done, {} not "
+      "attempted, {} translated by the helper, {} priority boosts; {} "
+      "functions translated on the thread that needed them",
+      get(t.ahead_queued), get(t.ahead_dropped), get(t.ahead_already_done),
+      get(t.ahead_skipped), get(t.ahead_translated), get(t.ahead_boosts),
+      get(t.translated_on_demand));
+  line += fmt::format(
+      "; context loads made constants across blocks {}"
+      "; dead context stores: {} of {} candidate stores removed; compares "
+      "fused with their branch {}; functions emitted twice for short "
+      "forward branches or linked calls {}; linked call sites {} of "
+      "which {} point at their callee; "
+      "address fix-ups emitted {} and left out for stack accesses {}; "
+      "stack accesses at 0xE0000000+ {}; "
+      "self-check mismatches (TranslatorVerify) {}",
+      get(t.context_constants_propagated),
+      get(t.dead_context_stores_removed), get(t.dead_context_stores_seen),
+      get(t.compares_fused), get(t.short_forward_retries),
+      get(t.linked_call_sites), get(t.linked_call_sites_resolved),
+      get(t.address_fixups_emitted), get(t.address_fixups_skipped),
+      t.stack_fixup_verify_hits, get(t.verify_mismatches));
   return line;
 }
 }  // namespace
+
+uint64_t SelfCheckMismatches() {
+  const auto& t = translation_stats;
+  return t.pin_verify_mismatches.load(std::memory_order_relaxed) +
+         t.simplify_skip_mismatches.load(std::memory_order_relaxed) +
+         t.verify_mismatches.load(std::memory_order_relaxed) +
+         t.stack_fixup_verify_hits;
+}
+
+std::string FormatTranslationStats() {
+  return fmt::format(
+      "TranslationStats: {} functions (on request)\nTranslationStats:{}\n"
+      "TranslationStats:{}\n",
+      functions_compiled.load(std::memory_order_relaxed),
+      FormatContextCounts(), FormatExtraStats());
+}
 
 Compiler::Compiler(Processor* processor) : processor_(processor) {}
 

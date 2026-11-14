@@ -202,7 +202,13 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     // This will ensure all registers are saved to the PPC context before this
     // instruction executes.
     if (opcode_info.type == PPCOpcodeType::kSync) {
-      ContextBarrier();
+      // hakuX-Boosted: say which barriers are only there for a branch (see
+      // ContextBarrierFlags). sc is in the branch group and is not one.
+      const bool for_branch = opcode == PPCOpcode::bx ||
+                              opcode == PPCOpcode::bcx ||
+                              opcode == PPCOpcode::bclrx ||
+                              opcode == PPCOpcode::bcctrx;
+      ContextBarrier(for_branch ? CONTEXT_BARRIER_FOR_BRANCH : 0);
     }
 
     MaybeBreakOnInstruction(address);

@@ -15,6 +15,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/cpu/compiler/translation_stats.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
@@ -34,6 +35,9 @@
 #include "xenia/base/platform_win.h"
 #endif  // XE_COMPILER_MSVC
 
+DECLARE_bool(log_translation_stats);  // hakuX-Boosted
+DECLARE_path(log_file);
+
 DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
 DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
 DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
@@ -51,6 +55,22 @@ DEFINE_path(test_bin_path, "src/xenia/cpu/ppc/testing/bin/",
 DEFINE_path(test_skip_file, "src/xenia/cpu/ppc/testing/skip.txt",
             "File containing test case names to skip (one per line).", "Other");
 DEFINE_transient_string(test_name, "", "Test suite name.", "General");
+// hakuX-Boosted: one process can then run a fraction of even the largest
+// suite (one file holds 15,600 tests), which is what keeps a process short
+// enough under qemu with 16 KiB pages (ci/run-tests.sh, SLICES).
+DEFINE_string(test_slice, "",
+              "'k/n': run only the tests whose position in their suite, "
+              "counting the tests that are not skipped, is k modulo n.",
+              "Other");
+// hakuX-Boosted: the state every test leaves behind, one line a test, so
+// that two runs of the same tests with different translator settings can be
+// compared (ci/run-tests.sh does). The upstream tests assert a register or
+// two each; this covers everything a wrong translation could disturb.
+DEFINE_path(test_state_dump, "",
+            "Append one line per test to this file: its name and a hash of "
+            "the integer, float, vector and flag registers and of the "
+            "scratch and stack memory after it ran.",
+            "Other");
 
 namespace xe {
 namespace cpu {
@@ -62,6 +82,9 @@ using namespace xe::literals;
 typedef std::vector<std::pair<std::string, std::string>> AnnotationList;
 
 constexpr uint32_t START_ADDRESS = 0x80000000;
+// hakuX-Boosted: how much of the stack below its top is cleared before a
+// test and hashed after it.
+constexpr uint32_t kStackDumpSize = 32 * 1024;
 
 // Load skip list from file
 std::unordered_set<std::string> LoadSkipList(
@@ -311,6 +334,13 @@ class TestRunner {
     uint32_t stack_size = 64 * 1024;
     uint32_t stack_address = START_ADDRESS - stack_size;
     uint32_t pcr_address = stack_address - 0x1000;
+    // hakuX-Boosted: every test starts from the same memory, so that the
+    // state it leaves (DumpState) depends on the test alone and not on the
+    // tests run before it. The stack grows down from stack_address; the
+    // scratch area is the one allocated above.
+    std::memset(memory_->TranslateVirtual(stack_address - kStackDumpSize), 0,
+                kStackDumpSize);
+    std::memset(memory_->TranslateVirtual(0x10001000), 0, 0xEFFF);
     thread_state_.reset(
         new ThreadState(processor_.get(), 0x100, stack_address, pcr_address));
 
@@ -373,6 +403,9 @@ class TestRunner {
     ctx->lr = 0xBCBCBCBC;
     fn->Call(thread_state_.get(), uint32_t(ctx->lr));
 
+    // hakuX-Boosted: the whole state, for comparing two runs.
+    DumpState(test_case, fn);
+
     // Assert test state expectations.
     bool result = CheckTestResults(test_case);
     if (!result) {
@@ -383,6 +416,71 @@ class TestRunner {
     }
 
     return result;
+  }
+
+  // hakuX-Boosted: FNV-1a over a byte range.
+  static uint64_t Hash(const void* data, size_t length,
+                       uint64_t h = 0xCBF29CE484222325ull) {
+    auto p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < length; ++i) {
+      h = (h ^ p[i]) * 0x100000001B3ull;
+    }
+    return h;
+  }
+
+  // hakuX-Boosted: one line with the state the test left: the general
+  // registers with CTR (LR is left out: the runner sets it), the float
+  // registers, the vector registers, the condition, XER, FPSCR and VSCR
+  // state, the scratch memory tests write to and the top 32 KiB of the stack.
+  void DumpState(TestCase& test_case, Function* fn) {
+    if (cvars::test_state_dump.empty()) {
+      return;
+    }
+    // The size of the machine code the test's own function was translated
+    // to: with every setting off this must not change from one build of the
+    // translator to the next unless the change was meant to.
+    size_t code_size = 0;
+    if (fn && fn->is_guest()) {
+      code_size = static_cast<GuestFunction*>(fn)->machine_code_length();
+    }
+    if (!state_dump_file_) {
+      state_dump_file_ = filesystem::OpenFile(cvars::test_state_dump, "a");
+      if (!state_dump_file_) {
+        return;
+      }
+    }
+    auto ctx = thread_state_->context();
+    uint64_t gpr = Hash(ctx->r, sizeof(ctx->r));
+    gpr = Hash(&ctx->ctr, sizeof(ctx->ctr), gpr);
+    uint64_t fpr = Hash(ctx->f, sizeof(ctx->f));
+    uint64_t vr = Hash(ctx->v, sizeof(ctx->v));
+    uint64_t flags = Hash(&ctx->cr0, 32);
+    flags = Hash(&ctx->xer_ca, 3, flags);
+    flags = Hash(&ctx->fpscr, sizeof(ctx->fpscr), flags);
+    flags = Hash(&ctx->vscr_sat, 1, flags);
+    flags = Hash(&ctx->vscr_vec, sizeof(ctx->vscr_vec), flags);
+    // The same without the condition register fields the ABI leaves
+    // undefined when a function returns (cr0, cr1, cr5, cr6, cr7): what a
+    // run with eliminate_dead_context_stores=3 must still agree on.
+    uint64_t abi_flags = Hash(&ctx->cr2, 12);
+    abi_flags = Hash(&ctx->xer_ca, 3, abi_flags);
+    abi_flags = Hash(&ctx->fpscr, sizeof(ctx->fpscr), abi_flags);
+    abi_flags = Hash(&ctx->vscr_sat, 1, abi_flags);
+    abi_flags = Hash(&ctx->vscr_vec, sizeof(ctx->vscr_vec), abi_flags);
+    uint64_t mem = Hash(memory_->TranslateVirtual(0x10001000), 0xEFFF);
+    mem = Hash(memory_->TranslateVirtual(START_ADDRESS - 64 * 1024 -
+                                         kStackDumpSize),
+               kStackDumpSize, mem);
+    fprintf(state_dump_file_,
+            "%s gpr=%016llx fpr=%016llx vr=%016llx flags=%016llx "
+            "mem=%016llx abiflags=%016llx codesize=%zu\n",
+            test_case.name.c_str(), static_cast<unsigned long long>(gpr),
+            static_cast<unsigned long long>(fpr),
+            static_cast<unsigned long long>(vr),
+            static_cast<unsigned long long>(flags),
+            static_cast<unsigned long long>(mem),
+            static_cast<unsigned long long>(abi_flags), code_size);
+    fflush(state_dump_file_);
   }
 
   bool SetupTestState(TestCase& test_case) {
@@ -493,6 +591,7 @@ class TestRunner {
   TestSuite* current_suite_ = nullptr;
   std::vector<uint8_t> bin_cache_;
   uint32_t bin_size_ = 0;
+  FILE* state_dump_file_ = nullptr;  // hakuX-Boosted
 };
 
 bool DiscoverTests(const std::filesystem::path& test_path,
@@ -503,7 +602,9 @@ bool DiscoverTests(const std::filesystem::path& test_path,
     if (file_info.name.extension() == ".s") {
       // Only include test files (instr_*.s), not helper files
       auto filename = file_info.name.filename().string();
-      if (filename.find("instr_") == 0) {
+      // hakuX-Boosted: the seq_ files too (sequences of instructions:
+      // loops, calls, branches on flags set in another block).
+      if (filename.find("instr_") == 0 || filename.find("seq_") == 0) {
         test_files.push_back(test_path / file_info.name);
       }
     }
@@ -656,12 +757,25 @@ bool RunTests(const std::vector<std::string>& test_names) {
       }
     }
   }
+  // hakuX-Boosted: --test_slice=k/n.
+  unsigned slice_index = 0;
+  unsigned slice_count = 1;
+  if (!cvars::test_slice.empty() &&
+      (sscanf(cvars::test_slice.c_str(), "%u/%u", &slice_index,
+              &slice_count) != 2 ||
+       !slice_count || slice_index >= slice_count)) {
+    fprintf(stderr, "bad --test_slice: %s\n", cvars::test_slice.c_str());
+    return false;
+  }
   for (auto& test_suite : test_suites) {
     // Collect non-skipped test cases for this suite
     std::vector<TestCase*> suite_tests;
+    unsigned position = 0;
     for (auto& test_case : test_suite.test_cases()) {
       if (skip_list.find(test_case.name) == skip_list.end()) {
-        suite_tests.push_back(&test_case);
+        if (position++ % slice_count == slice_index) {
+          suite_tests.push_back(&test_case);
+        }
       }
     }
     if (suite_tests.empty()) {
@@ -693,6 +807,23 @@ bool RunTests(const std::vector<std::string>& test_names) {
   int minutes = static_cast<int>(elapsed_sec / 60);
   int seconds = static_cast<int>(elapsed_sec % 60);
 
+  // hakuX-Boosted: the translator's own counters for this run.
+  if (cvars::log_translation_stats) {
+    fprintf(stderr, "%s",
+            xe::cpu::compiler::FormatTranslationStats().c_str());
+  }
+
+  // hakuX-Boosted: the self-check modes report through the log, which this
+  // runner does not show; their counters say the same thing. Any mismatch
+  // fails the run.
+  const uint64_t self_check_mismatches =
+      xe::cpu::compiler::SelfCheckMismatches();
+  fprintf(stderr, "\nSelf-check mismatches: %llu\n",
+          static_cast<unsigned long long>(self_check_mismatches));
+  if (self_check_mismatches) {
+    ++failed_count;
+  }
+
   fprintf(stderr, "\nTotal tests: %d\n", failed_count + passed_count);
   fprintf(stderr, "Passed: %d\n", passed_count);
   fprintf(stderr, "Failed: %d\n", failed_count);
@@ -703,6 +834,13 @@ bool RunTests(const std::vector<std::string>& test_names) {
 }
 
 int main(const std::vector<std::string>& args) {
+  // hakuX-Boosted: the console entry point this runner is built with does
+  // not start the log, so nothing the translator logged was ever seen. With
+  // --log_file it is started here (the self-check lines, and the HIR and
+  // machine code of a failed test, go to it).
+  if (!cvars::log_file.empty()) {
+    xe::InitializeLogging("xenia-cpu-ppc-tests");
+  }
   std::vector<std::string> test_names;
   // Collect test names from all positional arguments.
   // argv[0] is the program name, skip it. Also skip --flag arguments

@@ -11,6 +11,7 @@
 #define XENIA_CPU_COMPILER_TRANSLATION_STATS_H_
 
 #include <atomic>
+#include <string>
 #include <cstdint>
 
 namespace xe {
@@ -41,8 +42,68 @@ struct TranslationStats {
   std::atomic<uint64_t> pin_resume_entries{0};
   // Run time: mismatches reported by a64_pin_verify.
   std::atomic<uint64_t> pin_verify_mismatches{0};
-  // Which guest register each pinned integer slot was (r0..r31, 32 = ctr).
-  std::atomic<uint64_t> pin_by_gpr[33];
+  // Which guest register each pinned integer slot was (r0..r31, 32 = ctr,
+  // 33 = lr).
+  std::atomic<uint64_t> pin_by_gpr[34];
+  // Mismatches reported by the self-check modes of the settings added
+  // after pinning (each logs a line starting "TranslatorVerify:").
+  std::atomic<uint64_t> verify_mismatches{0};
+  // eliminate_dead_context_stores: candidate stores looked at in functions
+  // of more than one block, and how many were removed (or, under
+  // dead_context_store_verify, replaced by the marker).
+  std::atomic<uint64_t> dead_context_stores_seen{0};
+  std::atomic<uint64_t> dead_context_stores_removed{0};
+  // propagate_context_constants: context loads replaced by a constant
+  // known from another block (or, in its verify mode, checked against it).
+  std::atomic<uint64_t> context_constants_propagated{0};
+  // a64_fuse_compare_branch: compares emitted as cmp + b.cond.
+  std::atomic<uint64_t> compares_fused{0};
+  // a64_short_forward_branches: functions emitted a second time because
+  // they were too large for it.
+  std::atomic<uint64_t> short_forward_retries{0};
+  // Static, hosts with pages over 4 KiB only: memory accesses emitted with
+  // the 0xE0000000 address fix-up, and without it by
+  // a64_stack_access_no_fixup.
+  std::atomic<uint64_t> address_fixups_emitted{0};
+  std::atomic<uint64_t> address_fixups_skipped{0};
+  // translate_ahead: functions queued for the helper thread; dropped
+  // because the queue was full; found already translated when their turn
+  // came; not attempted (no function known at the address yet); translated
+  // by the helper; and times a waiting guest thread raised the helper's
+  // priority. translated_on_demand counts every function translated on a
+  // thread that needed it, with the setting on or off, to set beside them.
+  std::atomic<uint64_t> ahead_queued{0};
+  std::atomic<uint64_t> ahead_dropped{0};
+  std::atomic<uint64_t> ahead_already_done{0};
+  std::atomic<uint64_t> ahead_skipped{0};
+  std::atomic<uint64_t> ahead_translated{0};
+  std::atomic<uint64_t> ahead_boosts{0};
+  std::atomic<uint64_t> translated_on_demand{0};
+  // a64_linked_calls: call sites emitted with a literal.
+  std::atomic<uint64_t> linked_call_sites{0};
+  // ... and how many of those literals have been pointed at their callee
+  // (the rest still go through the resolve thunk: callee not translated).
+  std::atomic<uint64_t> linked_call_sites_resolved{0};
+  // pin_guest_registers_wide.
+  std::atomic<uint64_t> pin_functions_pinned_no_loop{0};
+  std::atomic<uint64_t> pin_flag_slots{0};
+  // Static: the loads and stores emitted to keep pinned registers and the
+  // context in step (at entry, round calls, at exits), to set against
+  // pin_loads and pin_stores.
+  std::atomic<uint64_t> pin_sync_loads{0};
+  std::atomic<uint64_t> pin_sync_stores{0};
+  // Static: blocks translated in functions with and without pinned
+  // registers.
+  std::atomic<uint64_t> blocks_pinned{0};
+  std::atomic<uint64_t> blocks_unpinned{0};
+  // Run time, only counted in code translated with log_translation_stats
+  // on: blocks executed in functions with and without pinned registers.
+  // Plain memory the translated code increments without a lock.
+  // a64_stack_access_verify, run time, plain memory as the two below:
+  // stack-pointer-based addresses that were at or above 0xE0000000.
+  uint64_t stack_fixup_verify_hits = 0;
+  uint64_t blocks_run_pinned = 0;
+  uint64_t blocks_run_unpinned = 0;
 
   // simplification_skip_unchanged_blocks.
   std::atomic<uint64_t> simplify_block_walks{0};
@@ -53,6 +114,17 @@ struct TranslationStats {
 };
 
 extern TranslationStats translation_stats;
+
+// What the translator's self-check modes (a64_pin_verify,
+// simplification_skip_verify and the like) have found since launch: the sum
+// of their mismatch counters. Anything but zero is a wrong translation
+// caught in the act.
+uint64_t SelfCheckMismatches();
+
+// The TranslationStats lines as text, now (log_translation_stats logs them
+// every 2048 functions; a short run, a test run among them, ends before
+// that).
+std::string FormatTranslationStats();
 
 }  // namespace compiler
 }  // namespace cpu
