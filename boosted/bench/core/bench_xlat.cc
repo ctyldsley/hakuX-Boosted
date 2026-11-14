@@ -13,12 +13,15 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
 
 #include "xenia/base/byte_order.h"
+#include "xenia/cpu/backend/backend.h"
+#include "xenia/cpu/backend/code_cache.h"
 #if BENCH_HAVE_TRANSLATION_STATS
 #include "xenia/cpu/compiler/translation_stats.h"
 #endif
@@ -432,6 +435,67 @@ int RunXlatSuite(const std::string& label) {
   PinToCurrentCpu();
 
   int status = 0;
+  // The counting mode, for a machine whose kernel gives no instruction
+  // counter (qemu-user, most virtual machines): BENCH_XLAT_TRACE=name:n
+  // translates one program, runs it once with n passes and stops. The
+  // script tools/xlat-count-qemu.sh runs that under qemu's execution log,
+  // limited to the code cache's addresses, at two values of n, and so
+  // counts the host instructions translated code runs per guest
+  // instruction. BENCH_XLAT_DUMP=dir also writes each function's machine
+  // code to dir/<program>-<guest address>.bin for a disassembler.
+  if (const char* trace = std::getenv("BENCH_XLAT_TRACE")) {
+    const std::string spec(trace);
+    const size_t colon = spec.find(':');
+    const std::string want = spec.substr(0, colon);
+    const uint32_t iterations = colon == std::string::npos
+                                    ? 64
+                                    : uint32_t(std::stoul(spec.substr(colon + 1)));
+    auto* cache = env->processor->backend()->code_cache();
+    std::printf("xlat-trace code_cache=0x%llx..0x%llx\n",
+                (unsigned long long)cache->execute_base_address(),
+                (unsigned long long)(cache->execute_base_address() +
+                                     cache->total_size()));
+    for (Builder build : kBuilders) {
+      Program program = build(*env);
+      if (program.name != want) {
+        continue;
+      }
+      for (uint32_t address : program.functions) {
+        auto* fn = env->processor->ResolveFunction(address);
+        if (!fn) {
+          std::printf("xlat-trace %s NOT TRANSLATED\n", want.c_str());
+          return 1;
+        }
+        const char* dump = std::getenv("BENCH_XLAT_DUMP");
+        if (dump && *dump && fn->is_guest()) {
+          auto* guest = static_cast<xe::cpu::GuestFunction*>(fn);
+          char path[512];
+          std::snprintf(path, sizeof(path), "%s/%s-%08X.bin", dump,
+                        want.c_str(), address);
+          if (FILE* file = std::fopen(path, "wb")) {
+            std::fwrite(guest->machine_code(), 1,
+                        guest->machine_code_length(), file);
+            std::fclose(file);
+          }
+        }
+      }
+      auto* fn = env->processor->ResolveFunction(program.entry);
+      program.prepare(ctx);
+      ctx->r[1] = stack_top;
+      ctx->r[3] = iterations;
+      ctx->lr = 0xBCBCBCBC;
+      fn->Call(thread_state, uint32_t(ctx->lr));
+      const bool ok = program.check(ctx, iterations);
+      std::printf("xlat-trace %s iterations=%u guest_insns=%llu ok=%d\n",
+                  want.c_str(), iterations,
+                  (unsigned long long)program.guest_insns(iterations),
+                  ok ? 1 : 0);
+      std::fflush(stdout);
+      return ok ? 0 : 1;
+    }
+    std::printf("xlat-trace %s NO SUCH PROGRAM\n", want.c_str());
+    return 1;
+  }
   for (Builder build : kBuilders) {
     // Translation time: several copies of the program at different
     // addresses, each translated once. The last copy is the one run.
