@@ -45,8 +45,22 @@ while IFS=';' read -r label suites flags; do
   # state out of the comparison (see STATE_IGNORE in run-tests.sh).
   ignore=""
   case "$flags" in *'#ignore='*) ignore=${flags##*#ignore=}; flags=${flags%%#ignore=*} ;; esac
+  # A line whose flags end in "#16k" runs under qemu with 16 KiB pages, the
+  # phone's page size, which makes the translator emit the address fix-up
+  # for guest addresses from 0xE0000000 that a 4 KiB host does not need.
+  # Only possible when the tests run under qemu (WRAPPER names it).
+  wrapper=${WRAPPER:-}
+  case "$flags" in *'#16k'*)
+    extra=""
+    case "$flags" in *'#16k-mmap'*) extra="-E GLIBC_TUNABLES=glibc.malloc.mmap_threshold=8192" ;; esac
+    flags=${flags%%#16k*}
+    case "$wrapper" in
+      qemu-aarch64*) wrapper="qemu-aarch64 -p 16384 $extra ${wrapper#qemu-aarch64}" ;;
+      *) echo "skipped (16 KiB pages need qemu): $label"; echo "::endgroup::"; continue ;;
+    esac ;;
+  esac
   # shellcheck disable=SC2086
-  if ! LABEL="$label" STATE_REF="$work/reference.state" SUITES="$suites" STATE_IGNORE="$ignore" \
+  if ! WRAPPER="$wrapper" LABEL="$label" STATE_REF="$work/reference.state" SUITES="$suites" STATE_IGNORE="$ignore" \
       "$here/run-tests.sh" "$runner" "$bins" $flags; then
     failed+=("$label")
   fi

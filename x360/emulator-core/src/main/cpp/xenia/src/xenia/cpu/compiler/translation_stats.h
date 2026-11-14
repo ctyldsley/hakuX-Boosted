@@ -58,6 +58,24 @@ struct TranslationStats {
   // a64_short_forward_branches: functions emitted a second time because
   // they were too large for it.
   std::atomic<uint64_t> short_forward_retries{0};
+  // Static, hosts with pages over 4 KiB only: memory accesses emitted with
+  // the 0xE0000000 address fix-up, and without it by
+  // a64_stack_access_no_fixup.
+  std::atomic<uint64_t> address_fixups_emitted{0};
+  std::atomic<uint64_t> address_fixups_skipped{0};
+  // translate_ahead: functions queued for the helper thread; dropped
+  // because the queue was full; found already translated when their turn
+  // came; not attempted (no function known at the address yet); translated
+  // by the helper; and times a waiting guest thread raised the helper's
+  // priority. translated_on_demand counts every function translated on a
+  // thread that needed it, with the setting on or off, to set beside them.
+  std::atomic<uint64_t> ahead_queued{0};
+  std::atomic<uint64_t> ahead_dropped{0};
+  std::atomic<uint64_t> ahead_already_done{0};
+  std::atomic<uint64_t> ahead_skipped{0};
+  std::atomic<uint64_t> ahead_translated{0};
+  std::atomic<uint64_t> ahead_boosts{0};
+  std::atomic<uint64_t> translated_on_demand{0};
   // a64_linked_calls: call sites emitted with a literal.
   std::atomic<uint64_t> linked_call_sites{0};
   // ... and how many of those literals have been pointed at their callee
@@ -78,6 +96,9 @@ struct TranslationStats {
   // Run time, only counted in code translated with log_translation_stats
   // on: blocks executed in functions with and without pinned registers.
   // Plain memory the translated code increments without a lock.
+  // a64_stack_access_verify, run time, plain memory as the two below:
+  // stack-pointer-based addresses that were at or above 0xE0000000.
+  uint64_t stack_fixup_verify_hits = 0;
   uint64_t blocks_run_pinned = 0;
   uint64_t blocks_run_unpinned = 0;
 

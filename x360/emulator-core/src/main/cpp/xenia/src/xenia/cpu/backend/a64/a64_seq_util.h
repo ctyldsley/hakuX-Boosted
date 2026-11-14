@@ -11,6 +11,7 @@
 #define XENIA_CPU_BACKEND_A64_A64_SEQ_UTIL_H_
 
 #include "xenia/base/cvar.h"
+#include "xenia/cpu/compiler/translation_stats.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/vec128.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
@@ -21,6 +22,9 @@
 #include "xbyak_aarch64.h"
 
 DECLARE_bool(a64_vmx_nan_fixup);
+// hakuX-Boosted: see ComputeMemoryAddress.
+DECLARE_bool(a64_stack_access_no_fixup);
+DECLARE_bool(a64_stack_access_verify);
 
 #if XE_COMPILER_MSVC
 #include <intrin.h>
@@ -260,6 +264,48 @@ inline int SrcVReg(A64Emitter& e, const T& op, int scratch_idx) {
   return op.reg().getIdx();
 }
 
+// hakuX-Boosted: a64_stack_access_no_fixup. True if the value is the guest
+// stack pointer or the stack pointer plus or minus constants: a load of r1
+// from the context, or an add or subtract of a constant to such a value (the
+// frame a function has just set up), or a 32-bit truncation and
+// re-extension of one. Looks at most eight definitions deep.
+inline bool IsGuestStackPointerValue(const hir::Value* value, int depth = 0) {
+  if (!value || value->IsConstant() || !value->def || depth > 8) {
+    return false;
+  }
+  const hir::Instr* def = value->def;
+  switch (def->GetOpcodeNum()) {
+    case hir::OPCODE_LOAD_CONTEXT:
+      return def->src1.offset == offsetof(ppc::PPCContext, r[1]) &&
+             value->type == hir::INT64_TYPE;
+    case hir::OPCODE_ADD:
+    case hir::OPCODE_SUB: {
+      // Only constants a stack frame could account for (under 1 MiB each
+      // way), so that "near the stack pointer" stays true of the result.
+      const auto small = [](const hir::Value* c) {
+        if (!c || !c->IsConstant() || c->type != hir::INT64_TYPE) {
+          return false;
+        }
+        const int64_t v = c->constant.i64;
+        return v > -0x100000 && v < 0x100000;
+      };
+      if (small(def->src2.value)) {
+        return IsGuestStackPointerValue(def->src1.value, depth + 1);
+      }
+      if (def->GetOpcodeNum() == hir::OPCODE_ADD && small(def->src1.value)) {
+        return IsGuestStackPointerValue(def->src2.value, depth + 1);
+      }
+      return false;
+    }
+    case hir::OPCODE_ASSIGN:
+    case hir::OPCODE_ZERO_EXTEND:
+    case hir::OPCODE_TRUNCATE:
+      return IsGuestStackPointerValue(def->src1.value, depth + 1);
+    default:
+      return false;
+  }
+}
+
 // Compute a guest memory address, returning the XReg for [x21, xN] addressing.
 // For constants, loads the address into x0 (scratch).
 inline XReg ComputeMemoryAddress(A64Emitter& e, const I64Op& guest) {
@@ -277,7 +323,23 @@ inline XReg ComputeMemoryAddress(A64Emitter& e, const I64Op& guest) {
     // Guest addresses are always 32-bit. Clear any stale upper bits before
     // applying the host membase so guest pointers can't escape above 4 GB.
     e.mov(e.w0, WReg(src.getIdx()));
+    // hakuX-Boosted: a64_stack_access_no_fixup. An address formed from the
+    // guest stack pointer is taken to be below 0xE0000000 (a thread's stack
+    // is allocated in the virtual range) and gets no fix-up. In the verify
+    // mode the fix-up stays and each address that needed it is counted.
+    const bool stack_based = cvars::a64_stack_access_no_fixup &&
+                             xe::memory::allocation_granularity() > 0x1000 &&
+                             IsGuestStackPointerValue(guest.value);
+    if (stack_based) {
+      compiler::translation_stats.address_fixups_skipped.fetch_add(
+          1, std::memory_order_relaxed);
+      if (!cvars::a64_stack_access_verify) {
+        return e.x0;
+      }
+    }
     if (xe::memory::allocation_granularity() > 0x1000) {
+      compiler::translation_stats.address_fixups_emitted.fetch_add(
+          1, std::memory_order_relaxed);
       // hakuX-Boosted: without a branch. On hosts with pages over 4 KiB
       // (16 KiB Android kernels) this runs at every load and store with a
       // computed address, and the forward branch it used to be was taken at
@@ -288,6 +350,9 @@ inline XReg ComputeMemoryAddress(A64Emitter& e, const I64Op& guest) {
       e.cmp(e.w0, e.w17);
       e.cset(e.w17, HS);                   // 1 if the address is 0xE0000000+
       e.add(e.w0, e.w0, e.w17, LSL, 12);   // + 0x1000 there, + 0 elsewhere
+      if (stack_based) {
+        e.EmitStackFixupVerify();  // w17 != 0: the assumption did not hold
+      }
     }
     return e.x0;
   }

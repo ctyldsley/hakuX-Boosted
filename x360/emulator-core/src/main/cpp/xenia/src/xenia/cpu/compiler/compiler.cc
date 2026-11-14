@@ -184,15 +184,25 @@ std::string FormatExtraStats() {
       get(t.simplify_block_walks), get(t.simplify_block_skips),
       get(t.simplify_skip_mismatches));
   line += fmt::format(
+      "; translate ahead: {} queued, {} dropped, {} already done, {} not "
+      "attempted, {} translated by the helper, {} priority boosts; {} "
+      "functions translated on the thread that needed them",
+      get(t.ahead_queued), get(t.ahead_dropped), get(t.ahead_already_done),
+      get(t.ahead_skipped), get(t.ahead_translated), get(t.ahead_boosts),
+      get(t.translated_on_demand));
+  line += fmt::format(
       "; dead context stores: {} of {} candidate stores removed; compares "
       "fused with their branch {}; functions emitted twice for short "
       "forward branches or linked calls {}; linked call sites {} of "
       "which {} point at their callee; "
+      "address fix-ups emitted {} and left out for stack accesses {}; "
+      "stack accesses at 0xE0000000+ {}; "
       "self-check mismatches (TranslatorVerify) {}",
       get(t.dead_context_stores_removed), get(t.dead_context_stores_seen),
       get(t.compares_fused), get(t.short_forward_retries),
       get(t.linked_call_sites), get(t.linked_call_sites_resolved),
-      get(t.verify_mismatches));
+      get(t.address_fixups_emitted), get(t.address_fixups_skipped),
+      t.stack_fixup_verify_hits, get(t.verify_mismatches));
   return line;
 }
 }  // namespace
@@ -201,7 +211,8 @@ uint64_t SelfCheckMismatches() {
   const auto& t = translation_stats;
   return t.pin_verify_mismatches.load(std::memory_order_relaxed) +
          t.simplify_skip_mismatches.load(std::memory_order_relaxed) +
-         t.verify_mismatches.load(std::memory_order_relaxed);
+         t.verify_mismatches.load(std::memory_order_relaxed) +
+         t.stack_fixup_verify_hits;
 }
 
 std::string FormatTranslationStats() {

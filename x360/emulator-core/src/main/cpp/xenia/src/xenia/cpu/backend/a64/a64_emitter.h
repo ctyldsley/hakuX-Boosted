@@ -262,6 +262,10 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // a64_pin_verify: compare the pinned register with the context copy and
   // report a difference. Clobbers x0, x1, v0 and nothing else.
   void EmitPinnedVerify(const PinnedGuestRegister& pin);
+  // hakuX-Boosted: a64_stack_access_verify. With w17 holding 1 where a
+  // stack-pointer-based address was at or above 0xE0000000 and 0 elsewhere:
+  // count the former. Out of line, no call, no register changed but w17.
+  void EmitStackFixupVerify();
   // hakuX-Boosted: dead_context_store_verify. After a context load of an
   // 8-bit or 64-bit integer slot: report if the value is the marker that
   // mode stores in place of a store it took for dead. Clobbers x0 to x2 and

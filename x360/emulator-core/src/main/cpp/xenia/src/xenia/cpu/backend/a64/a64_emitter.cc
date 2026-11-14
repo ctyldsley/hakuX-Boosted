@@ -68,6 +68,24 @@ DEFINE_bool(
     "long form, as if it had been too large.",
     "a64");
 
+// hakuX-Boosted: see ComputeMemoryAddress in a64_seq_util.h.
+DEFINE_bool(
+    a64_stack_access_no_fixup, false,
+    "On hosts with pages larger than 4 KiB (16 KiB Android kernels), where "
+    "every load and store with a computed address carries four instructions "
+    "that move guest addresses from 0xE0000000 up by one page: leave them "
+    "out for addresses formed from the guest stack pointer, which is taken "
+    "never to be that high. Nothing changes on a 4 KiB host. Takes effect "
+    "for functions translated after it is set.",
+    "a64");
+DEFINE_bool(
+    a64_stack_access_verify, false,
+    "Self-check for a64_stack_access_no_fixup, for a checking run only: the "
+    "fix-up stays, and every stack-pointer-based address that needed it is "
+    "counted. The count is in the TranslationStats line ('stack accesses at "
+    "0xE0000000+'); anything but 0 means the setting is wrong for the title.",
+    "a64");
+
 // hakuX-Boosted: see A64Emitter::EmitCompareResult.
 DEFINE_bool(
     a64_fuse_compare_branch, false,
@@ -1342,6 +1360,24 @@ static uint64_t ReportDeadStoreRead(void* raw_context, uint64_t function,
         offset, static_cast<uint32_t>(function));
   }
   return 0;
+}
+
+void A64Emitter::EmitStackFixupVerify() {
+  Label& back = NewCachedLabel();
+  Label& count = AddToTail([&back](A64Emitter& e, Label&) {
+    // x16 is borrowed and put back: some sequences hold a value in it
+    // across the address computation.
+    e.str(e.x16, pre_ptr(e.sp, -16));
+    e.mov(e.x16, reinterpret_cast<uint64_t>(
+                     &compiler::translation_stats.stack_fixup_verify_hits));
+    e.ldr(e.x17, ptr(e.x16));
+    e.add(e.x17, e.x17, 1);
+    e.str(e.x17, ptr(e.x16));
+    e.ldr(e.x16, post_ptr(e.sp, 16));
+    e.CodeGenerator::b(back);
+  });
+  cbnz(w17, count);  // the far-safe form: tail code can be far away
+  L(back);
 }
 
 void A64Emitter::EmitDeadStoreVerify(const Xbyak_aarch64::XReg& value,

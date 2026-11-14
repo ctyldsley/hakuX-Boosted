@@ -7,8 +7,17 @@
 # length down where a setting touches only part of the translator. The seq_
 # suites (loops, calls, flags over blocks) run with every line.
 #
+# Markers at the end of the flags:
+#   #ignore=flags   leave the full flags hash out of the comparison
+#   #16k            run under qemu with 16 KiB pages (the phone's page size)
+#   #16k-mmap       the same, with glibc keeping allocations of 8 KiB and
+#                   more off the brk heap (see the notes: with every setting
+#                   on, a 16 KiB run aborts in glibc's allocator under qemu
+#                   without this, and the same run with 4 KiB pages does
+#                   not)
+#
 # Settings that already existed on claude/integration-1113:
-short backward branches     ; . ; --a64_short_backward_branches=true
+short backward branches     ; ^(seq_|instr_(add|cmp|b|l|st|m|f)) ; --a64_short_backward_branches=true
 compact stackpoint push     ; ^(seq_|instr_(b|add|cmp|l|st)) ; --a64_compact_stackpoint_push=true
 thunk fpcr compare          ; ^(seq_|instr_(f|v|l|st|mt|mf)) ; --a64_thunk_fpcr_compare=true
 simplify skip (verify)      ; . ; --simplification_skip_unchanged_blocks=true --simplification_skip_verify=true
@@ -28,7 +37,7 @@ mcrf, exact                 ; ^(seq_|instr_m) ; --ppc_mcrf_copies_field=true
 # at each read (they catch a missing reload; a missing write-back is caught
 # by the lines without verify).
 wide pinning (verify)       ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --a64_pin_verify=true
-wide pinning                ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true
+wide pinning                ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr)) ; --pin_guest_registers=true --pin_guest_registers_wide=true
 wide pinning, all           ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr)) ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --pin_guest_registers_max_vec=16
 wide stress (verify)        ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_stress=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --pin_guest_registers_max_vec=16 --a64_pin_verify=true
 wide stress                 ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_stress=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --pin_guest_registers_max_vec=16
@@ -55,3 +64,18 @@ short forward, emit twice   ; . ; --a64_fuse_compare_branch=true --a64_short_for
 
 # Linked call sites.
 linked calls                ; ^(seq_|instr_(add|cmp|b|l|st|m)) ; --a64_linked_calls=true
+
+# 16 KiB pages: the address fix-up for guest addresses from 0xE0000000 is
+# only emitted there, and a64_stack_access_no_fixup only acts there.
+16k, defaults               ; . ; #16k
+16k, stack accesses         ; ^(seq_|instr_(add|cmp|b|l|st|m|f|v)) ; --a64_stack_access_no_fixup=true #16k
+16k, stack (verify)         ; ^(seq_|instr_(add|cmp|b|l|st|m|f|v)) ; --a64_stack_access_no_fixup=true --a64_stack_access_verify=true #16k
+16k, wide stress            ; ^(seq_|instr_(add|cmp|b|l|st|m|f|v)) ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_stress=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 #16k
+
+# The helper thread. translate_ahead_any_module because the tests' module is
+# not a title's executable.
+translate ahead             ; ^(seq_|instr_(add|cmp|b|l|st|m)) ; --translate_ahead=true --translate_ahead_any_module=true
+
+# Everything a device run would turn on, together.
+everything                  ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --eliminate_dead_context_stores=2 --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_linked_calls=true --a64_stack_access_no_fixup=true --simplification_skip_unchanged_blocks=true --a64_compact_stackpoint_push=true --a64_thunk_fpcr_compare=true --ppc_mcrf_copies_field=true --translate_ahead=true --translate_ahead_any_module=true
+everything, 16k             ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --eliminate_dead_context_stores=2 --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_linked_calls=true --a64_stack_access_no_fixup=true --simplification_skip_unchanged_blocks=true --a64_compact_stackpoint_push=true --a64_thunk_fpcr_compare=true --ppc_mcrf_copies_field=true #16k-mmap

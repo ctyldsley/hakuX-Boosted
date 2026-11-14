@@ -13,6 +13,8 @@
 
 #include "xenia/cpu/ppc/ppc_translator.h"
 
+#include "xenia/cpu/compiler/translation_stats.h"
+
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/cvar.h"
@@ -32,6 +34,9 @@ DECLARE_path(log_file);
 #include "xenia/cpu/ppc/ppc_scanner.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/xex_module.h"
+
+DECLARE_bool(translate_ahead);  // hakuX-Boosted
+DECLARE_bool(translate_ahead_any_module);
 
 DEFINE_bool(dump_translated_hir_functions, false, "dumps translated hir",
             "CPU");
@@ -409,6 +414,41 @@ bool PPCTranslator::Translate(GuestFunction* function,
   }
 
   DumpMachineCode(function);
+
+  // hakuX-Boosted: translate_ahead. The function has code now; offer the
+  // functions it calls directly, and that have none, to the helper thread.
+  // Only for the title's executable: a library module can be unloaded, and
+  // nothing holds an unload up while the helper is inside one of its
+  // functions.
+  if (cvars::translate_ahead) {
+    auto processor = frontend_->processor();
+    if (!Processor::IsTranslateAheadThread()) {
+      compiler::translation_stats.translated_on_demand.fetch_add(
+          1, std::memory_order_relaxed);
+    }
+    Module* module = function->module();
+    if (module &&
+        (module->is_executable() || cvars::translate_ahead_any_module)) {
+      for (auto block = builder_->first_block(); block; block = block->next) {
+        for (auto i = block->instr_head; i; i = i->next) {
+          Function* target = nullptr;
+          if (i->opcode == &hir::OPCODE_CALL_info) {
+            target = i->src1.symbol;
+          } else if (i->opcode == &hir::OPCODE_CALL_TRUE_info) {
+            target = i->src2.symbol;
+          }
+          if (!target || !target->is_guest() ||
+              target->module() != module ||
+              target->behavior() != Function::Behavior::kDefault ||
+              static_cast<GuestFunction*>(target)->machine_code()) {
+            continue;
+          }
+          processor->QueueTranslateAhead(function->address(),
+                                         target->address());
+        }
+      }
+    }
+  }
 
   if (dump_this_function) {
     DumpTargetFunction(function);

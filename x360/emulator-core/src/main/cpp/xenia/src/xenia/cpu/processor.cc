@@ -9,6 +9,16 @@
 
 #include "xenia/cpu/processor.h"
 
+#include <algorithm>
+#include <cerrno>
+#if defined(__linux__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
+#include "xenia/cpu/compiler/translation_stats.h"
+
 #include "xenia/base/assert.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/byte_order.h"
@@ -45,6 +55,34 @@
 #else
 #define DEFAULT_DEBUG_FLAG false
 #endif
+
+// hakuX-Boosted: see Processor::QueueTranslateAhead in processor.h.
+DEFINE_bool(
+    translate_ahead, false,
+    "Translate the functions a newly translated function calls directly on "
+    "a helper thread, before they are first called, instead of on the guest "
+    "thread at the first call. Only functions of the title's own executable. "
+    "Takes the translator's time off the title's threads where the helper "
+    "gets there first; costs a thread's work on functions that are never "
+    "called, and their room in the code cache.",
+    "CPU");
+DEFINE_int32(
+    translate_ahead_nice, 5,
+    "The helper thread's nice value (-20 to 19; higher is lower priority). "
+    "It is raised to a waiting guest thread's own while one waits for the "
+    "function the helper is translating.",
+    "CPU");
+DEFINE_int32(
+    translate_ahead_queue, 1024,
+    "How many functions may wait for the helper thread (16 to 65536); the "
+    "oldest request is dropped when the queue is full.",
+    "CPU");
+DEFINE_bool(
+    translate_ahead_any_module, false,
+    "For the translator's tests: translate ahead in every module, not only "
+    "the title's executable. A module that can be unloaded while the helper "
+    "is translating one of its functions makes this unsafe in a title.",
+    "CPU");
 
 DEFINE_bool(debug, DEFAULT_DEBUG_FLAG,
             "Allow debugging and retain debug information.", "General");
@@ -90,6 +128,8 @@ Processor::Processor(xe::Memory* memory, ExportResolver* export_resolver)
     : memory_(memory), export_resolver_(export_resolver) {}
 
 Processor::~Processor() {
+  // hakuX-Boosted: before anything a translation reads is freed.
+  StopTranslateAhead();
   {
     auto global_lock = global_critical_region_.Acquire();
     modules_.clear();
@@ -101,6 +141,144 @@ Processor::~Processor() {
   if (functions_trace_file_) {
     functions_trace_file_->Flush();
     functions_trace_file_.reset();
+  }
+}
+
+// hakuX-Boosted: translate_ahead. See processor.h.
+namespace {
+thread_local bool t_is_translate_ahead_thread = false;
+// The helper's kernel thread id while it is translating a function, for
+// BoostTranslateAhead; 0 otherwise. One helper per Processor, and one
+// Processor per process in the app; with several (the tests make one per
+// suite, one at a time) the last to start translating is the one named.
+std::atomic<int> g_translate_ahead_busy_tid{0};
+std::atomic<bool> g_translate_ahead_boosted{false};
+
+void SetThreadNice(int tid, int nice_value) {
+#if XE_PLATFORM_LINUX
+  // A thread's nice value on Linux; failure (no permission to raise it) is
+  // harmless: the helper then keeps the priority it has.
+  setpriority(PRIO_PROCESS, static_cast<id_t>(tid), nice_value);
+#endif
+}
+int CurrentTid() {
+#if XE_PLATFORM_LINUX
+  return static_cast<int>(syscall(SYS_gettid));
+#else
+  return 0;
+#endif
+}
+}  // namespace
+
+bool Processor::IsTranslateAheadThread() {
+  return t_is_translate_ahead_thread;
+}
+
+void Processor::BoostTranslateAhead() {
+  const int tid = g_translate_ahead_busy_tid.load(std::memory_order_acquire);
+  if (!tid || t_is_translate_ahead_thread) {
+    return;
+  }
+  if (g_translate_ahead_boosted.exchange(true, std::memory_order_acq_rel)) {
+    return;  // already raised for this function
+  }
+#if XE_PLATFORM_LINUX
+  // To the waiting thread's own priority.
+  errno = 0;
+  const int mine = getpriority(PRIO_PROCESS, static_cast<id_t>(CurrentTid()));
+  if (errno == 0) {
+    SetThreadNice(tid, mine);
+  }
+#endif
+  compiler::translation_stats.ahead_boosts.fetch_add(
+      1, std::memory_order_relaxed);
+}
+
+void Processor::QueueTranslateAhead(uint32_t caller_address,
+                                    uint32_t target_address) {
+  if (!cvars::translate_ahead || t_is_translate_ahead_thread) {
+    return;
+  }
+  auto& stats = compiler::translation_stats;
+  std::lock_guard<std::mutex> lock(ahead_mutex_);
+  if (ahead_stop_) {
+    return;
+  }
+  if (!ahead_started_) {
+    ahead_started_ = true;
+    ahead_thread_ = std::thread([this]() { TranslateAheadMain(); });
+  }
+  const size_t limit = static_cast<size_t>(
+      std::clamp(cvars::translate_ahead_queue, 16, 65536));
+  if (ahead_queue_.size() >= limit) {
+    ahead_queue_.pop_front();
+    stats.ahead_dropped.fetch_add(1, std::memory_order_relaxed);
+  }
+  ahead_queue_.push_back(target_address);
+  stats.ahead_queued.fetch_add(1, std::memory_order_relaxed);
+  ahead_cv_.notify_one();
+}
+
+void Processor::StopTranslateAhead() {
+  {
+    std::lock_guard<std::mutex> lock(ahead_mutex_);
+    ahead_stop_ = true;
+    ahead_queue_.clear();
+  }
+  ahead_cv_.notify_all();
+  if (ahead_thread_.joinable()) {
+    // The helper finishes the function it is on (it cannot be abandoned
+    // half way: other threads may be waiting on its entry) and then sees
+    // the flag.
+    ahead_thread_.join();
+  }
+}
+
+void Processor::TranslateAheadMain() {
+  t_is_translate_ahead_thread = true;
+  xe::threading::set_name("Translate Ahead");
+  const int tid = CurrentTid();
+  const int base_nice = std::clamp(cvars::translate_ahead_nice, -20, 19);
+  SetThreadNice(tid, base_nice);
+  auto& stats = compiler::translation_stats;
+  for (;;) {
+    uint32_t address;
+    {
+      std::unique_lock<std::mutex> lock(ahead_mutex_);
+      ahead_cv_.wait(lock,
+                     [this]() { return ahead_stop_ || !ahead_queue_.empty(); });
+      if (ahead_stop_) {
+        return;
+      }
+      address = ahead_queue_.front();
+      ahead_queue_.pop_front();
+    }
+    // Already translated, or being translated by a thread that needs it:
+    // nothing to do. (Get answers only for ready entries; a function someone
+    // else has just started is found by GetOrCreate below, where this
+    // thread would wait for it, which costs nothing but this thread's time.)
+    if (entry_table_.Get(address)) {
+      stats.ahead_already_done.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+    // A failed resolve marks the address as failed for good, so do not try
+    // an address that does not yet look like a function of a loaded module:
+    // the guest thread that really calls it will, when it does.
+    Function* function = LookupFunction(address);
+    if (!function || !function->is_guest() ||
+        function->behavior() != Function::Behavior::kDefault) {
+      stats.ahead_skipped.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+    g_translate_ahead_boosted.store(false, std::memory_order_release);
+    g_translate_ahead_busy_tid.store(tid, std::memory_order_release);
+    ResolveFunction(address);
+    g_translate_ahead_busy_tid.store(0, std::memory_order_release);
+    if (g_translate_ahead_boosted.exchange(false,
+                                           std::memory_order_acq_rel)) {
+      SetThreadNice(tid, base_nice);
+    }
+    stats.ahead_translated.fetch_add(1, std::memory_order_relaxed);
   }
 }
 

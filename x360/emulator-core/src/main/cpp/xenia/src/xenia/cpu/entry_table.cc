@@ -9,6 +9,8 @@
 
 #include "xenia/cpu/entry_table.h"
 
+#include "xenia/cpu/processor.h"
+
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
 
@@ -59,6 +61,9 @@ Entry::Status EntryTable::GetOrCreate(uint32_t address, Entry** out_entry) {
       // chrispy: i think this is dead code, if we are compiling we're holding
       // the global lock, arent we? so we wouldnt be executing here
       // Still compiling, so spin.
+      // hakuX-Boosted: if it is the translate-ahead helper that has it,
+      // lend it this thread's priority for as long as this thread waits.
+      Processor::BoostTranslateAhead();
       do {
         global_lock.unlock();
         // TODO(benvanik): sleep for less time?
