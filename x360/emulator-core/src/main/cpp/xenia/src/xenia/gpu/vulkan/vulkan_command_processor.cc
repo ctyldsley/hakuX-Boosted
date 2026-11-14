@@ -8738,7 +8738,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   // could otherwise happen if the real shaders finished translating mid-draw).
   // The no-op placeholder PS never samples; the interpreter VS never samples.
   // (Both flags stay false when vulkan_placeholder_pipelines is off.)
-  // hakuX-Boosted: the pixel interpreter's sixteen textures and eight
+  // hakuX-Boosted: the pixel interpreter's textures (two for each slot) and
   // samplers, which the caller put in program_pixel_texture_bindings_ and
   // current_samplers_pixel_.
   const std::vector<VulkanShader::TextureBinding>* program_pixel_textures =

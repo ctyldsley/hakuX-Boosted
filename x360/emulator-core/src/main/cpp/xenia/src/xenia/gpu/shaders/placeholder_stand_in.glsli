@@ -64,11 +64,30 @@ layout(set = 3, binding = 0) uniform textureCube xe_stand_in_texture;
 layout(set = 3, binding = 0) uniform texture2DArray xe_stand_in_texture;
 #endif
 layout(set = 3, binding = 1) uniform sampler xe_stand_in_sampler;
+#ifndef XE_STAND_IN_ALL
 layout(location = 0) in vec4 xe_in_stand_in_texcoord;
+#endif
 #endif
 
 #if XE_STAND_IN_COLOR
+#ifndef XE_STAND_IN_ALL
 layout(location = 1) in vec4 xe_in_stand_in_color;
+#endif
+#endif
+
+#ifdef XE_STAND_IN_ALL
+// The variants for the guest shader interpreter, version 2, as a shared
+// stand-in pipeline (vulkan_standin_precompile,
+// boosted/notes/standin-precompile.md): every interpolator is an input, at
+// the location of its index, which is what that interpreter writes, and the
+// two the shader reads are named by bits 0:3 and 4:7 of the per-draw word.
+// One module then serves every pair of guest shaders, where the variants
+// above need a copy for each pair of locations.
+layout(location = 0) in vec4 xe_in_stand_in_interpolators[16];
+#define xe_in_stand_in_texcoord \
+  xe_in_stand_in_interpolators[xe_sys[34].z & 15u]
+#define xe_in_stand_in_color \
+  xe_in_stand_in_interpolators[(xe_sys[34].z >> 4) & 15u]
 #endif
 
 layout(location = 0) out vec4 xe_out_color_0;

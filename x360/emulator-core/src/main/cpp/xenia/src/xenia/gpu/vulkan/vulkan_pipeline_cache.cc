@@ -67,6 +67,11 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_color_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_interpreter_stand_in_vs.h"
+// hakuX-Boosted: and those with every interpolator as an input
+// (vulkan_standin_precompile).
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_2d_all_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_cube_all_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_all_ps.h"
 // hakuX-Boosted: the guest shader interpreter, version 2
 // (vulkan_placeholder_interpreter = 2, shaders/ucode_program.glsli).
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_point_strip_vs.h"
@@ -732,6 +737,19 @@ bool VulkanPipelineCache::Initialize() {
     }
   }
 
+  // hakuX-Boosted: the stand-in pixel shaders that take every interpolator
+  // (vulkan_standin_precompile). A failure only means the copies with moved
+  // inputs are used instead.
+  stand_in_all_pixel_shaders_[0] = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::placeholder_stand_in_flat_all_ps,
+      sizeof(shaders::placeholder_stand_in_flat_all_ps));
+  stand_in_all_pixel_shaders_[1] = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::placeholder_stand_in_2d_all_ps,
+      sizeof(shaders::placeholder_stand_in_2d_all_ps));
+  stand_in_all_pixel_shaders_[2] = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::placeholder_stand_in_cube_all_ps,
+      sizeof(shaders::placeholder_stand_in_cube_all_ps));
+
   // hakuX-Boosted: the modules of the interpreter's version 2
   // (vulkan_placeholder_interpreter = 2). Made whatever the setting says, as
   // the stand-in's are: a module costs nothing until a pipeline uses it. A
@@ -938,6 +956,10 @@ void VulkanPipelineCache::Shutdown() {
       ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                              stand_in_pixel_shaders_[i][j]);
     }
+  }
+  for (uint32_t i = 0; i < 3; ++i) {
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                           stand_in_all_pixel_shaders_[i]);
   }
   for (const auto& stand_in_pair : stand_in_pixel_shaders_moved_) {
     if (stand_in_pair.second != VK_NULL_HANDLE) {
@@ -1693,6 +1715,17 @@ uint32_t VulkanPipelineCache::GetProgramPixelRefusal(
     // the interpreter does not.
     reasons |= kPixelRefusalNoModule;
   }
+  // hakuX-Boosted: its layout has two textures and a sampler for each slot
+  // in the pixel stage, more than a device must allow.
+  if (command_processor_.GetVulkanDevice()
+              ->properties()
+              .maxPerStageDescriptorSampledImages <
+          ucode_program::kMaxTextures * 2 ||
+      command_processor_.GetVulkanDevice()
+              ->properties()
+              .maxPerStageDescriptorSamplers < ucode_program::kMaxTextures) {
+    reasons |= kPixelRefusalNoModule;
+  }
   if (cvars::texture_integer_num_format || cvars::texture_gradient_exp_bias) {
     reasons |= kPixelRefusalSetting;
   }
@@ -1915,16 +1948,23 @@ void VulkanPipelineCache::MakePlaceholder(
                          : (stand_in.shader == StandInPixelShader::k2D
                                 ? StandInPixelForm::k2D
                                 : StandInPixelForm::kFlat);
-        // The inputs' locations, as GetStandIn asked for them: the
-        // interpreter's version 2 writes each interpolator at its index.
-        const bool fallback_has_texture =
-            stand_in.shader != StandInPixelShader::kFlat;
-        const bool fallback_has_color =
-            stand_in.color_interpolator != StandIn::kNoInterpolator;
-        fallback_inputs =
-            (fallback_has_texture ? stand_in.texcoord_interpolator : 0) |
-            ((fallback_has_color ? stand_in.color_interpolator : 1) << 8) |
-            (uint32_t(fallback_has_color) << 16);
+        // The module that takes every interpolator and is told for each
+        // draw which two to read (the draw path puts them in the stand-in's
+        // word whatever the vertex stage), so that the recipe has nothing of
+        // this pair of shaders in it. Without that module, the inputs'
+        // locations as GetStandIn asked for them: the interpreter's version
+        // 2 writes each interpolator at its index.
+        if (stand_in_all_pixel_shaders_[uint32_t(stand_in.shader) - 1] ==
+            VK_NULL_HANDLE) {
+          const bool fallback_has_texture =
+              stand_in.shader != StandInPixelShader::kFlat;
+          const bool fallback_has_color =
+              stand_in.color_interpolator != StandIn::kNoInterpolator;
+          fallback_inputs =
+              (fallback_has_texture ? stand_in.texcoord_interpolator : 0) |
+              ((fallback_has_color ? stand_in.color_interpolator : 1) << 8) |
+              (uint32_t(fallback_has_color) << 16);
+        }
       }
     } else if (fragment_shader_override != placeholder_pixel_shader_) {
       pixel_form = fragment_shader_override == placeholder_color_pixel_shader_
@@ -2208,9 +2248,12 @@ VulkanPipelineCache::SharedStandIn* VulkanPipelineCache::GetSharedStandIn(
                   : (pixel_form == StandInPixelForm::k2D
                          ? StandInPixelShader::k2D
                          : StandInPixelShader::kFlat);
-          arguments.placeholder_fragment_shader = GetStandInPixelShader(
-              fallback_shader, ((fallback_inputs >> 16) & 1) != 0,
-              fallback_inputs & 0xFF, (fallback_inputs >> 8) & 0xFF);
+          arguments.placeholder_fragment_shader =
+              fallback_inputs
+                  ? GetStandInPixelShader(
+                        fallback_shader, ((fallback_inputs >> 16) & 1) != 0,
+                        fallback_inputs & 0xFF, (fallback_inputs >> 8) & 0xFF)
+                  : stand_in_all_pixel_shaders_[uint32_t(fallback_shader) - 1];
           if (pixel_form != StandInPixelForm::kFlat) {
             texture_count = 1;
             sampler_count = 1;

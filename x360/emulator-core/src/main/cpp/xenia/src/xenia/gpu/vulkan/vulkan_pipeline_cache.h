@@ -974,9 +974,11 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   XEPACKEDSTRUCT(StandInRecipe, {
     PipelineDescription description;
     StandInPixelForm pixel_form;
-    // For kFlat, k2D and kCube: the location of the texture coordinate
-    // input, of the colour input << 8, and whether there is a colour input
-    // << 16. 0 for the other forms.
+    // For kFlat, k2D and kCube: 0 for the module with every interpolator as
+    // an input; otherwise (that module could not be made) the location of
+    // the texture coordinate input, of the colour input << 8, and whether
+    // there is a colour input << 16, which is never 0. 0 for the other
+    // forms.
     uint32_t fallback_inputs;
 
     StandInRecipe() { std::memset(this, 0, sizeof(*this)); }
@@ -1055,6 +1057,10 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   void StartStandInPrecompile(const std::filesystem::path& cache_root);
   void SaveStandInRecordIfDue(bool force);
 
+  // The stand-in pixel shaders with every interpolator as an input (flat,
+  // 2D, cube), which a shared stand-in uses where the pixel interpreter
+  // refuses a shader.
+  VkShaderModule stand_in_all_pixel_shaders_[3] = {};
   std::unordered_map<StandInRecipe, std::unique_ptr<SharedStandIn>,
                      StandInRecipe::Hasher>
       shared_stand_ins_;
