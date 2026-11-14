@@ -471,8 +471,8 @@ All under `x360/emulator-core/src/main/cpp/xenia/src/xenia/`, all marked
 
 ## What was checked, and what was not
 
-Checked by the build: it compiles for the phone (GitHub Actions run 104 for
-the first push; the second push's result is at the bottom).
+Checked by the build: whether it compiles for the phone. See "Build results"
+at the bottom; until a green run is recorded there, it is not known to.
 
 Checked on an x86-64 Linux 6.18 container, with the real `memory.cc`,
 `mmio_handler.cc` and `base/` compiled by clang and driven by
@@ -531,4 +531,8 @@ Not checked, and the build cannot check:
 ## Build results
 
 - First push (`7b40ebf`, counters, bridging, arming ahead, userfaultfd):
-  GitHub Actions run 104. Result recorded below when it finished.
+  GitHub Actions run 104. hakuX's own core built; the APK job (the 360 core)
+  was still compiling after 45 minutes when the second push replaced it, so
+  it has no result of its own.
+- Second push (the lean fault path, the test, these notes): result recorded
+  in the next commit.
