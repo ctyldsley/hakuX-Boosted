@@ -197,6 +197,16 @@ class CommandProcessor {
       const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
       std::function<void()> completion_callback = nullptr);
 
+  // hakuX-Boosted: how many of the title's stored pipelines are ready again
+  // after a launch, for a progress display (boosted/notes/shader-first-run.md).
+  // True while some are still being made. Any thread.
+  virtual bool GetShaderPreparationProgress(uint32_t& done_out,
+                                            uint32_t& total_out) const {
+    done_out = 0;
+    total_out = 0;
+    return false;
+  }
+
   virtual void RequestFrameTrace(const std::filesystem::path& root_path);
   virtual void BeginTracing(const std::filesystem::path& root_path);
   virtual void EndTracing();

@@ -319,6 +319,42 @@ DEFINE_int32(
     "pipeline may have to wait for.",
     "GPU");
 
+// hakuX-Boosted: boosted/notes/shader-first-run.md, "The kept record".
+DEFINE_path(
+    shader_record_import_path, "",
+    "A folder to take a title's shader record from when a title starts: its "
+    "two files (TITLEID.xsh, the shaders' microcode, and TITLEID.fbo.vk.xpso "
+    "or .fsi.vk.xpso, the pipeline states they were drawn with), as "
+    "shader_record_export_path writes them. A file there replaces the app's "
+    "own when it is the larger of the two (the files only grow). The record "
+    "holds nothing of the device or the driver, so it can come from another "
+    "phone. Empty: nothing is imported.",
+    "GPU");
+DEFINE_path(
+    shader_record_export_path, "",
+    "A folder to copy a title's shader record to when the title's shader "
+    "storage is closed (see shader_record_import_path). Empty: nothing is "
+    "exported.",
+    "GPU");
+
+// hakuX-Boosted: boosted/notes/shader-first-run.md.
+DEFINE_bool(
+    vulkan_pipeline_creation_adaptive, false,
+    "The pipeline creation threads follow the frames. While no frame has "
+    "been shown for vulkan_pipeline_creation_adaptive_frame_ms, or the last "
+    "one took longer than that, and pipelines are waiting: one thread for "
+    "each logical core, at normal priority. While frames flow: as many "
+    "threads as without this setting (75% of the cores, or "
+    "vulkan_pipeline_creation_threads), at their usual priority. Off: the "
+    "threads are as they always were. Needs a restart.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_pipeline_creation_adaptive_frame_ms, 50,
+    "With vulkan_pipeline_creation_adaptive: how long a frame, or the time "
+    "since the last one, must be for the pipeline creation threads to take "
+    "every core. They step back when a frame takes under two thirds of it.",
+    "Vulkan");
+
 DEFINE_bool(
     vulkan_dynamic_pipeline_state, true,
     "Use VK_EXT_extended_dynamic_state (and state 2/3 where available) to move "
@@ -743,6 +779,16 @@ bool VulkanPipelineCache::Initialize() {
       creation_thread_count =
           std::min(uint32_t(cvars::vulkan_pipeline_creation_threads),
                    logical_processor_count);
+    }
+    // hakuX-Boosted: with vulkan_pipeline_creation_adaptive there is a
+    // thread for each core, and only the usual number of them take jobs
+    // until the frames stop (UpdateCreationPolicy).
+    creation_threads_calm_ = creation_thread_count;
+    if (cvars::vulkan_pipeline_creation_adaptive) {
+      creation_thread_count =
+          std::max(creation_thread_count, size_t(logical_processor_count));
+      creation_thread_limit_.store(creation_threads_calm_,
+                                   std::memory_order_relaxed);
     }
     creation_threads_shutdown_ = false;
     for (size_t i = 0; i < creation_thread_count; ++i) {
@@ -1898,6 +1944,72 @@ bool VulkanPipelineCache::IsFullscreenRealPipelineWaited() const {
 void VulkanPipelineCache::NoteFrameBoundary() {
   placeholder_wait_left_ms_ =
       double(std::max(int32_t(0), cvars::vulkan_placeholder_async_wait_ms));
+  UpdateCreationPolicy(true);
+}
+
+// hakuX-Boosted: vulkan_pipeline_creation_adaptive. GPU command thread only.
+void VulkanPipelineCache::UpdateCreationPolicy(bool frame_boundary) {
+  if (!cvars::vulkan_pipeline_creation_adaptive ||
+      (creation_threads_.size() <= creation_threads_calm_ &&
+       !cvars::guest_threads_above_helpers)) {
+    // Nothing to change between the two states.
+    return;
+  }
+  const uint64_t now_ms = xe::Clock::QueryHostUptimeMillis();
+  if (frame_boundary) {
+    if (policy_frame_ms_last_) {
+      policy_frame_ms_ = now_ms - policy_frame_ms_last_;
+    }
+    policy_frame_ms_last_ = now_ms;
+  }
+  const uint64_t threshold_ms = uint64_t(
+      std::max(int32_t(1), cvars::vulkan_pipeline_creation_adaptive_frame_ms));
+  const uint64_t since_frame_ms =
+      policy_frame_ms_last_ ? now_ms - policy_frame_ms_last_ : threshold_ms + 1;
+  const uint64_t frame_ms = std::max(policy_frame_ms_, since_frame_ms);
+  const bool working =
+      creation_threads_busy_.load(std::memory_order_relaxed) != 0;
+  bool boosted = creation_boosted_;
+  if (startup_pipelines_left_.load(std::memory_order_relaxed) != 0) {
+    // The stored pipelines being made again at launch: nothing else to run.
+    boosted = true;
+  } else if (!boosted) {
+    boosted = working && frame_ms > threshold_ms;
+  } else {
+    // Back when the work is done, or the frames are well under the mark.
+    boosted = working && frame_ms * 3 > threshold_ms * 2;
+  }
+  if (boosted == creation_boosted_) {
+    return;
+  }
+  creation_boosted_ = boosted;
+  ++creation_policy_switches_;
+  creation_thread_limit_.store(
+      boosted ? creation_threads_.size() : creation_threads_calm_,
+      std::memory_order_relaxed);
+  for (const std::unique_ptr<xe::threading::Thread>& creation_thread :
+       creation_threads_) {
+    creation_thread->set_priority(
+        (boosted || !cvars::guest_threads_above_helpers)
+            ? xe::threading::ThreadPriority::kNormal
+            : xe::threading::ThreadPriority::kBelowNormal);
+  }
+  if (boosted) {
+    creation_request_cond_.notify_all();
+  }
+  if (cvars::shader_profiling && now_ms - creation_policy_logged_ms_ >= 1000) {
+    creation_policy_logged_ms_ = now_ms;
+    XELOGI(
+        "shader_profiling: pipeline creation threads: {} of {} at {} "
+        "priority (the last frame took or has been awaited {} ms, {} "
+        "compiling), {} switches so far",
+        boosted ? creation_threads_.size() : creation_threads_calm_,
+        creation_threads_.size(),
+        (boosted || !cvars::guest_threads_above_helpers) ? "normal"
+                                                         : "below normal",
+        frame_ms, creation_threads_busy_.load(std::memory_order_relaxed),
+        creation_policy_switches_);
+  }
 }
 
 void VulkanPipelineCache::WaitForRealPipeline(
@@ -2732,6 +2844,10 @@ void VulkanPipelineCache::MaybeSaveVkPipelineCache() {
 
 void VulkanPipelineCache::EndSubmission() {
   MaybeSaveVkPipelineCache();
+  // hakuX-Boosted: between frames too, so that a load with no frame at all
+  // is noticed.
+  UpdateCreationPolicy(false);
+  LogStartupProgressIfDue();
   // hakuX-Boosted: the once-a-second lines of boosted/notes/shader-ahead.md.
   LogStatsIfDue();
 
@@ -2888,14 +3004,21 @@ void VulkanPipelineCache::CreationThread() {
       const size_t speculative_thread_limit =
           size_t(std::max(int32_t(1), cvars::shader_ahead_threads));
       creation_request_cond_.wait(lock, [this, speculative_thread_limit]() {
-        return !creation_queue_.empty() || creation_threads_shutdown_ ||
+        // hakuX-Boosted: creation_thread_limit_ is above any count unless
+        // vulkan_pipeline_creation_adaptive holds some threads back.
+        return (!creation_queue_.empty() &&
+                creation_threads_busy_.load(std::memory_order_relaxed) <
+                    creation_thread_limit_.load(std::memory_order_relaxed)) ||
+               creation_threads_shutdown_ ||
                (!speculative_queue_.empty() &&
                 speculative_busy_ < speculative_thread_limit);
       });
       if (creation_threads_shutdown_) {
         break;
       }
-      if (!creation_queue_.empty()) {
+      if (!creation_queue_.empty() &&
+          creation_threads_busy_.load(std::memory_order_relaxed) <
+              creation_thread_limit_.load(std::memory_order_relaxed)) {
         creation_arguments = creation_queue_.top();
         creation_queue_.pop();
         ++creation_threads_busy_;
@@ -3029,6 +3152,9 @@ void VulkanPipelineCache::CreationThread() {
             true, std::memory_order_release);
       }
       creation_progress_cond_.notify_all();
+      if (creation_arguments.startup) {
+        startup_pipelines_left_.fetch_sub(1, std::memory_order_relaxed);
+      }
       if (creation_threads_busy_ == 0 && creation_queue_.empty()) {
         // All pipelines created.
         if (creation_completion_set_event_.load(std::memory_order_acquire)) {
@@ -5241,6 +5367,18 @@ void VulkanPipelineCache::InitializeShaderStorage(
       std::max(PipelineDescription::kVersion,
                SpirvShaderTranslator::Modification::kVersion);
 
+  // hakuX-Boosted: the record's two files, for import now and export when
+  // the storage is closed.
+  shader_record_files_[0] = GetShaderStorageFilePath(cache_root, title_id);
+  shader_record_files_[1] =
+      GetShaderStorageShareableRoot(cache_root) /
+      fmt::format("{:08X}{}", title_id, pipeline_config.file_suffix);
+  ImportShaderRecord();
+  startup_pipelines_total_.store(0, std::memory_order_relaxed);
+  startup_pipelines_left_.store(0, std::memory_order_relaxed);
+  startup_started_ms_ = xe::Clock::QueryHostUptimeMillis();
+  startup_progress_logged_ms_ = 0;
+
   uint32_t storage_index = storage_writer_.storage_index() + 1;
 
   std::vector<PipelineStoredDescription> pipeline_stored_descriptions;
@@ -5305,6 +5443,40 @@ void VulkanPipelineCache::InitializeShaderStorage(
     XELOGI("Loaded {} bytes of VkPipelineCache data",
            pipeline_cache_data.size());
   }
+
+  // hakuX-Boosted: whether the driver will take that data. A driver reads
+  // only a cache whose header is its own (vendor, device and the driver
+  // build's UUID) and silently starts empty otherwise, which after a driver
+  // update or on another phone means every stored pipeline is compiled from
+  // scratch at this launch. An empty cache's data is this driver's header.
+  driver_cache_state_ = pipeline_cache_data.empty() ? DriverCacheState::kNone
+                                                    : DriverCacheState::kUnknown;
+  if (!pipeline_cache_data.empty() && vk_pipeline_cache_ != VK_NULL_HANDLE) {
+    // vk_pipeline_cache_ is still the empty one made at start-up.
+    uint8_t own_header[32];
+    size_t own_header_size = sizeof(own_header);
+    VkResult header_result = dfn.vkGetPipelineCacheData(
+        device, vk_pipeline_cache_, &own_header_size, own_header);
+    if ((header_result == VK_SUCCESS || header_result == VK_INCOMPLETE) &&
+        own_header_size == sizeof(own_header) &&
+        pipeline_cache_data.size() >= sizeof(own_header)) {
+      driver_cache_state_ =
+          std::memcmp(own_header, pipeline_cache_data.data(),
+                      sizeof(own_header))
+              ? DriverCacheState::kMismatch
+              : DriverCacheState::kMatch;
+    }
+  }
+  XELOGI(
+      "shader record: the driver's stored pipeline cache {}",
+      driver_cache_state_ == DriverCacheState::kNone
+          ? "is absent: the stored pipelines are compiled from scratch"
+          : (driver_cache_state_ == DriverCacheState::kMatch
+                 ? "is this driver's: the stored pipelines come from it"
+                 : (driver_cache_state_ == DriverCacheState::kMismatch
+                        ? "is another driver's or device's: the stored "
+                          "pipelines are compiled from scratch"
+                        : "could not be checked against this driver")));
 
   // Recreate the VkPipelineCache with the loaded data.
   if (vk_pipeline_cache_ != VK_NULL_HANDLE) {
@@ -5508,6 +5680,10 @@ void VulkanPipelineCache::InitializeShaderStorage(
         creation_arguments.render_pass_key =
             pipeline_description.render_pass_key;
         creation_arguments.priority = priority;
+        // hakuX-Boosted: counted for the progress value.
+        creation_arguments.startup = true;
+        startup_pipelines_total_.fetch_add(1, std::memory_order_relaxed);
+        startup_pipelines_left_.fetch_add(1, std::memory_order_relaxed);
         creation_queue_.push(creation_arguments);
         creation_request_cond_.notify_one();
       } else {
@@ -5530,6 +5706,9 @@ void VulkanPipelineCache::InitializeShaderStorage(
       ++pipelines_created;
     }
 
+    // hakuX-Boosted: every core for the launch's pipelines
+    // (vulkan_pipeline_creation_adaptive).
+    UpdateCreationPolicy(false);
     if (!creation_threads_.empty()) {
       if (blocking) {
         // Blocking mode: wait for all pipelines to be created.
@@ -5619,6 +5798,89 @@ void VulkanPipelineCache::SaveVkPipelineCache() {
   }
 }
 
+// hakuX-Boosted: the kept record (boosted/notes/shader-first-run.md).
+
+bool VulkanPipelineCache::GetStartupProgress(uint32_t& done_out,
+                                             uint32_t& total_out) const {
+  uint32_t total = startup_pipelines_total_.load(std::memory_order_relaxed);
+  uint32_t left = std::min(
+      total, startup_pipelines_left_.load(std::memory_order_relaxed));
+  done_out = total - left;
+  total_out = total;
+  return left != 0;
+}
+
+void VulkanPipelineCache::LogStartupProgressIfDue() {
+  uint32_t done, total;
+  bool preparing = GetStartupProgress(done, total);
+  if (!total || startup_progress_logged_ms_ == UINT64_MAX) {
+    return;
+  }
+  uint64_t now_ms = xe::Clock::QueryHostUptimeMillis();
+  if (preparing && now_ms - startup_progress_logged_ms_ < 1000) {
+    return;
+  }
+  XELOGI(
+      "shader record: {} of {} stored pipelines ready, {:.1f} s after the "
+      "title's storage was opened{}",
+      done, total, double(now_ms - startup_started_ms_) / 1000.0,
+      preparing ? "" : " (all of them)");
+  // The line that says all are ready is the last.
+  startup_progress_logged_ms_ = preparing ? now_ms : UINT64_MAX;
+}
+
+void VulkanPipelineCache::ImportShaderRecord() {
+  if (cvars::shader_record_import_path.empty()) {
+    return;
+  }
+  for (const std::filesystem::path& local_file : shader_record_files_) {
+    std::filesystem::path import_file =
+        cvars::shader_record_import_path / local_file.filename();
+    std::error_code ec;
+    uintmax_t import_size = std::filesystem::file_size(import_file, ec);
+    if (ec) {
+      continue;
+    }
+    uintmax_t local_size = std::filesystem::file_size(local_file, ec);
+    if (ec) {
+      local_size = 0;
+    }
+    if (import_size <= local_size) {
+      XELOGI(
+          "shader record: {} not imported: {} bytes there, {} bytes here",
+          xe::path_to_utf8(import_file.filename()), import_size, local_size);
+      continue;
+    }
+    std::filesystem::create_directories(local_file.parent_path(), ec);
+    std::filesystem::copy_file(
+        import_file, local_file,
+        std::filesystem::copy_options::overwrite_existing, ec);
+    XELOGI("shader record: {} {} ({} bytes, {} bytes were here)",
+           xe::path_to_utf8(import_file.filename()),
+           ec ? "could not be imported" : "imported", import_size, local_size);
+  }
+}
+
+void VulkanPipelineCache::ExportShaderRecord() {
+  if (cvars::shader_record_export_path.empty()) {
+    return;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(cvars::shader_record_export_path, ec);
+  for (const std::filesystem::path& local_file : shader_record_files_) {
+    if (local_file.empty() || !std::filesystem::exists(local_file, ec)) {
+      continue;
+    }
+    std::filesystem::path export_file =
+        cvars::shader_record_export_path / local_file.filename();
+    std::filesystem::copy_file(
+        local_file, export_file,
+        std::filesystem::copy_options::overwrite_existing, ec);
+    XELOGI("shader record: {} {}", xe::path_to_utf8(local_file.filename()),
+           ec ? "could not be exported" : "exported");
+  }
+}
+
 void VulkanPipelineCache::ShutdownShaderStorage() {
   // Save VkPipelineCache to disk before shutting down storage.
   SaveVkPipelineCache();
@@ -5626,6 +5888,10 @@ void VulkanPipelineCache::ShutdownShaderStorage() {
 
   // Shut down the storage writer (closes files, stops write thread).
   storage_writer_.ShutdownShaderStorage();
+  // hakuX-Boosted: the files are closed and complete now.
+  ExportShaderRecord();
+  shader_record_files_[0].clear();
+  shader_record_files_[1].clear();
   shader_storage_file_flush_needed_ = false;
   pipeline_storage_file_flush_needed_ = false;
   shader_storage_title_id_ = 0;

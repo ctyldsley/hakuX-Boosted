@@ -165,6 +165,16 @@ class VulkanCommandProcessor final : public CommandProcessor {
       const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
       std::function<void()> completion_callback = nullptr) override;
 
+  // hakuX-Boosted.
+  bool GetShaderPreparationProgress(uint32_t& done_out,
+                                    uint32_t& total_out) const override {
+    if (!pipeline_cache_) {
+      return CommandProcessor::GetShaderPreparationProgress(done_out,
+                                                            total_out);
+    }
+    return pipeline_cache_->GetStartupProgress(done_out, total_out);
+  }
+
   void RestoreEdramSnapshot(const void* snapshot) override;
 
   void PollCompletedSubmission() override;

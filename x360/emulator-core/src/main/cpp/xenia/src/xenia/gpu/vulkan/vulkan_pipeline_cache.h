@@ -440,7 +440,14 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
                        uint32_t reasons, const Pipeline* pipeline);
   // Called once for each guest frame (at the swap): the budget of
   // vulkan_placeholder_async_wait_ms is per frame.
+  // hakuX-Boosted: how far the stored pipelines of this title are with being
+  // made again at launch, for a progress display. False once all are ready
+  // (or there were none); total_out is then how many there were.
+  bool GetStartupProgress(uint32_t& done_out, uint32_t& total_out) const;
   void NoteFrameBoundary();
+  // hakuX-Boosted: vulkan_pipeline_creation_adaptive: how many creation
+  // threads take jobs and at what priority, by how the frames are going.
+  void UpdateCreationPolicy(bool frame_boundary);
   // Whether full-screen passes wait for their real pipeline instead of being
   // drawn with a placeholder (vulkan_placeholder_wait_fullscreen_ms).
   bool IsFullscreenRealPipelineWaited() const;
@@ -683,6 +690,8 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     bool skip_if_claimed = false;
     // Made on a prediction: taken from the speculative queue.
     bool speculative = false;
+    // hakuX-Boosted: one of the stored pipelines made again at launch.
+    bool startup = false;
     VkShaderModule placeholder_fragment_shader = VK_NULL_HANDLE;
     VkShaderModule placeholder_vertex_shader = VK_NULL_HANDLE;
     const PipelineLayoutProvider* placeholder_layout = nullptr;
@@ -1050,6 +1059,26 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   std::vector<std::unique_ptr<xe::threading::Thread>> creation_threads_;
   std::atomic<bool> creation_threads_shutdown_{false};
   std::atomic<size_t> creation_threads_busy_{0};
+  // hakuX-Boosted: vulkan_pipeline_creation_adaptive. The limit is above any
+  // count unless the setting is on.
+  // hakuX-Boosted: the kept record.
+  enum class DriverCacheState { kNone, kMatch, kMismatch, kUnknown };
+  DriverCacheState driver_cache_state_ = DriverCacheState::kNone;
+  std::filesystem::path shader_record_files_[2];
+  std::atomic<uint32_t> startup_pipelines_total_{0};
+  std::atomic<uint32_t> startup_pipelines_left_{0};
+  uint64_t startup_started_ms_ = 0;
+  uint64_t startup_progress_logged_ms_ = 0;
+  void LogStartupProgressIfDue();
+  void ImportShaderRecord();
+  void ExportShaderRecord();
+  std::atomic<size_t> creation_thread_limit_{SIZE_MAX};
+  size_t creation_threads_calm_ = 0;
+  bool creation_boosted_ = false;
+  uint64_t policy_frame_ms_last_ = 0;
+  uint64_t policy_frame_ms_ = 0;
+  uint64_t creation_policy_switches_ = 0;
+  uint64_t creation_policy_logged_ms_ = 0;
   // Priority queue contains pointers to map entries. Pipelines are never
   // evicted as games have a finite set that should all remain cached for
   // performance. Higher priority pipelines (those writing to visible RTs)
