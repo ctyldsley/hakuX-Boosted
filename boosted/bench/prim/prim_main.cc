@@ -249,28 +249,21 @@ int main(int argc, char** argv) {
   bench::EmitTiming(s, "tls_read_pthread_key", "", bench::Measure([] {
     bench::Keep(ReadPthreadKey());
   }));
-#if defined(__BIONIC__)
-  bool slot_ok = ReadFixedSlot() == nullptr;  // nobody else may be using it
-  if (slot_ok) {
-    __asm__ __volatile__(
-        "mrs x16, tpidr_el0\n\t"
-        "str %0, [x16, #16]"
-        :
-        : "r"(marker)
-        : "x16", "memory");
-  }
-#else
+  // Reading the slot costs the same whatever it holds, so it is timed even
+  // where the word belongs to somebody else (as in the Termux container);
+  // only on glibc, where the word is this program's own, is it also checked.
+#if !defined(__BIONIC__)
   prim_slot_app = marker;
-#endif
-  if (ReadFixedSlot() == marker) {
-    bench::EmitTiming(s, "tls_read_fixed_slot", "", bench::Measure([] {
-      bench::Keep(ReadFixedSlot());
-    }));
-  } else {
+  if (ReadFixedSlot() != marker) {
     bench::EmitNote(s, "tls_read_fixed_slot",
-                    "not measured: the word at the thread pointer plus 16 "
-                    "is not free on this loader");
+                    "the executable's thread-local is not at the thread "
+                    "pointer plus 16 on this loader; the read is timed all "
+                    "the same");
   }
+#endif
+  bench::EmitTiming(s, "tls_read_fixed_slot", "", bench::Measure([] {
+    bench::Keep(ReadFixedSlot());
+  }));
   HeldState held{nullptr, marker};
   bench::EmitTiming(s, "tls_read_register_held", "", bench::Measure([&] {
     bench::Keep(ReadThroughRegister(&held));

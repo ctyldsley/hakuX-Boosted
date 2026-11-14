@@ -16,8 +16,14 @@ SECTION_TITLES = [
      "One call of a function that is not inlined; `call_empty` is the call "
      "and return alone, to subtract. Nanoseconds, lowest of the samples."),
     ("prim-bionic", "1 again, on bionic",
-     "The same program built for Android and run in a Termux container on "
-     "the same runner: Android's libc and dynamic linker, the runner's CPU."),
+     "The same program built for Android with real ELF thread-locals (as the "
+     "app is) and run in a Termux container on the same runner: Android's "
+     "libc and dynamic linker, the runner's CPU."),
+    ("prim-bionic-emutls", "1 again, on bionic, emulated thread-locals",
+     "As Termux's compiler builds by default: thread-locals emulated with "
+     "pthread keys. NOT how the app reaches its thread-locals; here because "
+     "it is what runs when the container's linker is too old for the real "
+     "thing, and for the rows that do not involve thread-locals."),
     ("fiber", "1b. Fiber switch through the core's own Fiber class",
      "`xe::threading::Fiber::SwitchTo` as the scheduler calls it, per switch."),
     ("sched", "2. The guest scheduler's paths",

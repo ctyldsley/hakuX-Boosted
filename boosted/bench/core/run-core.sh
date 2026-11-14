@@ -45,6 +45,8 @@ run bench_core sched "host_thread_state_slot" $slot
 run bench_core sched "skew_bound_us=2000" $skew
 run bench_core sched "lean_yield + slot" $lean $slot
 run bench_core sched "all of the above" $lean $park $slot $skew
+run bench_core sched "a64_thunk_fpcr_compare" a64_thunk_fpcr_compare=true
+run bench_core sched "a64_lean_extern_thunk" a64_lean_extern_thunk=true
 run bench_core_static sched "static TLS (not Android's)"
 
 # --- 3. The translator ---------------------------------------------------------

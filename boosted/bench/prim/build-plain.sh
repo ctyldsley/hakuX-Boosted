@@ -15,6 +15,10 @@ cxx="${3:-clang++}"
 here="$(cd "$(dirname "$0")" && pwd)"
 asm="$here/../../../x360/emulator-core/src/main/cpp/xenia/third_party/boost_context/context/src/asm"
 flags=(-O2 -DNDEBUG -march=armv8-a -fno-strict-aliasing -fno-omit-frame-pointer)
+# PRIM_EXTRA_FLAGS: more flags for every compile and link, space separated
+# (the workflow passes -fno-emulated-tls inside the Termux container).
+read -r -a extra <<< "${PRIM_EXTRA_FLAGS:-}"
+flags+=("${extra[@]}")
 mkdir -p "$out"
 
 "$cc" "${flags[@]}" -fPIC -shared "$here/tls_lib.c" \

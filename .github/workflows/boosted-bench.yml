@@ -108,13 +108,27 @@ jobs:
             set -e
             (pkg update -y && pkg install -y clang) > "$HOME/pkg.log" 2>&1 || { tail -40 "$HOME/pkg.log"; exit 1; }
             clang --version | head -2
-            bash /src/boosted/bench/prim/build-plain.sh "$HOME/prim" clang clang++
-            cd "$HOME/prim"
-            export BENCH_PRIM_SECTION=prim-bionic BENCH_OUT="$HOME/prim/results.jsonl"
-            for round in 1 2; do LD_LIBRARY_PATH=. ./bench_prim ./libprim_tls_dyn.so; done
+            export BENCH_OUT="$HOME/results.jsonl"
+            # Termux targets an API level at which clang emulates
+            # thread-locals with pthread keys. The app is built for a level
+            # with real ELF TLS (the profile shows the TLS descriptor
+            # resolver), so that is tried first; whether this container'"'"'s
+            # linker is new enough for it is found out by running it.
+            if PRIM_EXTRA_FLAGS=-fno-emulated-tls bash /src/boosted/bench/prim/build-plain.sh "$HOME/prim-elf" clang clang++ \
+               && cd "$HOME/prim-elf" \
+               && BENCH_PRIM_SECTION=prim-bionic LD_LIBRARY_PATH=. ./bench_prim ./libprim_tls_dyn.so; then
+              BENCH_PRIM_SECTION=prim-bionic LD_LIBRARY_PATH=. ./bench_prim ./libprim_tls_dyn.so
+            else
+              echo "{\"section\":\"prim-bionic\",\"name\":\"elf_tls\",\"note\":\"NOT MEASURED: a program built with real ELF thread-locals does not build or run against this container bionic\"}" >> "$BENCH_OUT"
+            fi
+            bash /src/boosted/bench/prim/build-plain.sh "$HOME/prim-emu" clang clang++
+            cd "$HOME/prim-emu"
+            for round in 1 2; do
+              BENCH_PRIM_SECTION=prim-bionic-emutls LD_LIBRARY_PATH=. ./bench_prim ./libprim_tls_dyn.so
+            done
             echo "=====RESULTS====="
             cat "$BENCH_OUT"
-          ' 2>&1 | tee results/container.log
+          ' 2>&1 | tee results/container.log | grep -v "ns_per_op" || true
           sed -n '/^=====RESULTS=====$/,$p' results/container.log | tail -n +2 > results/bionic.jsonl
           test -s results/bionic.jsonl
 
@@ -127,7 +141,6 @@ jobs:
               --target-name "this runner" \
               --title "Host primitives: glibc and bionic on one runner" \
               --out results/report.md >> "$GITHUB_STEP_SUMMARY"
-            cat results/report.md
             python3 boosted/bench/tools/report.py --target results/both.jsonl --digest
           fi
           if [ ! -s results/bionic.jsonl ]; then
@@ -242,7 +255,7 @@ jobs:
       - name: Run
         run: |
           mkdir -p results
-          rounds=2
+          rounds=3
           if [ "$TARGET" = "$BASELINE" ]; then
             boosted/bench/run.sh "$RUNNER_TEMP/bin/target" results/target.jsonl $rounds || true
           else
@@ -312,11 +325,9 @@ jobs:
           command -v strace > /dev/null || sudo timeout 120 apt-get install -y --no-install-recommends strace > /dev/null 2>&1 || true
           command -v strace > /dev/null || exit 0
           for only in wait_wake_round_trip_one_cpu wait_wake_round_trip_two_cpus yield_other_ready; do
-            echo "-- $only"
-            BENCH_OUT=/dev/null BENCH_SCHED_ONLY=$only BENCH_SCHED_SAMPLES=2 \
+            BENCH_OUT="results/strace-$only.jsonl" BENCH_SCHED_ONLY=$only BENCH_SCHED_SAMPLES=2 \
               strace -f -c -o "results/strace-$only.txt" \
-              "$RUNNER_TEMP/bin/target/core/bench_core" --suite=sched --label=diagnostic 2>&1 | grep ns_per_op | head -1 || true
-            head -12 "results/strace-$only.txt" || true
+              "$RUNNER_TEMP/bin/target/core/bench_core" --suite=sched --label=diagnostic > /dev/null 2>&1 || true
           done
 
       - name: Artifact name
@@ -334,6 +345,15 @@ jobs:
       - name: Digest
         if: always()
         run: |
+          # fewer lines after this in the log: nothing for the checkout's
+          # clean-up to walk through
+          git submodule deinit -f --all > /dev/null 2>&1 || true
+          for file in results/strace-*.txt; do
+            [ -f "$file" ] || continue
+            passes=$(grep -o '"ns_per_op","value":[0-9.e+]*' "${file%.txt}.jsonl" 2> /dev/null | head -1 | cut -d: -f2)
+            echo "== system calls, $(basename "$file" .txt | sed 's/strace-//'), ns per pass under strace: ${passes:-?} (seconds, calls, name)"
+            awk 'NR > 2 && $1 ~ /^[0-9.]+$/ && n < 6 { print $2, $4, $NF; n++ }' "$file"
+          done
           args=(--target results/target.jsonl --digest)
           [ -f results/baseline.jsonl ] && args+=(--baseline results/baseline.jsonl)
           python3 boosted/bench/tools/report.py "${args[@]}" || true

@@ -274,3 +274,236 @@ used only if a configure-time check finds them under the names the rig
 knows. If a branch changes the core so that the stand-in no longer links,
 the primitives still build and report and the job says which part failed
 (only this branch's own job fails on that).
+
+## First results
+
+Run 43550785355 (commit `817ceab`, 2026-11-14 03:16 UTC), three jobs, all
+green. Runner: Arm Neoverse N2 (`implementer 0x41 part 0xd49`, Azure's
+Cobalt 100), 4 cores, kernel 7.0 (Azure), glibc 2.39, LSE atomics present,
+the CPU's instruction counter available to the benchmark job. Lowest of the
+samples; nanoseconds unless said.
+
+### 1. Host primitives (glibc, the plain build in the bionic job)
+
+| Primitive | ns a call |
+|---|---:|
+| an empty call and return (subtract from the rest) | 0.59 |
+| thread-local read, TLS descriptor, dynamic resolver (`dlopen`) | 2.43 |
+| thread-local write, the same | 2.46 |
+| thread-local read, TLS descriptor, static resolver | 2.06 |
+| thread-local read, initial-exec | 0.59 |
+| `pthread_getspecific` | 1.92 |
+| fixed slot (`mrs tpidr_el0; ldr [..., #16]`) | 0.59 |
+| a load through a pointer already in a register | 0.30 |
+| `clock_gettime(CLOCK_MONOTONIC)` | 30.9 |
+| `std::chrono::steady_clock::now()` | 31.7 |
+| the counter register (`mrs cntvct_el0`) | 13.4 |
+| `pthread_mutex_lock` + `unlock`, uncontended | 15.5 |
+| `std::mutex` / `std::recursive_mutex`, the same | 15.2 / 15.3 |
+| 16-bit compare-and-swap, acquire: outline / inline LSE / inline LL/SC | 8.38 / 8.09 / 13.2 |
+| relaxed 64-bit add: outline / inline LSE / inline LL/SC | 4.39 / 4.18 / 4.71 |
+| `jump_fcontext`, one switch | 7.69 |
+
+The same program in the Termux container, in that run, was built the way
+Termux builds by default, which turned out to be with emulated
+thread-locals (pthread keys behind `__emutls_get_address`), not the ELF TLS
+the app uses: 4.1 to 4.4 ns for every thread-local read, whichever way the
+library was loaded. Those rows are not the app's path. The job now builds
+with `-fno-emulated-tls` first; see "The bionic job, second attempt" below
+for what that gave. The rows that do not involve thread-locals were the same
+as glibc's to within 2 ns (bionic's mutex 17.1 ns against 15.5).
+
+### 1b. `Fiber::SwitchTo`, one switch
+
+| defaults | `host_thread_state_slot` | static TLS (not Android's) |
+|---:|---:|---:|
+| 14.0 | 10.3 | 10.5 |
+
+### 2. The scheduler (`claude/integration-1113` sources), ns a pass and cores busy
+
+| Benchmark | defaults | lean yield | park spinners | slot | skew 2000 us | lean + slot | all | static TLS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| the loop alone | 1.77 | 1.77 | 1.77 | 1.77 | 1.77 | 1.77 | 1.77 | 1.77 |
+| a kernel call that does nothing | 19.0 | 18.9 | 18.9 | 19.0 | 19.0 | 19.0 | 19.0 | 19.0 |
+| `NtYieldExecution`, nothing else ready | 270 | 58.6 | 1,799 | 243 | 293 | 51.4 | 1,677 | 227 |
+| ... cores busy | 1.00 | 1.00 | 0.042 | 1.00 | 1.00 | 1.00 | 0.042 | 1.00 |
+| zero delay, nothing else ready | 63.8 | 64.1 | 1,952 | 60.1 | 66.9 | 59.9 | 1,920 | 56.5 |
+| ... cores busy | 1.00 | 1.00 | 0.042 | 1.00 | 1.00 | 1.00 | 0.043 | 1.00 |
+| yield, another fiber ready (per yield) | 275 | 275 | 273 | 246 | 297 | 249 | 273 | 229 |
+| event round trip, one guest CPU | 110,966 | 110,634 | 110,997 | 110,751 | 110,979 | 110,597 | 110,989 | 110,759 |
+| ... cores busy | 0.071 | 0.070 | 0.071 | 0.071 | 0.073 | 0.070 | 0.071 | 0.069 |
+| event round trip, two guest CPUs | 15,631 | 15,828 | 15,395 | 15,365 | 15,672 | 15,440 | 15,529 | 15,408 |
+| ... cores busy | 0.843 | 0.851 | 0.841 | 0.850 | 0.840 | 0.841 | 0.842 | 0.838 |
+
+### 3. The translator (defaults)
+
+| Program | ns per guest instruction | host instructions run per guest instruction | host instructions emitted per guest instruction | translate, us |
+|---|---:|---:|---:|---:|
+| integer | 0.559 | 5.52 | 9.21 | 31.6 |
+| float | 0.966 | 7.78 | 17.9 | 46.5 |
+| vector | 0.897 | 10.2 | 32.8 | 50.7 |
+| calls | 0.256 | 3.96 | 10.1 | 60.1 |
+| copy | 0.636 | 6.27 | 10.1 | 28.8 |
+| host calls | 2.32 | 19.3 | 15.7 | 36.2 |
+
+With the settings: `pin_guest_registers` changed no number (no register was
+pinned in any of the 108 functions it considered, 72 of them with loops; see
+Findings 3). `simplification_skip_unchanged_blocks` skipped 1,116 of 3,804
+block walks with no mismatch and the translated code is identical; the
+translation times moved by under 2%, which is inside the noise for functions
+this small. `a64_thunk_fpcr_compare`: the host-calls loop runs 19.67 host
+instructions per guest instruction instead of 19.33 (two more a call) and
+takes 2.27 ns instead of 2.32 (about 0.3 ns a call less on this CPU).
+`a64_lean_extern_thunk` changed no number (Findings 4).
+
+### How much two runs of the same code differ on this runner
+
+This branch's own job runs the same programs as "target" and "baseline".
+Of about 330 numbers, the ones that differed by more than 3%: one
+translation time (10%), the `calls` loop's time per guest instruction (6.5%,
+it sits at either 0.256 or 0.273 ns from process to process) and the `copy`
+loop's (17%, 0.544 or 0.636; the buffers were a multiple of 4 KiB apart,
+fixed since). Every scheduler number agreed to within 3%, most within 1%.
+Host instruction counts are exact and repeat to every digit: where a time
+and a count disagree, believe the count.
+
+### `claude/guest-waits` (at `fc5767e`) against `claude/integration-1113`
+
+The same run, its own job. Everything that moved by more than 3%:
+
+| Benchmark, setting | guest-waits | baseline | change |
+|---|---:|---:|---:|
+| `NtYieldExecution`, nothing ready, lean yield | 44.0 | 58.5 | -24.8% |
+| the same, lean yield + slot | 41.5 | 51.3 | -19.1% |
+| zero delay, nothing ready, lean yield | 54.8 | 64.0 | -14.5% |
+| the same, lean yield + slot | 50.9 | 59.9 | -15.1% |
+| `NtYieldExecution`, nothing ready, park spinners (cores busy 0.042 both) | 1,379 | 1,800 | -23.4% |
+| zero delay, nothing ready, park spinners (cores busy 0.043 both) | 1,685 | 1,941 | -13.2% |
+| zero delay, nothing ready, slot | 57.1 | 60.1 | -5.0% |
+| `NtYieldExecution`, nothing ready, slot | 235 | 243 | -3.4% |
+| yield, another fiber ready, slot | 238 | 246 | -3.3% |
+| zero delay, nothing ready, defaults | 66.7 | 64.0 | +4.2% |
+| zero delay, nothing ready, skew 2000 us | 70.1 | 66.8 | +4.8% |
+| `NtYieldExecution` / zero delay / yield to another, static TLS | 237 / 61.4 / 238 | 227 / 58.0 / 228 | +4.4% / +5.9% / +4.2% |
+| `Fiber::SwitchTo`, slot | 11.9 | 10.3 | +15.4% |
+
+Unchanged: the empty `NtYieldExecution` at defaults (270 both), both event
+round trips, the kernel call that does nothing, and the translator (its
+`calls` and `copy` rows are in the list of the run but are the two-speed
+loops described above; their instruction counts are identical).
+
+So, on this runner: guest-waits makes the lean empty yield a quarter
+cheaper and the lean zero delay a seventh; costs about 3 ns on the zero
+delay with every new setting off; and makes `Fiber::SwitchTo` with the slot
+on 1.6 ns dearer. Whether any of that is visible on the phone is for the
+phone.
+
+## Findings for the other sessions
+
+Measured on the runner, with the code as it is on `claude/integration-1113`
+unless said. Where a sentence is my reading of the source and not a
+measurement it says so.
+
+1. **An event handed between two threads on the same guest CPU takes 111
+   microseconds a round trip, with the CPU 93% idle.** (`kernel/**`,
+   `claude/guest-waits`.) Two threads on guest CPU 0, each `NtSetEvent` on
+   the other's auto-reset event then `NtWaitForSingleObjectEx` on its own.
+   One round trip is two sets and two waits. On two guest CPUs the same
+   round trip takes 15.6 microseconds (0.84 cores busy); a yield that
+   switches to another fiber on the same CPU takes 0.275 microseconds. So
+   on one CPU each hand-over is waiting about 55 microseconds for something
+   that is not CPU work. No setting changes it and guest-waits does not
+   either. See "The one-CPU hand-over" below for what the system calls
+   show.
+2. **Thread-local access is a small part of an empty yield here.** The
+   empty `NtYieldExecution` round trip is 270 ns; with every thread-local
+   at a fixed offset (static TLS) it is 227 ns (-16%); with
+   `host_thread_state_slot` 243 ns (-10%); with the lean yield 58.6 ns
+   (-78%). A dynamic TLS descriptor read costs 1.8 ns more than a fixed
+   slot on this CPU with glibc. The phone's profile has the resolver at
+   8.2% of the thread; that is consistent with a cheap call made tens of
+   millions of times a second (my arithmetic: 8.2% of a second over 2.4 ns
+   is 34 million reads), not with a dear call.
+3. **`pin_guest_registers` pins nothing in a tight loop, because every
+   conditional branch is charged as a full write-back and reload.**
+   (`cpu/compiler/passes/guest_register_pinning_pass.cc`,
+   `claude/translator-wide`.) Measured: 0 of 108 functions pinned, 72 with
+   loops. With temporary prints in a scratch copy of the pass (not
+   committed), the `integer` loop (10 guest instructions, three blocks):
+   the best candidate, r6, has benefit 34 and cost 38; in the `float` loop
+   f1 has benefit 25 and cost 41. The cost comes from `sync_weight`: each
+   `OPCODE_CONTEXT_BARRIER` inside the loop counts 8, and the frontend
+   emits one before every instruction of type `kSync`, which includes the
+   conditional branches (`ppc_hir_builder.cc`, "Synchronize the PPC context
+   as required"). My reading: after context promotion a register is loaded
+   and stored about once a block, so a loop's benefit is about 16 a block
+   and its cost about 16 a branch plus the exits; blocks and branches come
+   in equal numbers, so the net is at best about 16 - 1 - the exit weight,
+   and it only clears the threshold of 8 when the function's return is
+   outside the loop's block range and the register is touched in every
+   block. That would explain 17 functions of 24,576 in Fable II. Whether a
+   barrier really forces the pinned registers out and back (or only needs
+   them written) is the question that decides how much can be pinned.
+4. **`a64_lean_extern_thunk` does not change a call through an import
+   thunk.** (`cpu/backend/a64/a64_emitter.cc`, `claude/translator-wide`.)
+   The `host_calls` loop calls a host function through a thunk written as
+   `cpu/xex_module.cc` writes a title's imports (`sc 2; blr`, `SetupExtern`).
+   It runs 19.33 host instructions per guest instruction with the setting
+   off and on (the count is exact); the lean thunk would save dozens of
+   instructions a call. My reading: the condition at the call site
+   (`instr && !instr->next`, "the last instruction of its block") is not
+   met for the `sc 2` of an import thunk. Worth one look at what follows
+   the `CALL_EXTERN` in that block.
+5. **The clock.** `clock_gettime` costs 31 ns and the counter register
+   13 ns here, against 15 ns for an uncontended mutex and 8 ns for a fiber
+   switch. `GuestScheduler::NowMicros` is `steady_clock::now()` (32 ns).
+   On this CPU a clock read is the dearest primitive in the yield path.
+6. **Outline atomics cost the same as inline LSE here** (8.38 against
+   8.09 ns for the compare-and-swap, 4.39 against 4.18 for the add): the
+   helper's call and its check are nearly free on this CPU. Building the
+   core for `armv8.1-a` would not buy much per operation; the profile's
+   5% and 3% are counts.
+
+## What was and was not measured
+
+Measured, on a GitHub ARM64 runner (Neoverse N2), with real numbers in a
+green run: the host primitives named in the brief (thread-local read by
+dynamic TLS descriptor, static descriptor, initial-exec, pthread key, fixed
+slot, held register; `clock_gettime`, `steady_clock`, the counter register;
+uncontended mutexes; the outline atomics against inline LSE and LL/SC; the
+fcontext switch and `Fiber::SwitchTo`); the scheduler's real paths from the
+project's own sources (an empty `NtYieldExecution`, a zero delay, a yield
+with another fiber ready, a wait and wake on one and on two dispatch
+threads) with `guest_scheduler_lean_yield`,
+`guest_scheduler_park_yield_spinners`, `host_thread_state_slot` and
+`guest_scheduler_skew_bound_us` off and on; six synthetic PowerPC loops
+through the translator with `pin_guest_registers`,
+`simplification_skip_unchanged_blocks`, `a64_thunk_fpcr_compare` and
+`a64_lean_extern_thunk` off and on, in host instructions and nanoseconds per
+guest instruction; and `claude/guest-waits` against
+`claude/integration-1113`.
+
+Not measured: anything on the phone or on a phone's CPU; frame rate;
+anything under heat; the scheduler under Android's linker (the core
+benchmarks run on glibc, with the stand-ins listed under "What differs from
+the app"); `kernel_state.cc` (stood in for); a title's real mix of calls;
+register pinning's effect (it never applied to the loops); the GPU, audio,
+memory watches and file access; `claude/translator-wide`,
+`claude/shader-first-run`, `claude/defaults-config` and
+`claude/memory-watches` (the first did not exist when the rig last ran; the
+rig has no benchmark for what the others change). No speed-up on the phone
+is claimed for anything.
+
+## Files
+
+- `.github/workflows/boosted-bench.yml`: the workflow (new; the two
+  existing workflow files are untouched).
+- `boosted/bench/CMakeLists.txt`, `common/` (timing, result lines, the
+  instruction counter), `prim/` (primitives, `build-plain.sh` for the
+  container), `core/` (the core library's build, `kernel_shim.cc`,
+  `bench_env.*`, `ppc_asm.h`, `bench_sched.cc`, `bench_xlat.cc`,
+  `core_main.cc`, `launcher.c`, `compat/`, `run-core.sh` with the settings
+  matrix), `tools/` (`report.py`, `prepare-tree.sh`, `ci-build.sh`,
+  `submodules.txt`), `run.sh`, `branches.txt`.
+- No upstream file is changed. The app's build does not see
+  `boosted/bench`.

@@ -318,7 +318,11 @@ Program BuildCalls(Env& env) {
 Program BuildCopy(Env& env) {
   constexpr uint32_t kWords = 64, kBytes = 32;
   uint32_t src = env.AllocData(kWords * 4 + kBytes + 16, 0x1000);
-  uint32_t dst = env.AllocData(kWords * 4 + kBytes + 16, 0x1000);
+  // Not at the same offset within a page as the source: a store and a load
+  // 4 KiB apart look like the same address to the CPU's first check, and the
+  // loop then runs at one of two speeds depending on where the heap put
+  // the buffers.
+  uint32_t dst = env.AllocData(0x1000 + kWords * 4 + kBytes + 16, 0x1000) + 0x7C0;
   Asm a(env.NextCodeAddress());
   Asm::Label outer, words, bytes;
   a.Bind(outer);
