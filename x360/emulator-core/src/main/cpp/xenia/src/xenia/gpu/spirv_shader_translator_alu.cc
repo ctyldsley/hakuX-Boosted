@@ -679,6 +679,14 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
             spv::OpFNegate, type_float_, operand[0]);
         operand_neg[2] = builder_->createNoContractionUnaryOp(
             spv::OpFNegate, type_float_, operand[2]);
+      } else if (used_result_components & 0b0001) {
+        // hakuX-Boosted: the Y major axis case below negates Z for the first
+        // result component too, and had no id for it when the second was not
+        // written (a cube whose result is written to .x, .xz or .xw only: an
+        // invalid module). Found by gpu/first_run_rig. Nothing changes for an
+        // instruction that writes the second component.
+        operand_neg[2] = builder_->createNoContractionUnaryOp(
+            spv::OpFNegate, type_float_, operand[2]);
       }
 
       spv::Id ma_z_result[4] = {}, ma_yx_result[4] = {};
@@ -740,6 +748,11 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
               ma_y_result[0] =
                   builder_->createTriOp(spv::OpSelect, type_float_, y_is_neg,
                                         operand_neg[2], operand[2]);
+            }
+            // hakuX-Boosted: the face was only made when the first component
+            // was written as well (as above: no id for a cube written to .w
+            // without .x). The order of the two selects is as it was.
+            if (used_result_components & 0b1000) {
               // id = y < 0.0 ? 3.0 : 2.0
               ma_y_result[3] =
                   builder_->createTriOp(spv::OpSelect, type_float_, y_is_neg,

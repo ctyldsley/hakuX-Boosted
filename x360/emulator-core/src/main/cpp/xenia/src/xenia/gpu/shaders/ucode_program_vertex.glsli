@@ -1,0 +1,383 @@
+// hakuX-Boosted: the vertex side of the guest shader interpreter, version 2
+// (ucode_program.glsli has the description). Included by one small file for
+// each kind of host vertex shader, which defines XE_UP_HOST first:
+//
+//   XE_UP_HOST_VERTEX        a vertex shader as it is
+//   XE_UP_HOST_POINT_STRIP   point sprites drawn as two-triangle strips
+//                            (Shader::HostVertexShaderType::
+//                            kPointListAsTriangleStrip, what
+//                            vulkan_avoid_geometry_shaders selects)
+//   XE_UP_HOST_TRIANGLE_CP, _TRIANGLE_PATCH, _QUAD_CP, _QUAD_PATCH
+//                            tessellation evaluation shaders, for the guest
+//                            vertex shader of a tessellated draw
+//
+// It writes all sixteen interpolators at locations 0 to 15, whatever the
+// guest shader writes (the rest are 0), so that one module serves every
+// guest vertex shader and the pixel side (ucode_program_pixel.glsli, the
+// stand-in pixel shaders) can read any of them. What it does around the guest
+// code is SpirvShaderTranslator's StartVertexOrTessEvalShaderInMain and
+// CompleteVertexOrTessEvalShaderInMain, with these differences: no user clip
+// planes, and a vertex kill with the "and" rule kills nothing.
+
+#define XE_UP_HOST_VERTEX 0
+#define XE_UP_HOST_POINT_STRIP 1
+#define XE_UP_HOST_TRIANGLE_CP 2
+#define XE_UP_HOST_TRIANGLE_PATCH 3
+#define XE_UP_HOST_QUAD_CP 4
+#define XE_UP_HOST_QUAD_PATCH 5
+
+#define XE_UP_FLOAT_BINDING 1
+#include "ucode_program.glsli"
+
+// The system constants as raw words (SpirvShaderTranslator::SystemConstants,
+// std140): only what is read here is named below.
+layout(std140, set = 1, binding = 0) uniform xe_up_system_constants_block {
+  uvec4 xe_up_sys[35];
+};
+layout(std140, set = 1, binding = 4) uniform xe_up_fetch_constants_block {
+  uvec4 xe_up_fetch_constants[48];
+};
+// Guest memory, in guest byte order: the vertex buffers and, for point
+// sprites, the index buffer.
+layout(std430, set = 0, binding = 0) readonly buffer xe_up_shared_memory_block {
+  uint xe_up_memory[];
+};
+
+#define XE_UP_SYS_FLAG_PRIMITIVE_INDEX_LOAD 0x2u
+#define XE_UP_SYS_FLAG_PRIMITIVE_INDEX_LOAD_32BIT 0x4u
+#define XE_UP_SYS_FLAG_XY_DIVIDED_BY_W 0x8u
+#define XE_UP_SYS_FLAG_Z_DIVIDED_BY_W 0x10u
+#define XE_UP_SYS_FLAG_W_NOT_RECIPROCAL 0x20u
+
+// Bits of the vertex stage's per-draw word (xe_up_head[0].z).
+// A vertex is killed by setting W to NaN (the "or" rule, PA_CL_CLIP_CNTL).
+#define XE_UP_VERTEX_KILL_OR 0x1u
+
+layout(location = 0) out vec4 xe_up_out_interpolators[16];
+#if XE_UP_HOST == XE_UP_HOST_POINT_STRIP
+layout(location = 16) out vec2 xe_up_out_point_coordinates;
+#endif
+#if XE_UP_HOST >= XE_UP_HOST_TRIANGLE_CP
+// From the host's tessellation control shader: the control points' indices,
+// or the patch's index in the first, already in host byte order and as floats.
+layout(location = 0) in float xe_up_in_control_point_index[];
+#endif
+
+// What the guest shader exports.
+vec4 xe_up_position;
+vec4 xe_up_interpolators[16];
+// Point size (negative: not written), edge flag, kill flag.
+vec3 xe_up_point_size_edge_flag_kill;
+// Vertex fetch state: the address of the vertex in words, and where its
+// buffer ends.
+int xe_up_vfetch_address;
+int xe_up_vfetch_end;
+
+void XeUpExport(uint export_register, vec4 value, uint write_mask) {
+  bvec4 written = notEqual(uvec4(write_mask) & uvec4(1u, 2u, 4u, 8u), uvec4(0u));
+  if (export_register < 16u) {
+    xe_up_interpolators[export_register] =
+        mix(xe_up_interpolators[export_register], value, written);
+  } else if (export_register == 62u) {
+    xe_up_position = mix(xe_up_position, value, written);
+  } else if (export_register == 63u) {
+    xe_up_point_size_edge_flag_kill =
+        mix(xe_up_point_size_edge_flag_kill, value.xyz, written.xyz);
+    if (written.x) {
+      // Clamped the way the console clamps it, as a signed integer: negative
+      // values and -0 to the minimum, +NaN to the maximum.
+      xe_up_point_size_edge_flag_kill.x = intBitsToFloat(
+          min(int(xe_up_sys[3].w),
+              max(int(xe_up_sys[2].w),
+                  floatBitsToInt(xe_up_point_size_edge_flag_kill.x))));
+    }
+  }
+  // Memory export (32 to 37) is not done by a placeholder.
+}
+
+uint XeUpEndianSwap(uint v, uint endian) {
+  if (endian == 1u) {
+    return ((v & 0x00FF00FFu) << 8) | ((v >> 8) & 0x00FF00FFu);
+  }
+  if (endian == 2u) {
+    return (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24);
+  }
+  if (endian == 3u) {
+    return (v >> 16) | (v << 16);
+  }
+  return v;
+}
+
+// One component of a packed format, before any scaling.
+float XeUpPacked(uint word, int offset, int width, bool is_signed) {
+  return is_signed ? float(bitfieldExtract(int(word), offset, width))
+                   : float(bitfieldExtract(word, offset, width));
+}
+
+void XeUpVertexFetch(uvec4 ins) {
+  bool is_mini = (ins.y & 0x40000000u) != 0u;
+  // The fetch constant of this fetch, or for a mini fetch of the full fetch
+  // before it in the microcode (worked out by the CPU, as the translator
+  // does).
+  uint fetch_constant_index = (ins.w >> 8) & 0xFFu;
+  uint fetch_constant_word_1 =
+      xe_up_fetch_constants[fetch_constant_index >> 1]
+                           [((fetch_constant_index << 1) & 2u) + 1u];
+  if (!is_mini) {
+    uint fetch_constant_word_0 =
+        xe_up_fetch_constants[fetch_constant_index >> 1]
+                             [(fetch_constant_index << 1) & 2u];
+    int address = int(fetch_constant_word_0 >> 2);
+    xe_up_vfetch_end = address + int((fetch_constant_word_1 >> 2) & 0xFFFFFFu);
+    int stride = int(ins.z & 0xFFu);
+    if (stride != 0) {
+      float index =
+          xe_up_r[XeUpRegisterIndex((ins.x >> 5) & 63u, (ins.x & 0x800u) != 0u)]
+                 [ins.x >> 30];
+      if ((ins.y & 0x8000u) != 0u) {
+        index += 0.5;
+      }
+      address += int(floor(index)) * stride;
+    }
+    xe_up_vfetch_address = address;
+  }
+
+  uint format = (ins.y >> 16) & 0x3Fu;
+  bool is_signed = (ins.y & 0x1000u) != 0u;
+  bool is_integer = (ins.y & 0x2000u) != 0u;
+  bool no_zero = (ins.y & 0x4000u) != 0u;
+  uint endian = fetch_constant_word_1 & 3u;
+  int first = xe_up_vfetch_address + bitfieldExtract(int(ins.z), 8, 23);
+  // Formats of more than one word read up to four. A word past the end of
+  // the buffer is 0.
+  uint word_count = 1u;
+  if (format == 26u || format == 32u || format == 34u || format == 37u) {
+    word_count = 2u;
+  } else if (format == 57u) {
+    word_count = 3u;
+  } else if (format == 35u || format == 38u) {
+    word_count = 4u;
+  }
+  uvec4 d = uvec4(0u);
+  for (uint i = 0u; i < word_count; ++i) {
+    int word_address = first + int(i);
+    if (uint(word_address) < uint(xe_up_vfetch_end)) {
+      d[i] = XeUpEndianSwap(xe_up_memory[word_address], endian);
+    }
+  }
+
+  vec4 v = vec4(0.0);
+  bool packed = false;
+  vec4 packed_maximum = vec4(1.0);
+  if (format == 6u) {  // 8_8_8_8
+    v = vec4(XeUpPacked(d.x, 0, 8, is_signed), XeUpPacked(d.x, 8, 8, is_signed),
+             XeUpPacked(d.x, 16, 8, is_signed),
+             XeUpPacked(d.x, 24, 8, is_signed));
+    packed_maximum = is_signed ? vec4(127.0) : vec4(255.0);
+    packed = true;
+  } else if (format == 7u) {  // 2_10_10_10
+    v = vec4(XeUpPacked(d.x, 0, 10, is_signed),
+             XeUpPacked(d.x, 10, 10, is_signed),
+             XeUpPacked(d.x, 20, 10, is_signed),
+             XeUpPacked(d.x, 30, 2, is_signed));
+    packed_maximum = is_signed ? vec4(511.0, 511.0, 511.0, 1.0)
+                               : vec4(1023.0, 1023.0, 1023.0, 3.0);
+    packed = true;
+  } else if (format == 16u) {  // 10_11_11
+    v.xyz = vec3(XeUpPacked(d.x, 0, 11, is_signed),
+                 XeUpPacked(d.x, 11, 11, is_signed),
+                 XeUpPacked(d.x, 22, 10, is_signed));
+    packed_maximum = is_signed ? vec4(1023.0, 1023.0, 511.0, 1.0)
+                               : vec4(2047.0, 2047.0, 1023.0, 1.0);
+    packed = true;
+  } else if (format == 17u) {  // 11_11_10
+    v.xyz = vec3(XeUpPacked(d.x, 0, 10, is_signed),
+                 XeUpPacked(d.x, 10, 11, is_signed),
+                 XeUpPacked(d.x, 21, 11, is_signed));
+    packed_maximum = is_signed ? vec4(511.0, 1023.0, 1023.0, 1.0)
+                               : vec4(1023.0, 2047.0, 2047.0, 1.0);
+    packed = true;
+  } else if (format == 25u) {  // 16_16
+    v.xy = vec2(XeUpPacked(d.x, 0, 16, is_signed),
+                XeUpPacked(d.x, 16, 16, is_signed));
+    packed_maximum = is_signed ? vec4(32767.0) : vec4(65535.0);
+    packed = true;
+  } else if (format == 26u) {  // 16_16_16_16
+    v = vec4(XeUpPacked(d.x, 0, 16, is_signed),
+             XeUpPacked(d.x, 16, 16, is_signed),
+             XeUpPacked(d.y, 0, 16, is_signed),
+             XeUpPacked(d.y, 16, 16, is_signed));
+    packed_maximum = is_signed ? vec4(32767.0) : vec4(65535.0);
+    packed = true;
+  } else if (format == 31u) {  // 16_16_FLOAT
+    v.xy = unpackHalf2x16(d.x);
+  } else if (format == 32u) {  // 16_16_16_16_FLOAT
+    v = vec4(unpackHalf2x16(d.x), unpackHalf2x16(d.y));
+  } else if (format >= 33u && format <= 35u) {  // 32, 32_32, 32_32_32_32
+    vec4 mask = format == 33u ? vec4(1.0, 0.0, 0.0, 0.0)
+                              : (format == 34u ? vec4(1.0, 1.0, 0.0, 0.0)
+                                               : vec4(1.0));
+    if (is_signed) {
+      v = vec4(ivec4(d));
+      if (!is_integer) {
+        v = no_zero ? v * (1.0 / 2147483647.5) + (0.5 / 2147483647.5)
+                    : v * (1.0 / 2147483647.0);
+      }
+    } else {
+      v = vec4(d);
+      if (!is_integer) {
+        v *= 1.0 / 4294967295.0;
+      }
+    }
+    v *= mask;
+  } else if (format == 36u) {  // 32_FLOAT
+    v.x = uintBitsToFloat(d.x);
+  } else if (format == 37u) {  // 32_32_FLOAT
+    v.xy = uintBitsToFloat(d.xy);
+  } else if (format == 38u) {  // 32_32_32_32_FLOAT
+    v = uintBitsToFloat(d);
+  } else if (format == 57u) {  // 32_32_32_FLOAT
+    v.xyz = uintBitsToFloat(d.xyz);
+  }
+  if (packed && !is_integer) {
+    // A component the format does not have stays 0: its raw value is 0 and
+    // the two signed adjustments below are undone for it.
+    vec4 present = vec4(1.0);
+    if (format == 16u || format == 17u) {
+      present = vec4(1.0, 1.0, 1.0, 0.0);
+    } else if (format == 25u) {
+      present = vec4(1.0, 1.0, 0.0, 0.0);
+    }
+    if (is_signed) {
+      if (no_zero) {
+        vec4 scale = 1.0 / (packed_maximum + 0.5);
+        v = v * scale + 0.5 * scale;
+      } else {
+        v = max(v * (1.0 / packed_maximum), vec4(-1.0));
+      }
+    } else {
+      v *= 1.0 / packed_maximum;
+    }
+    v *= present;
+  }
+  int exp_adjust = bitfieldExtract(int(ins.y), 24, 6);
+  if (exp_adjust != 0) {
+    v *= exp2(float(exp_adjust));
+  }
+  XeUpStoreFetchResult(ins, v);
+}
+
+void XeUpFetch(uvec4 ins) {
+  uint kind = ins.w & XE_UP_FETCH_KIND_MASK;
+  if (kind == XE_UP_FETCH_KIND_VERTEX) {
+    XeUpVertexFetch(ins);
+  } else if (kind == XE_UP_FETCH_KIND_TEXTURE ||
+             kind == XE_UP_FETCH_KIND_ZERO) {
+    // A texture fetched by a vertex shader is not sampled here: its result is
+    // 0, as in gpu/shader_interpreter.cc. The draw's shape may depend on it
+    // (VulkanCommandProcessor only lets such a shader get here when
+    // vulkan_placeholder_interpreter_vertex_textures says so).
+    XeUpStoreFetchResult(ins, vec4(0.0));
+  }
+}
+
+// A vertex index read from the guest's index buffer (16 or 32 bits wide, in
+// guest byte order), for the primitive types that are expanded here.
+uint XeUpLoadIndex(uint index) {
+  uint flags = xe_up_sys[0].x;
+  bool is_32bit = (flags & XE_UP_SYS_FLAG_PRIMITIVE_INDEX_LOAD_32BIT) != 0u;
+  uint address = xe_up_sys[0].y + (index << (is_32bit ? 2u : 1u));
+  uint word = xe_up_memory[address >> 2];
+  if (!is_32bit) {
+    word = bitfieldExtract(word, int((address & 2u) << 3), 16);
+  }
+  return XeUpEndianSwap(word, xe_up_sys[0].w);
+}
+
+// Runs the guest vertex shader for the invocation whose first register is
+// given.
+void XeUpRunVertex(vec4 r0, vec4 r1) {
+  uint program = xe_up_head[0].x;
+  XeUpReset(program);
+  xe_up_r[0] = r0;
+  xe_up_r[1] = r1;
+  xe_up_position = vec4(0.0, 0.0, 0.0, 1.0);
+  for (uint i = 0u; i < 16u; ++i) {
+    xe_up_interpolators[i] = vec4(0.0);
+  }
+  xe_up_point_size_edge_flag_kill = vec3(-1.0, 0.0, 0.0);
+  xe_up_vfetch_address = 0;
+  xe_up_vfetch_end = 0;
+  XeUpRun(program);
+}
+
+void main() {
+#if XE_UP_HOST == XE_UP_HOST_VERTEX
+  int vertex_index =
+      int(XeUpEndianSwap(uint(gl_VertexIndex), xe_up_sys[0].w)) +
+      int(xe_up_sys[1].x);
+  XeUpRunVertex(vec4(float(vertex_index), 0.0, 0.0, 0.0), vec4(0.0));
+#elif XE_UP_HOST == XE_UP_HOST_POINT_STRIP
+  // Four host vertices for each point; the point's own index is generated or
+  // comes from the guest's index buffer.
+  uint point_index = uint(gl_VertexIndex) >> 2;
+  if (point_index >= xe_up_sys[0].z) {
+    point_index = 0u;
+  } else if ((xe_up_sys[0].x & XE_UP_SYS_FLAG_PRIMITIVE_INDEX_LOAD) != 0u) {
+    point_index = XeUpLoadIndex(point_index);
+  }
+  XeUpRunVertex(
+      vec4(float(int(point_index) + int(xe_up_sys[1].x)), 0.0, 0.0, 0.0),
+      vec4(0.0));
+#elif XE_UP_HOST == XE_UP_HOST_TRIANGLE_CP
+  XeUpRunVertex(vec4(gl_TessCoord.zyx, 1.0),
+                vec4(xe_up_in_control_point_index[0],
+                     xe_up_in_control_point_index[1],
+                     xe_up_in_control_point_index[2], 0.0));
+#elif XE_UP_HOST == XE_UP_HOST_TRIANGLE_PATCH
+  XeUpRunVertex(vec4(gl_TessCoord.zyx, 1.0),
+                vec4(xe_up_in_control_point_index[0], 0.0, 0.0, 0.0));
+#elif XE_UP_HOST == XE_UP_HOST_QUAD_CP
+  XeUpRunVertex(vec4(gl_TessCoord.xy, xe_up_in_control_point_index[0], 0.0),
+                vec4(xe_up_in_control_point_index[1],
+                     xe_up_in_control_point_index[2],
+                     xe_up_in_control_point_index[3], 0.0));
+#else
+  XeUpRunVertex(vec4(xe_up_in_control_point_index[0], gl_TessCoord.xy, 1.0),
+                vec4(0.0));
+#endif
+
+  // The guest's position to the host's clip space.
+  uint flags = xe_up_sys[0].x;
+  float w = xe_up_position.w;
+  if ((flags & XE_UP_SYS_FLAG_W_NOT_RECIPROCAL) == 0u) {
+    w = 1.0 / w;
+  }
+  vec3 xyz = xe_up_position.xyz;
+  if ((flags & XE_UP_SYS_FLAG_XY_DIVIDED_BY_W) != 0u) {
+    xyz.xy *= w;
+  }
+  if ((flags & XE_UP_SYS_FLAG_Z_DIVIDED_BY_W) != 0u) {
+    xyz.z *= w;
+  }
+  xyz = xyz * uintBitsToFloat(xe_up_sys[2].xyz) +
+        uintBitsToFloat(xe_up_sys[3].xyz) * w;
+  // The kill flag: any of bits 0 to 30 set.
+  if ((xe_up_head[0].z & XE_UP_VERTEX_KILL_OR) != 0u &&
+      (floatBitsToUint(xe_up_point_size_edge_flag_kill.z) & 0x7FFFFFFFu) != 0u) {
+    w = uintBitsToFloat(0x7FC00000u);
+  }
+#if XE_UP_HOST == XE_UP_HOST_POINT_STRIP
+  // Top left, bottom left, top right, bottom right.
+  bvec2 positive = notEqual(uvec2(gl_VertexIndex) & uvec2(2u, 1u), uvec2(0u));
+  vec2 diameter = uintBitsToFloat(xe_up_sys[4].xy);
+  if (xe_up_point_size_edge_flag_kill.x >= 0.0) {
+    diameter = vec2(xe_up_point_size_edge_flag_kill.x);
+  }
+  vec2 radius = diameter * uintBitsToFloat(xe_up_sys[4].zw) * w;
+  xyz.xy += mix(-radius, radius, positive);
+  xe_up_out_point_coordinates = vec2(positive);
+#endif
+  gl_Position = vec4(xyz, w);
+  xe_up_out_interpolators = xe_up_interpolators;
+}

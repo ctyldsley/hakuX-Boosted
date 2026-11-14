@@ -1,0 +1,662 @@
+// hakuX-Boosted: the guest shader interpreter, version 2 (the setting
+// vulkan_placeholder_interpreter = 2, boosted/notes/shader-first-run.md).
+//
+// One body of GLSL that runs any Xenos shader's microcode from a buffer, so
+// that a draw whose real pipeline is still compiling can be drawn at once by
+// a pipeline that was compiled long before. The vertex, tessellation
+// evaluation and pixel stage shaders (ucode_program_vertex.glsli,
+// ucode_program_pixel.glsli) include this file; each kind of them is one
+// module whatever the guest shaders are, which is what lets the driver's cache
+// answer for every placeholder.
+//
+// What it follows, instruction for instruction, is gpu/shader_interpreter.cc
+// (the emulator's own reference interpreter) for arithmetic and
+// gpu/spirv_shader_translator.cc for control flow, loops and addressing, so
+// that it draws what the translated shader will.
+//
+// The microcode is not read from guest memory (as ucode_interpreter.vs.glsl
+// does): VulkanCommandProcessor uploads a prepared copy (gpu/ucode_program.cc,
+// "the program") behind the bool and loop constants. So a shader loaded inline
+// (IM_LOAD_IMMEDIATE) is as good as any other, nothing depends on the guest
+// leaving its copy alone, and nothing is byte-swapped here.
+//
+// The program of one shader, in 16-byte elements (uvec4):
+//   [0]                    x: number of control flow instructions
+//                          y: element of instruction 0 of the microcode,
+//                             relative to this element (the instructions an
+//                             exec names are addressed from the microcode's
+//                             start, where the control flow pairs are)
+//                          z: flags (XE_UP_PROGRAM_*)
+//                          w: number of registers to clear
+//   [1 .. x]               one control flow instruction each: x, y its two
+//                          words as ucode::ControlFlowInstruction has them
+//   then                   one instruction each: x, y, z its three words, w
+//                          what the CPU worked out about it once
+//                          (XE_UP_ALU_* / XE_UP_FETCH_*)
+//
+// Before including this file define XE_UP_FLOAT_BINDING: 1 for the vertex
+// stages (the vertex float constants), 2 for the pixel stage.
+
+#ifndef XE_UCODE_PROGRAM_GLSLI_
+#define XE_UCODE_PROGRAM_GLSLI_
+
+// Sizes. The block is 16,384 bytes, the smallest maxUniformBufferRange a
+// Vulkan device may have. Keep in step with gpu/ucode_program.h.
+#define XE_UP_HEAD_COUNT 6
+#define XE_UP_CODE_COUNT 1008
+// Control flow instructions executed at most, loops included, so that broken
+// microcode cannot hang the GPU.
+#define XE_UP_MAX_STEPS 4096u
+
+// Bits of an ALU instruction's fourth word.
+#define XE_UP_ALU_VECTOR_MASK_SHIFT 0u
+#define XE_UP_ALU_SCALAR_MASK_SHIFT 4u
+#define XE_UP_ALU_CONST_0_MASK_SHIFT 8u
+#define XE_UP_ALU_CONST_1_MASK_SHIFT 12u
+#define XE_UP_ALU_VECTOR_RUNS 0x10000u
+#define XE_UP_ALU_SCALAR_OPERANDS_SHIFT 17u
+#define XE_UP_ALU_ADDRESSED_1 0x100000u
+#define XE_UP_ALU_ADDRESSED_2 0x200000u
+#define XE_UP_ALU_ADDRESSED_3 0x400000u
+#define XE_UP_ALU_VECTOR_OPERANDS_SHIFT 24u
+// Bits of a fetch instruction's fourth word.
+#define XE_UP_FETCH_KIND_MASK 0x7u
+#define XE_UP_FETCH_KIND_VERTEX 0u
+#define XE_UP_FETCH_KIND_TEXTURE 1u
+#define XE_UP_FETCH_KIND_SET_LOD 2u
+#define XE_UP_FETCH_KIND_SET_GRADIENTS_H 3u
+#define XE_UP_FETCH_KIND_SET_GRADIENTS_V 4u
+#define XE_UP_FETCH_KIND_ZERO 5u
+
+layout(std140, set = 1, binding = XE_UP_FLOAT_BINDING) uniform
+    xe_up_float_constants_block {
+  vec4 xe_up_float[256];
+};
+layout(std140, set = 1, binding = 3) uniform xe_up_bool_loop_program_block {
+  uvec4 xe_up_bool[2];
+  uvec4 xe_up_loop[8];
+  // [0] x: element of the vertex shader's program in xe_up_code, y: of the
+  //     pixel shader's, z and w: per-draw words of the vertex and of the pixel
+  //     stage. [1] to [5]: the pixel stage's (ucode_program_pixel.glsli).
+  uvec4 xe_up_head[XE_UP_HEAD_COUNT];
+  uvec4 xe_up_code[XE_UP_CODE_COUNT];
+};
+
+// The guest's state while a shader runs.
+vec4 xe_up_r[64];
+int xe_up_a0;
+float xe_up_ps;
+bool xe_up_p0;
+// Loop stacks, the innermost loop in x: aL and the iterations left.
+ivec4 xe_up_al;
+uvec4 xe_up_lc;
+uint xe_up_return[4];
+uint xe_up_return_depth;
+// Set by the kill instructions; only the pixel stage reads it.
+bool xe_up_kill;
+
+// The stage's side, defined by the file that includes this one.
+// An export: the microcode's destination number, the value, and which of its
+// components are written.
+void XeUpExport(uint export_register, vec4 value, uint write_mask);
+// A fetch instruction that is not predicated away.
+void XeUpFetch(uvec4 instruction);
+
+bool XeUpBoolConstant(uint index) {
+  return (xe_up_bool[index >> 7][(index >> 5) & 3u] & (1u << (index & 31u))) !=
+         0u;
+}
+
+uint XeUpRegisterIndex(uint index, bool relative) {
+  return relative ? uint(int(index) + xe_up_al.x) & 63u : index & 63u;
+}
+
+// The value of a relative component swizzle (ucode::AluInstruction).
+vec4 XeUpSwizzle(vec4 v, uint swizzle) {
+  return vec4(v[swizzle & 3u], v[((swizzle >> 2) + 1u) & 3u],
+              v[((swizzle >> 4) + 2u) & 3u], v[((swizzle >> 6) + 3u) & 3u]);
+}
+
+void XeUpWriteRegister(uint index, vec4 value, uint mask) {
+  if (mask == 15u) {
+    xe_up_r[index] = value;
+    return;
+  }
+  xe_up_r[index] =
+      mix(xe_up_r[index], value,
+          notEqual(uvec4(mask) & uvec4(1u, 2u, 4u, 8u), uvec4(0u)));
+}
+
+// Direct3D 9: zero (or a denormal) times anything is +0.
+vec4 XeUpMultiply(vec4 a, vec4 b) {
+  return mix(a * b, vec4(0.0), equal(min(abs(a), abs(b)), vec4(0.0)));
+}
+float XeUpMultiply(float a, float b) {
+  return (a != 0.0 && b != 0.0) ? a * b : 0.0;
+}
+vec4 XeUpMaximum(vec4 a, vec4 b) { return mix(b, a, greaterThanEqual(a, b)); }
+float XeUpMaximum(float a, float b) { return a >= b ? a : b; }
+float XeUpMaximumNumber(float a, float b) {
+  return isnan(a) ? b : (isnan(b) ? a : max(a, b));
+}
+
+// A float constant operand of the vertex or the pixel half, 0 outside it.
+vec4 XeUpFloatConstant(uint index, bool addressed, bool a0_relative) {
+  int i = int(index);
+  if (addressed) {
+    i += a0_relative ? xe_up_a0 : xe_up_al.x;
+  }
+  return (i >= 0 && i < 256) ? xe_up_float[i] : vec4(0.0);
+}
+
+// A vector operand: the packed source field, the instruction's flags for it.
+vec4 XeUpOperand(uint source, bool is_temp, uint swizzle, bool negate,
+                 bool addressed, bool a0_relative, bool abs_constants) {
+  vec4 v;
+  if (is_temp) {
+    v = xe_up_r[XeUpRegisterIndex(source & 63u, (source & 0x40u) != 0u)];
+    if ((source & 0x80u) != 0u) {
+      v = abs(v);
+    }
+  } else {
+    v = XeUpFloatConstant(source, addressed, a0_relative);
+    if (abs_constants) {
+      v = abs(v);
+    }
+  }
+  v = XeUpSwizzle(v, swizzle);
+  return negate ? -v : v;
+}
+
+// The largest positive float, as the clamped reciprocals return.
+const float kXeUpFloatMax = 3.402823466e+38;
+
+void XeUpAlu(uvec4 ins) {
+  uint info = ins.w;
+  bool abs_constants = (ins.x & 0x80u) != 0u;
+  bool a0_relative = (ins.y & 0x20000000u) != 0u;
+
+  // The vector operation.
+  vec4 vector_result = vec4(0.0);
+  if ((info & XE_UP_ALU_VECTOR_RUNS) != 0u) {
+    uint operand_count = (info >> XE_UP_ALU_VECTOR_OPERANDS_SHIFT) & 3u;
+    vec4 a = XeUpOperand((ins.z >> 16) & 0xFFu, (ins.z & 0x80000000u) != 0u,
+                         (ins.y >> 16) & 0xFFu, (ins.y & 0x4000000u) != 0u,
+                         (info & XE_UP_ALU_ADDRESSED_1) != 0u, a0_relative,
+                         abs_constants);
+    vec4 b = vec4(0.0);
+    vec4 c = vec4(0.0);
+    if (operand_count >= 2u) {
+      b = XeUpOperand((ins.z >> 8) & 0xFFu, (ins.z & 0x40000000u) != 0u,
+                      (ins.y >> 8) & 0xFFu, (ins.y & 0x2000000u) != 0u,
+                      (info & XE_UP_ALU_ADDRESSED_2) != 0u, a0_relative,
+                      abs_constants);
+      if (operand_count >= 3u) {
+        c = XeUpOperand(ins.z & 0xFFu, (ins.z & 0x20000000u) != 0u,
+                        ins.y & 0xFFu, (ins.y & 0x1000000u) != 0u,
+                        (info & XE_UP_ALU_ADDRESSED_3) != 0u, a0_relative,
+                        abs_constants);
+      }
+    }
+    uint op = (ins.z >> 24) & 31u;
+    // A tree of comparisons, not a switch: a switch is a ladder of up to
+    // thirty compares on the drivers this runs on.
+    if (op < 8u) {
+      if (op < 4u) {
+        if (op < 2u) {
+          vector_result = op == 0u ? a + b : XeUpMultiply(a, b);
+        } else {
+          vector_result =
+              op == 2u ? XeUpMaximum(a, b) : mix(b, a, lessThan(a, b));
+        }
+      } else if (op < 6u) {
+        vector_result = op == 4u ? vec4(equal(a, b)) : vec4(greaterThan(a, b));
+      } else {
+        vector_result =
+            op == 6u ? vec4(greaterThanEqual(a, b)) : vec4(notEqual(a, b));
+      }
+    } else if (op < 16u) {
+      if (op < 12u) {
+        if (op < 10u) {
+          vector_result = op == 8u ? a - floor(a) : trunc(a);
+        } else {
+          vector_result = op == 10u ? floor(a) : XeUpMultiply(a, b) + c;
+        }
+      } else if (op < 14u) {
+        vector_result = op == 12u ? mix(c, b, equal(a, vec4(0.0)))
+                                  : mix(c, b, greaterThanEqual(a, vec4(0.0)));
+      } else if (op == 14u) {
+        vector_result = mix(c, b, greaterThan(a, vec4(0.0)));
+      } else {
+        vec4 p = XeUpMultiply(a, b);
+        vector_result = vec4(((p.x + p.y) + p.z) + p.w);
+      }
+    } else if (op < 20u) {
+      if (op == 16u) {
+        vec4 p = XeUpMultiply(a, b);
+        vector_result = vec4((p.x + p.y) + p.z);
+      } else if (op == 17u) {
+        vec4 p = XeUpMultiply(a, b);
+        vector_result = vec4((p.x + p.y) + c.x);
+      } else if (op == 18u) {
+        // cube: the operand is .zzxy of the direction. T, S, twice the major
+        // axis, the face.
+        float x = a.z, y = a.w, z = a.x;
+        vec3 m = abs(vec3(x, y, z));
+        if (m.z >= m.x && m.z >= m.y) {
+          vector_result = vec4(-y, z < 0.0 ? -x : x, z, z < 0.0 ? 5.0 : 4.0);
+        } else if (m.y >= m.x) {
+          vector_result = vec4(y < 0.0 ? -z : z, x, y, y < 0.0 ? 3.0 : 2.0);
+        } else {
+          vector_result = vec4(-y, x < 0.0 ? z : -z, x, x < 0.0 ? 1.0 : 0.0);
+        }
+        vector_result.z *= 2.0;
+      } else {
+        // max4. A NaN component is passed over, as the translated shader's
+        // NMax does.
+        vector_result = vec4(XeUpMaximumNumber(XeUpMaximumNumber(a.x, a.y),
+                                               XeUpMaximumNumber(a.z, a.w)));
+      }
+    } else if (op < 24u) {
+      // setp_eq_push, setp_ne_push, setp_gt_push, setp_ge_push.
+      bool w_test, x_test;
+      if (op == 20u) {
+        w_test = b.w == 0.0;
+        x_test = b.x == 0.0;
+      } else if (op == 21u) {
+        w_test = b.w != 0.0;
+        x_test = b.x != 0.0;
+      } else if (op == 22u) {
+        w_test = b.w > 0.0;
+        x_test = b.x > 0.0;
+      } else {
+        w_test = b.w >= 0.0;
+        x_test = b.x >= 0.0;
+      }
+      xe_up_p0 = a.w == 0.0 && w_test;
+      vector_result = vec4((a.x == 0.0 && x_test) ? 0.0 : a.x + 1.0);
+    } else if (op < 28u) {
+      // kill_eq, kill_gt, kill_ge, kill_ne.
+      bool killed;
+      if (op == 24u) {
+        killed = any(equal(a, b));
+      } else if (op == 25u) {
+        killed = any(greaterThan(a, b));
+      } else if (op == 26u) {
+        killed = any(greaterThanEqual(a, b));
+      } else {
+        killed = any(notEqual(a, b));
+      }
+      xe_up_kill = xe_up_kill || killed;
+      vector_result = vec4(float(killed));
+    } else if (op == 28u) {
+      // dst.
+      vector_result = vec4(1.0, XeUpMultiply(a.y, b.y), a.z, b.w);
+    } else if (op == 29u) {
+      // maxa.
+      xe_up_a0 = int(clamp(floor(a.w + 0.5), -256.0, 255.0));
+      vector_result = XeUpMaximum(a, b);
+    }
+    if ((ins.x & 0x1000000u) != 0u) {
+      vector_result = clamp(vector_result, 0.0, 1.0);
+    }
+  }
+
+  // The scalar operation. Every one but retain_prev sets the previous scalar,
+  // so it runs whether or not its result is written anywhere.
+  uint scalar_op = ins.x >> 26;
+  if (scalar_op != 50u) {
+    uint scalar_operand_count = (info >> XE_UP_ALU_SCALAR_OPERANDS_SHIFT) & 3u;
+    float a = 0.0, b = 0.0;
+    if (scalar_operand_count != 0u) {
+      uint swizzle = ins.y & 0xFFu;
+      // `a` is the W position of the swizzle, `b` its X position.
+      uint a_component = ((swizzle >> 6) + 3u) & 3u;
+      uint b_component = swizzle & 3u;
+      bool negate = (ins.y & 0x1000000u) != 0u;
+      if (scalar_operand_count == 1u) {
+        uint source = ins.z & 0xFFu;
+        vec4 v;
+        bool absolute;
+        if ((ins.z & 0x20000000u) != 0u) {
+          v = xe_up_r[XeUpRegisterIndex(source & 63u, (source & 0x40u) != 0u)];
+          absolute = (source & 0x80u) != 0u;
+        } else {
+          v = XeUpFloatConstant(source, (info & XE_UP_ALU_ADDRESSED_3) != 0u,
+                                a0_relative);
+          absolute = abs_constants;
+        }
+        a = v[a_component];
+        b = v[b_component];
+        if (absolute) {
+          a = abs(a);
+          b = abs(b);
+        }
+      } else {
+        // mulsc, addsc, subsc: a constant's W position and a register's X.
+        a = XeUpFloatConstant(ins.z & 0xFFu,
+                              (info & XE_UP_ALU_ADDRESSED_3) != 0u,
+                              a0_relative)[a_component];
+        uint temp = (scalar_op & 1u) | ((ins.z >> 28) & 2u) | (swizzle & 0x3Cu);
+        b = xe_up_r[temp & 63u][b_component];
+        if (abs_constants) {
+          a = abs(a);
+          b = abs(b);
+        }
+      }
+      if (negate) {
+        a = -a;
+        b = -b;
+      }
+    }
+    float ps = xe_up_ps;
+    if (scalar_op < 16u) {
+      if (scalar_op < 8u) {
+        if (scalar_op < 4u) {
+          if (scalar_op < 2u) {
+            ps = scalar_op == 0u ? a + b : a + ps;
+          } else {
+            ps = scalar_op == 2u ? XeUpMultiply(a, b) : XeUpMultiply(a, ps);
+          }
+        } else if (scalar_op < 6u) {
+          if (scalar_op == 4u) {
+            // muls_prev2.
+            ps = (ps == -kXeUpFloatMax || isinf(ps) || isnan(ps) || isinf(b) ||
+                  isnan(b) || b <= 0.0)
+                     ? -kXeUpFloatMax
+                     : XeUpMultiply(a, ps);
+          } else {
+            ps = XeUpMaximum(a, b);
+          }
+        } else {
+          ps = scalar_op == 6u ? (a < b ? a : b) : float(a == 0.0);
+        }
+      } else if (scalar_op < 12u) {
+        if (scalar_op < 10u) {
+          ps = scalar_op == 8u ? float(a > 0.0) : float(a >= 0.0);
+        } else {
+          ps = scalar_op == 10u ? float(a != 0.0) : a - floor(a);
+        }
+      } else if (scalar_op < 14u) {
+        ps = scalar_op == 12u ? trunc(a) : floor(a);
+      } else if (scalar_op == 14u) {
+        ps = exp2(a);
+      } else {
+        // logc.
+        ps = log2(a);
+        if (isinf(ps) && ps < 0.0) {
+          ps = -kXeUpFloatMax;
+        }
+      }
+    } else if (scalar_op < 32u) {
+      if (scalar_op < 23u) {
+        if (scalar_op == 16u) {
+          ps = log2(a);
+        } else if (scalar_op < 20u) {
+          // rcpc, rcpf, rcp.
+          ps = 1.0 / a;
+          if (isinf(ps) && scalar_op != 19u) {
+            ps = scalar_op == 17u ? (ps < 0.0 ? -kXeUpFloatMax : kXeUpFloatMax)
+                                  : (ps < 0.0 ? -0.0 : 0.0);
+          }
+        } else {
+          // rsqc, rsqf, rsq.
+          ps = 1.0 / sqrt(a);
+          if (isinf(ps) && scalar_op != 22u) {
+            ps = scalar_op == 20u ? (ps < 0.0 ? -kXeUpFloatMax : kXeUpFloatMax)
+                                  : (ps < 0.0 ? -0.0 : 0.0);
+          }
+        }
+      } else if (scalar_op < 27u) {
+        if (scalar_op == 23u) {
+          // maxas. Not negative, unlike maxa: as the translated shader has
+          // it.
+          xe_up_a0 = int(clamp(floor(a + 0.5), 0.0, 255.0));
+          ps = XeUpMaximum(a, b);
+        } else if (scalar_op == 24u) {
+          // maxasf.
+          xe_up_a0 = int(clamp(floor(a), 0.0, 255.0));
+          ps = XeUpMaximum(a, b);
+        } else {
+          ps = scalar_op == 25u ? a - b : a - ps;
+        }
+      } else if (scalar_op < 31u) {
+        // setp_eq, setp_ne, setp_gt, setp_ge.
+        if (scalar_op == 27u) {
+          xe_up_p0 = a == 0.0;
+        } else if (scalar_op == 28u) {
+          xe_up_p0 = a != 0.0;
+        } else if (scalar_op == 29u) {
+          xe_up_p0 = a > 0.0;
+        } else {
+          xe_up_p0 = a >= 0.0;
+        }
+        ps = float(!xe_up_p0);
+      } else {
+        // setp_inv.
+        xe_up_p0 = a == 1.0;
+        ps = xe_up_p0 ? 0.0 : (a == 0.0 ? 1.0 : a);
+      }
+    } else if (scalar_op < 40u) {
+      if (scalar_op == 32u) {
+        // setp_pop.
+        float counter = a - 1.0;
+        xe_up_p0 = counter <= 0.0;
+        ps = xe_up_p0 ? 0.0 : counter;
+      } else if (scalar_op == 33u) {
+        // setp_clr.
+        xe_up_p0 = false;
+        ps = kXeUpFloatMax;
+      } else if (scalar_op == 34u) {
+        // setp_rstr.
+        xe_up_p0 = a == 0.0;
+        ps = xe_up_p0 ? 0.0 : a;
+      } else {
+        // kills_eq, kills_gt, kills_ge, kills_ne, kills_one.
+        bool killed;
+        if (scalar_op == 35u) {
+          killed = a == 0.0;
+        } else if (scalar_op == 36u) {
+          killed = a > 0.0;
+        } else if (scalar_op == 37u) {
+          killed = a >= 0.0;
+        } else if (scalar_op == 38u) {
+          killed = a != 0.0;
+        } else {
+          killed = a == 1.0;
+        }
+        xe_up_kill = xe_up_kill || killed;
+        ps = float(killed);
+      }
+    } else if (scalar_op == 40u) {
+      ps = sqrt(a);
+    } else if (scalar_op < 48u) {
+      if (scalar_op >= 42u) {
+        // mulsc, addsc, subsc.
+        if (scalar_op < 44u) {
+          ps = XeUpMultiply(a, b);
+        } else {
+          ps = scalar_op < 46u ? a + b : a - b;
+        }
+      }
+    } else if (scalar_op == 48u) {
+      ps = sin(a);
+    } else if (scalar_op == 49u) {
+      ps = cos(a);
+    }
+    xe_up_ps = ps;
+  }
+  float scalar_result =
+      (ins.x & 0x2000000u) != 0u ? clamp(xe_up_ps, 0.0, 1.0) : xe_up_ps;
+
+  // The results.
+  uint vector_mask = (info >> XE_UP_ALU_VECTOR_MASK_SHIFT) & 15u;
+  uint scalar_mask = (info >> XE_UP_ALU_SCALAR_MASK_SHIFT) & 15u;
+  if ((ins.x & 0x8000u) != 0u) {
+    // An export: both halves and the constants 0 and 1 go to one destination.
+    uint const_1_mask = (info >> XE_UP_ALU_CONST_1_MASK_SHIFT) & 15u;
+    uint mask = vector_mask | scalar_mask | const_1_mask |
+                ((info >> XE_UP_ALU_CONST_0_MASK_SHIFT) & 15u);
+    if (mask != 0u) {
+      const uvec4 kBits = uvec4(1u, 2u, 4u, 8u);
+      vec4 value = mix(vec4(0.0), vec4(1.0),
+                       notEqual(uvec4(const_1_mask) & kBits, uvec4(0u)));
+      value = mix(value, vec4(scalar_result),
+                  notEqual(uvec4(scalar_mask) & kBits, uvec4(0u)));
+      value = mix(value, vector_result,
+                  notEqual(uvec4(vector_mask) & kBits, uvec4(0u)));
+      XeUpExport(ins.x & 63u, value, mask);
+    }
+  } else {
+    if (vector_mask != 0u) {
+      XeUpWriteRegister(XeUpRegisterIndex(ins.x & 63u, (ins.x & 0x40u) != 0u),
+                        vector_result, vector_mask);
+    }
+    if (scalar_mask != 0u) {
+      XeUpWriteRegister(
+          XeUpRegisterIndex((ins.x >> 8) & 63u, (ins.x & 0x4000u) != 0u),
+          vec4(scalar_result), scalar_mask);
+    }
+  }
+}
+
+// Stores a fetch's result by its destination swizzle (three bits a
+// component: x, y, z, w, 0, 1, and 7 to keep what is there).
+void XeUpStoreFetchResult(uvec4 ins, vec4 value) {
+  uint index = XeUpRegisterIndex((ins.x >> 12) & 63u, (ins.x & 0x40000u) != 0u);
+  uint swizzle = ins.y & 0xFFFu;
+  vec4 result = xe_up_r[index];
+  for (uint i = 0u; i < 4u; ++i) {
+    uint s = (swizzle >> (3u * i)) & 7u;
+    if (s < 4u) {
+      result[i] = value[s];
+    } else if (s == 5u) {
+      result[i] = 1.0;
+    } else if (s != 7u) {
+      result[i] = 0.0;
+    }
+  }
+  xe_up_r[index] = result;
+}
+
+// Clears the state every invocation starts from. Registers past the count
+// the program names are never read.
+void XeUpReset(uint program) {
+  uint register_count = min(xe_up_code[program].w, 64u);
+  for (uint i = 0u; i < register_count; ++i) {
+    xe_up_r[i] = vec4(0.0);
+  }
+  xe_up_a0 = 0;
+  xe_up_ps = 0.0;
+  xe_up_p0 = false;
+  xe_up_al = ivec4(0);
+  xe_up_lc = uvec4(0u);
+  xe_up_return_depth = 0u;
+  xe_up_kill = false;
+}
+
+// Runs the program at an element of xe_up_code. The registers are the
+// caller's to prepare (XeUpReset, then the stage's inputs).
+void XeUpRun(uint program) {
+  uvec4 head = xe_up_code[program];
+  uint cf_count = head.x;
+  uint instruction_base = program + head.y;
+  uint pc = 0u;
+  for (uint step = 0u; step < XE_UP_MAX_STEPS && pc < cf_count; ++step) {
+    uvec4 cf = xe_up_code[program + 1u + pc];
+    uint opcode = (cf.y >> 12) & 15u;
+    uint next = pc + 1u;
+    if ((opcode >= 1u && opcode <= 6u) || opcode == 13u || opcode == 14u) {
+      // exec and its conditional forms: by a bool constant (3, 4, 13, 14) or
+      // by the predicate (5, 6).
+      bool run = true;
+      bool condition = (cf.y & 0x400u) != 0u;
+      if (opcode == 5u || opcode == 6u) {
+        run = xe_up_p0 == condition;
+      } else if (opcode >= 3u) {
+        run = XeUpBoolConstant((cf.y >> 2) & 0xFFu) == condition;
+      }
+      if (run) {
+        uint address = instruction_base + (cf.x & 0xFFFu);
+        uint count = (cf.x >> 12) & 7u;
+        uint sequence = cf.x >> 16;
+        for (uint i = 0u; i < count; ++i) {
+          uvec4 ins = xe_up_code[address + i];
+          if ((sequence & 1u) != 0u) {
+            if ((ins.y & 0x80000000u) == 0u ||
+                ((ins.z & 0x80000000u) != 0u) == xe_up_p0) {
+              XeUpFetch(ins);
+            }
+          } else {
+            if ((ins.y & 0x10000000u) == 0u ||
+                ((ins.y & 0x8000000u) != 0u) == xe_up_p0) {
+              XeUpAlu(ins);
+            }
+          }
+          sequence >>= 2;
+        }
+        // The forms that end the shader end it only when they ran.
+        if (opcode == 2u || opcode == 4u || opcode == 6u || opcode == 14u) {
+          break;
+        }
+      }
+    } else if (opcode == 7u) {
+      // loop: push the count and aL (or the outer loop's aL for a repeat),
+      // skip the body when the count is 0.
+      uint loop_constant = xe_up_loop[(cf.x >> 18) & 7u][(cf.x >> 16) & 3u];
+      uint count = loop_constant & 0xFFu;
+      xe_up_lc = uvec4(count, xe_up_lc.xyz);
+      xe_up_al = ivec4((cf.x & 0x2000u) != 0u ? xe_up_al.x
+                                              : int((loop_constant >> 8) & 0xFFu),
+                       xe_up_al.xyz);
+      if (count == 0u) {
+        next = cf.x & 0x1FFFu;
+      }
+    } else if (opcode == 8u) {
+      // endloop: one iteration fewer; back to the body unless that was the
+      // last or the predicate says to break. aL moves by the signed step.
+      uint count = xe_up_lc.x - 1u;
+      bool go_on = count != 0u;
+      if ((cf.x & 0x200000u) != 0u && xe_up_p0 == ((cf.y & 0x400u) != 0u)) {
+        go_on = false;
+      }
+      if (go_on) {
+        uint loop_constant = xe_up_loop[(cf.x >> 18) & 7u][(cf.x >> 16) & 3u];
+        xe_up_lc.x = count;
+        xe_up_al.x += bitfieldExtract(int(loop_constant), 16, 8);
+        next = cf.x & 0x1FFFu;
+      } else {
+        xe_up_lc = uvec4(xe_up_lc.yzw, 0u);
+        xe_up_al = ivec4(xe_up_al.yzw, 0);
+      }
+    } else if (opcode == 9u || opcode == 11u) {
+      // call and jmp, unconditional, by the predicate or by a bool constant.
+      bool taken = (cf.x & 0x2000u) != 0u;
+      if (!taken) {
+        bool condition = (cf.y & 0x400u) != 0u;
+        taken = ((cf.x & 0x4000u) != 0u
+                     ? xe_up_p0
+                     : XeUpBoolConstant((cf.y >> 2) & 0xFFu)) == condition;
+      }
+      if (taken) {
+        if (opcode == 9u) {
+          if (xe_up_return_depth < 4u) {
+            xe_up_return[xe_up_return_depth++] = pc + 1u;
+            next = cf.x & 0x1FFFu;
+          }
+        } else {
+          next = cf.x & 0x1FFFu;
+        }
+      }
+    } else if (opcode == 10u) {
+      // ret. Outside a call it does nothing.
+      if (xe_up_return_depth != 0u) {
+        next = xe_up_return[--xe_up_return_depth];
+      }
+    }
+    // nop, alloc and the vertex fetch marker do nothing here.
+    pc = next;
+  }
+}
+
+#endif  // XE_UCODE_PROGRAM_GLSLI_
