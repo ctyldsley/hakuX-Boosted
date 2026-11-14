@@ -21,6 +21,7 @@
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/backend/a64/a64_tracers.h"
+#include "xenia/cpu/compiler/passes/dead_context_store_pass.h"
 #include "xenia/cpu/compiler/translation_stats.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/hir/hir_builder.h"
@@ -33,6 +34,8 @@ DECLARE_bool(a64_enable_host_guest_stack_synchronization);
 
 DECLARE_bool(a64_lean_extern_thunk);
 DECLARE_bool(log_translation_stats);  // hakuX-Boosted
+DECLARE_int32(eliminate_dead_context_stores);
+DECLARE_bool(dead_context_store_verify);
 
 // hakuX-Boosted: see A64Emitter::IsNearBoundLabel.
 DEFINE_bool(
@@ -1126,6 +1129,43 @@ void A64Emitter::EmitPinnedVerify(const PinnedGuestRegister& pin) {
   CallNativeSafe(reinterpret_cast<void*>(&ReportPinnedMismatch));
   pin_cur_live_after_ = saved_live_after;
   L(same);
+}
+
+static uint64_t ReportDeadStoreRead(void* raw_context, uint64_t function,
+                                    uint64_t offset) {
+  const uint64_t count =
+      compiler::translation_stats.verify_mismatches.fetch_add(
+          1, std::memory_order_relaxed);
+  if (count < 64) {
+    XELOGE(
+        "TranslatorVerify: a store eliminate_dead_context_stores took for "
+        "dead was read: context offset {:#x} in guest function {:08X}",
+        offset, static_cast<uint32_t>(function));
+  }
+  return 0;
+}
+
+void A64Emitter::EmitDeadStoreVerify(const Xbyak_aarch64::XReg& value,
+                                     uint32_t offset, uint32_t size) {
+  if (!compiler::passes::IsDeadStoreCandidateSlot(
+          offset, size, cvars::eliminate_dead_context_stores)) {
+    return;
+  }
+  ForgetFpcrMode();  // the report goes through the thunk, as EmitPinnedVerify
+  Label& fine = NewCachedLabel();
+  if (size == 1) {
+    mov(w17, static_cast<uint64_t>(compiler::passes::kDeadStorePoison8));
+    eor(w0, WReg(value.getIdx()), w17);
+    and_(x0, x0, 0xFF);
+  } else {
+    mov(x17, compiler::passes::kDeadStorePoison64);
+    eor(x0, value, x17);
+  }
+  cbnz(x0, fine);
+  mov(x1, static_cast<uint64_t>(current_guest_function_));
+  mov(x2, static_cast<uint64_t>(offset));
+  CallNativeSafe(reinterpret_cast<void*>(&ReportDeadStoreRead));
+  L(fine);
 }
 
 A64Emitter::PinSync A64Emitter::ClassifyPinSync(const hir::Instr* instr) {

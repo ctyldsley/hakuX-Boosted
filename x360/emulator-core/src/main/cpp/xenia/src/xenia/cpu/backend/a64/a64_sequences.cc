@@ -27,6 +27,9 @@
 #include "xenia/cpu/hir/instr.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 
+// hakuX-Boosted: see A64Emitter::EmitDeadStoreVerify.
+DECLARE_bool(dead_context_store_verify);
+
 namespace xe {
 namespace cpu {
 namespace backend {
@@ -224,9 +227,12 @@ struct LOAD_CONTEXT_I8
         e.EmitPinnedVerify(*pin);
       }
       e.mov(i.dest, WReg(pin->host_reg));
-      return;
+    } else {
+      e.ldrb(i.dest, ptr(e.GetContextReg(), offset));
     }
-    e.ldrb(i.dest, ptr(e.GetContextReg(), offset));
+    if (cvars::dead_context_store_verify) {
+      e.EmitDeadStoreVerify(XReg(i.dest.reg().getIdx()), offset, 1);
+    }
   }
 };
 struct LOAD_CONTEXT_I16
@@ -253,9 +259,12 @@ struct LOAD_CONTEXT_I64
         e.EmitPinnedVerify(*pin);
       }
       e.mov(i.dest, XReg(pin->host_reg));
-      return;
+    } else {
+      e.ldr(i.dest, ptr(e.GetContextReg(), offset));
     }
-    e.ldr(i.dest, ptr(e.GetContextReg(), offset));
+    if (cvars::dead_context_store_verify) {
+      e.EmitDeadStoreVerify(i.dest, offset, 8);
+    }
   }
 };
 struct LOAD_CONTEXT_F32

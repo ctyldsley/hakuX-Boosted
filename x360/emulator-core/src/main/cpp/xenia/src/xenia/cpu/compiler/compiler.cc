@@ -183,6 +183,11 @@ std::string FormatExtraStats() {
       "; simplification: {} block walks, {} skipped, {} skip mismatches",
       get(t.simplify_block_walks), get(t.simplify_block_skips),
       get(t.simplify_skip_mismatches));
+  line += fmt::format(
+      "; dead context stores: {} of {} candidate stores removed; "
+      "self-check mismatches (TranslatorVerify) {}",
+      get(t.dead_context_stores_removed), get(t.dead_context_stores_seen),
+      get(t.verify_mismatches));
   return line;
 }
 }  // namespace

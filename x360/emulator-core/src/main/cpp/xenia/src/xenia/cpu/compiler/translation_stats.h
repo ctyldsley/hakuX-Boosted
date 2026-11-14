@@ -48,6 +48,11 @@ struct TranslationStats {
   // Mismatches reported by the self-check modes of the settings added
   // after pinning (each logs a line starting "TranslatorVerify:").
   std::atomic<uint64_t> verify_mismatches{0};
+  // eliminate_dead_context_stores: candidate stores looked at in functions
+  // of more than one block, and how many were removed (or, under
+  // dead_context_store_verify, replaced by the marker).
+  std::atomic<uint64_t> dead_context_stores_seen{0};
+  std::atomic<uint64_t> dead_context_stores_removed{0};
   // pin_guest_registers_wide.
   std::atomic<uint64_t> pin_functions_pinned_no_loop{0};
   std::atomic<uint64_t> pin_flag_slots{0};

@@ -153,6 +153,15 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
       compiler_->AddPass(std::make_unique<passes::ValidationPass>());
     }
   }
+  // hakuX-Boosted: stores to flag bits (and, by setting, registers) that
+  // every path overwrites before anything reads them, across blocks. Before
+  // the simplification and dead code passes below, which then remove the
+  // compare that fed a removed store. A no-op unless
+  // eliminate_dead_context_stores is set.
+  compiler_->AddPass(std::make_unique<passes::DeadContextStorePass>());
+  if (validate) {
+    compiler_->AddPass(std::make_unique<passes::ValidationPass>());
+  }
   compiler_->AddPass(std::make_unique<passes::SimplificationPass>());
   if (validate) {
     compiler_->AddPass(std::make_unique<passes::ValidationPass>());

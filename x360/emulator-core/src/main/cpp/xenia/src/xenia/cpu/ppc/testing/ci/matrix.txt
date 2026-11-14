@@ -34,3 +34,8 @@ wide stress (verify)        ; . ; --pin_guest_registers=true --pin_guest_registe
 wide stress                 ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_stress=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --pin_guest_registers_max_vec=16
 wide stress, 1 integer      ; ^(seq_|instr_(add|cmp|l|st|b|f|m|v)) ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_stress=true --pin_guest_registers_max_int=1 --pin_guest_registers_max_vec=4
 wide stress, preempt        ; ^(seq_|instr_(b|add|cmp|l|st)) ; --guest_scheduler=true --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_stress=true --pin_guest_registers_flags=true
+
+# Dead context stores across blocks.
+dead stores, flags          ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|f|rl|sl|sr)) ; --eliminate_dead_context_stores=1
+dead stores, all            ; . ; --eliminate_dead_context_stores=2
+dead stores (verify)        ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|f|rl|sl|sr)) ; --eliminate_dead_context_stores=2 --dead_context_store_verify=true
