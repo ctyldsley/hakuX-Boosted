@@ -1059,12 +1059,22 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
     }
   }
 
+  // hakuX-Boosted: a wait with a zero timeout that finds the object not
+  // signalled is a poll. A loop of them is a busy wait the scheduler
+  // cannot otherwise see (it parks nothing and yields nothing); told here,
+  // it is parked like a yield loop, and woken when this object is
+  // signalled (GuestScheduler::NoteEmptyWait; one load unless
+  // guest_scheduler_park_waits is on).
+  const bool zero_timeout = timeout_ptr && *timeout_ptr == 0;
   X_STATUS result =
       object->Wait(wait_reason, processor_mode, alertable, timeout_ptr);
   if (alertable) {
     if (result == X_STATUS_USER_APC) {
       xeProcessUserApcs(nullptr);
     }
+  }
+  if (zero_timeout && result == X_STATUS_TIMEOUT && GuestScheduler::enabled()) {
+    kernel_state()->guest_scheduler()->NoteEmptyWait(object.get());
   }
   return result;
 }
@@ -1098,12 +1108,18 @@ uint32_t NtWaitForSingleObjectEx(uint32_t object_handle, uint32_t wait_mode,
       }
     }
     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+    // hakuX-Boosted: a poll, see xeKeWaitForSingleObject.
+    const bool zero_timeout = timeout_ptr && timeout == 0;
     result =
         object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
     if (alertable) {
       if (result == X_STATUS_USER_APC) {
         xeProcessUserApcs(nullptr);
       }
+    }
+    if (zero_timeout && result == X_STATUS_TIMEOUT &&
+        GuestScheduler::enabled()) {
+      kernel_state()->guest_scheduler()->NoteEmptyWait(object.get());
     }
   } else {
     result = X_STATUS_INVALID_HANDLE;

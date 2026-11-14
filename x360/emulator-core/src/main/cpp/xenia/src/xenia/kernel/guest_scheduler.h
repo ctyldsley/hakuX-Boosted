@@ -220,6 +220,14 @@ class GuestScheduler {
       WakeParkedWaits();
     }
   }
+  // hakuX-Boosted: guest_scheduler_park_waits. The calling guest thread
+  // waited on |object| with a zero timeout and it was not signalled: a poll.
+  // A thread that does this again and again with no work between is busy
+  // waiting as surely as one that yields, and is parked the same way; and
+  // while it is parked a signal of that very object ends the park at once,
+  // whatever the thread has learnt about other events. One load with the
+  // setting off. |object| is compared, never followed.
+  void NoteEmptyWait(const XObject* object);
   // A visit to a recognised pause-and-poll loop's backoff site in translated
   // code (MemoryPollParkPass, a64_seq_memory.cc), on the fiber.
   void PollSiteVisit(XThread* self, void* raw_context, uint32_t site);
@@ -341,6 +349,18 @@ class GuestScheduler {
     // A wake for them has been asked for and not yet carried out.
     std::atomic<bool> wait_wake_noted{false};
     bool wake_wait_parks = false;  // guarded by lock_
+    // hakuX-Boosted: guest_scheduler_park_wait_adaptive. The earliest raw
+    // tick at which an event may end a park here (the least wait_min_tick
+    // of this CPU's parked spinners, 0 = none; written under lock_). An
+    // event that comes sooner is noted in wait_event_pending and takes no
+    // lock. It wakes the dispatch thread, once, only if wait_event_poke
+    // says a park here has a hold-off that ends before its deadline: that
+    // park's deadline then becomes the end of its hold-off. Otherwise every
+    // park here is closed to events for its whole length and the event
+    // costs its source two loads and a store.
+    std::atomic<uint64_t> wait_event_due_tick{0};
+    std::atomic<bool> wait_event_pending{false};
+    std::atomic<bool> wait_event_poke{false};
     // The earliest raw-tick deadline among them, 0 = none. Written under
     // lock_ by this CPU's dispatch thread and the fibers on it only.
     uint64_t next_fine_repoll_tick = 0;
@@ -501,11 +521,50 @@ class GuestScheduler {
   std::atomic<uint64_t> wait_wake_seq_{0};
   std::atomic<uint32_t> wait_parked_total_{0};
   void WakeParkedWaits();
+  // hakuX-Boosted: guest_scheduler_park_wait_adaptive (the comment above
+  // TryWaitPark in the .cc file is the design). What a busy-waiting thread
+  // has taught the scheduler about the events around it. One entry per
+  // guest thread that has ever been looked at for a park, found by the
+  // thread's address; only that thread reads and writes it. Kept here and
+  // not in XThread::SchedulerLinks because that file is another session's.
+  struct WaitLearn {
+    std::atomic<XThread*> owner{nullptr};
+    // An event may end this thread's park no sooner than the shortest park
+    // shifted left by this: 0 while events have proved worth waking for, up
+    // to kWaitHoldoffMaxShift (longer than any park: events are ignored)
+    // while they have not.
+    uint8_t holdoff_shift = 0;
+    // The last park was ended by an event before its deadline, and it is
+    // not yet known whether the wait was over.
+    bool woke_early = false;
+    uint32_t parks_since_probe = 0;
+    // The object the thread last polled with a zero timeout in this burst
+    // (NoteEmptyWait), null if none. Read by signallers.
+    std::atomic<const XObject*> polled{nullptr};
+    // The last park was ended by a signal of the polled object. Written
+    // under lock_ by the signaller while the thread is parked.
+    std::atomic<bool> polled_wake{false};
+  };
+  // Entries with a polled object, so a signal costs one load when there are
+  // none.
+  std::atomic<uint32_t> wait_polled_count_{0};
+  void WakePolledWaits(const XObject* object);
+  static constexpr size_t kWaitLearnSlots = 64;
+  static constexpr uint8_t kWaitHoldoffMaxShift = 8;
+  WaitLearn wait_learn_[kWaitLearnSlots];
+  WaitLearn* WaitLearnOf(XThread* self);
+  // The thread is going away: its entry is free for another.
+  void WaitLearnRelease(XThread* thread);
+  // The thread's burst of busy waiting ended (it waited for real, worked,
+  // or changed loop): a park an event ended early was worth ending.
+  void WaitBurstEnded(XThread* self);
+  bool park_wait_adaptive_ = true;
   // An empty yield by |self|: true if it parked (and is back).
   bool NoteWaitSpin(XThread* self);
   // The second half of both parks: arm, or park if nothing happened since.
   bool TryWaitPark(XThread* self, uint64_t now, bool poll);
-  void WaitPark(XThread* self, uint64_t now, uint64_t length_ticks);
+  void WaitPark(XThread* self, uint64_t now, uint64_t length_ticks,
+                uint8_t holdoff_shift = 0);
   // |links| is leaving the blocked list by a way other than RereadyBlocked.
   void DropWaitParkLocked(XThread* thread);
 
@@ -688,6 +747,11 @@ class GuestScheduler {
     std::atomic<uint64_t> wait_looks_event{0};  // an event since arming
     std::atomic<uint64_t> wait_looks_barred{0};  // CanParkSpinner said no
     std::atomic<uint64_t> wait_events{0};       // events counted while armed
+    // hakuX-Boosted: guest_scheduler_park_wait_adaptive.
+    std::atomic<uint64_t> wait_wakes_futile{0};  // early wake, still waiting
+    std::atomic<uint64_t> wait_wakes_useful{0};  // early wake, wait was over
+    std::atomic<uint64_t> wait_events_held{0};   // events inside a hold-off
+    std::atomic<uint64_t> wait_wakes_polled{0};  // the polled object signalled
     std::atomic<uint64_t> poll_visits{0};       // poll site visits looked at
     std::atomic<uint64_t> poll_changed{0};      // registers differed
     std::atomic<uint64_t> apc_pokes{0};
