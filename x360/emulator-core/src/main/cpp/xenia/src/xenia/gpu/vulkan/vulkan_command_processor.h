@@ -572,7 +572,7 @@ class VulkanCommandProcessor final : public CommandProcessor {
       uint32_t normalized_color_mask,
       const draw_util::HostDepthPolygonOffset* host_depth_polygon_offset);
   // hakuX-Boosted: a draw through the guest shader interpreter, version 2
-  // (vulkan_placeholder_interpreter_v2): the shaders' prepared microcode and
+  // (vulkan_placeholder_interpreter = 2): the shaders' prepared microcode and
   // the words in front of it (shaders/ucode_program.glsli), which are
   // uploaded behind the bool and loop constants, in the same buffer.
   struct InterpreterProgramDraw {

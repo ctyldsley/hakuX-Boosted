@@ -68,7 +68,7 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_interpreter_stand_in_vs.h"
 // hakuX-Boosted: the guest shader interpreter, version 2
-// (vulkan_placeholder_interpreter_v2, shaders/ucode_program.glsli).
+// (vulkan_placeholder_interpreter = 2, shaders/ucode_program.glsli).
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_point_strip_vs.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_quad_cp_ds.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_quad_patch_ds.h"
@@ -235,17 +235,23 @@ DEFINE_int32(
     "Vulkan");
 
 // hakuX-Boosted: boosted/notes/shader-first-run.md.
+DEFINE_int32(
+    vulkan_placeholder_interpreter, 1,
+    "With vulkan_placeholder_pipelines and async_shader_vs_interpreter: "
+    "which interpreter is the vertex stage of an interpreter placeholder. 1: "
+    "XenDroid's, as before. 2: the guest shader interpreter, version 2. It "
+    "follows the shader translator instruction for instruction (checked "
+    "against it off the device, gpu/first_run_rig), is given a prepared copy "
+    "of the microcode instead of reading it from guest memory, and so also "
+    "stands in for shaders loaded inline (IM_LOAD_IMMEDIATE), shaders with "
+    "loops and subroutine calls, and point sprites drawn as strips.",
+    "Vulkan");
 DEFINE_bool(
-    vulkan_placeholder_interpreter_v2, false,
-    "With vulkan_placeholder_pipelines and async_shader_vs_interpreter: the "
-    "vertex stage of an interpreter placeholder is the guest shader "
-    "interpreter, version 2. It follows the shader translator instruction "
-    "for instruction (checked against it off the device, "
-    "gpu/first_run_rig), is given a prepared copy of the microcode instead "
-    "of reading it from guest memory, and so also stands in for shaders "
-    "loaded inline (IM_LOAD_IMMEDIATE), shaders with loops and subroutine "
-    "calls, tessellated draws and point sprites drawn as strips. Off: "
-    "XenDroid's interpreter, as before.",
+    vulkan_placeholder_interpreter_tessellation, false,
+    "With vulkan_placeholder_interpreter = 2: a tessellated draw (triangle "
+    "or quad patches) can have an interpreter placeholder, with the "
+    "interpreter as its tessellation evaluation shader. Off: such draws are "
+    "refused by the interpreter, as before.",
     "Vulkan");
 
 DEFINE_bool(
@@ -656,7 +662,7 @@ bool VulkanPipelineCache::Initialize() {
   }
 
   // hakuX-Boosted: the modules of the interpreter's version 2
-  // (vulkan_placeholder_interpreter_v2). Made whatever the setting says, as
+  // (vulkan_placeholder_interpreter = 2). Made whatever the setting says, as
   // the stand-in's are: a module costs nothing until a pipeline uses it. A
   // failure only means that kind of draw is not interpreted.
   ucode_program_vs_ = ui::vulkan::util::CreateShaderModule(
@@ -1520,7 +1526,7 @@ void VulkanPipelineCache::QueueStorageWrites(
 // (boosted/notes/shader-first-run.md).
 
 bool VulkanPipelineCache::IsProgramInterpreterActive() const {
-  return cvars::vulkan_placeholder_interpreter_v2 &&
+  return cvars::vulkan_placeholder_interpreter == 2 &&
          ucode_program_vs_ != VK_NULL_HANDLE &&
          render_target_cache_.GetPath() ==
              RenderTargetCache::Path::kHostRenderTargets;
@@ -1529,6 +1535,10 @@ bool VulkanPipelineCache::IsProgramInterpreterActive() const {
 VkShaderModule VulkanPipelineCache::GetProgramVertexShader(
     Shader::HostVertexShaderType host_vertex_shader_type,
     bool fractional_spacing) const {
+  if (Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type) &&
+      !cvars::vulkan_placeholder_interpreter_tessellation) {
+    return VK_NULL_HANDLE;
+  }
   switch (host_vertex_shader_type) {
     case Shader::HostVertexShaderType::kVertex:
       return ucode_program_vs_;
@@ -1615,7 +1625,7 @@ void VulkanPipelineCache::MakePlaceholder(
   // hakuX-Boosted: a stand-in pixel shader instead of the no-op one, with
   // the layout that has room for its texture (and the variant of the
   // interpreter that outputs what it reads).
-  // hakuX-Boosted: with vulkan_placeholder_interpreter_v2 the interpreter is
+  // hakuX-Boosted: with vulkan_placeholder_interpreter = 2 the interpreter is
   // its version 2, in the form the draw's host vertex shader type asks for.
   // The draw path only asks for the interpreter where there is such a module
   // (GetProgramInterpreterRefusal).

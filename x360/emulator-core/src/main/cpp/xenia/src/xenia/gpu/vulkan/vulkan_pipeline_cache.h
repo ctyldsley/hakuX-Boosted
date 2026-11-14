@@ -203,7 +203,7 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     // (vulkan_placeholder_async).
     std::atomic<bool> placeholder_pending{false};
     // hakuX-Boosted: the placeholder's vertex stage is the guest shader
-    // interpreter, version 2 (vulkan_placeholder_interpreter_v2,
+    // interpreter, version 2 (vulkan_placeholder_interpreter = 2,
     // boosted/notes/shader-first-run.md): a draw that binds it uploads the
     // shaders' prepared microcode instead of telling the interpreter where
     // it is in guest memory. Written with uses_interpreter, before the
@@ -450,7 +450,7 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
 
   // hakuX-Boosted: the guest shader interpreter, version 2
   // (boosted/notes/shader-first-run.md). Whether new interpreter placeholders
-  // are made with it (vulkan_placeholder_interpreter_v2, and its modules
+  // are made with it (vulkan_placeholder_interpreter = 2, and its modules
   // exist).
   bool IsProgramInterpreterActive() const;
   // Why it cannot stand in for this vertex shader in a draw of this kind, as

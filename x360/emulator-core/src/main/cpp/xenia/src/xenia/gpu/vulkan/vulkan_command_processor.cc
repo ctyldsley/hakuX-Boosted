@@ -150,7 +150,7 @@ DECLARE_int32(vulkan_placeholder_ps_mode);
 DECLARE_bool(vulkan_placeholder_interpreter_translated_vs);
 DECLARE_bool(vulkan_placeholder_interpreter_geometry);
 // hakuX-Boosted: boosted/notes/shader-first-run.md.
-DECLARE_bool(vulkan_placeholder_interpreter_v2);
+DECLARE_int32(vulkan_placeholder_interpreter);
 DECLARE_int32(vulkan_placeholder_interpreter_vertex_budget);
 
 DEFINE_bool(
@@ -4023,7 +4023,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   VulkanShader::VulkanTranslation* vertex_shader_translation;
   VulkanShader::VulkanTranslation* pixel_shader_translation;
   bool use_interpreter = false;
-  // hakuX-Boosted: vulkan_placeholder_interpreter_v2.
+  // hakuX-Boosted: vulkan_placeholder_interpreter = 2.
   bool interpreter_program = false;
   uint32_t interpreter_program_refusal = 0;
   bool drop_until_ready = false;
@@ -4168,7 +4168,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // or memory export, on a device matching the interpreter's assumptions
     // (single shared-memory binding, full 32-bit indices). When eligible, VS
     // translation is deferred to the background creation thread.
-    // hakuX-Boosted: with vulkan_placeholder_interpreter_v2 the interpreter is
+    // hakuX-Boosted: with vulkan_placeholder_interpreter = 2 the interpreter is
     // its version 2, which is not held back by where the microcode came from
     // or by its control flow, and has forms for tessellated draws and point
     // sprites drawn as strips. What still keeps it out is the pipeline
@@ -5357,7 +5357,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                        pipeline->dynamic_state);
     if (!UpdateBindings(vertex_shader, pixel_shader, stage_bindings_ready[0],
                         stage_bindings_ready[1], interpreter_placeholder,
-                        placeholder_pixel_shader)) {
+                        placeholder_pixel_shader,
+                        // hakuX-Boosted: the same bindings as before the
+                        // transfers. The stand-in's texture and the
+                        // interpreter's program were left out here, so their
+                        // sets were written for a layout without them.
+                        stand_in_has_texture ? &stand_in_texture_binding
+                                             : nullptr,
+                        program_placeholder ? &interpreter_program_draw
+                                            : nullptr)) {
       return false;
     }
   }
