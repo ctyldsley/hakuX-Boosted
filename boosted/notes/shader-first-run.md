@@ -239,3 +239,10 @@ Deliberately not done:
 - The point sprite form: see "Next".
 - The frame-time split log, the pixel side, less compile work, the kept
   record: not started, as before.
+
+Build: run 117, commit `cbe3740`, success
+(https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43557597650). It
+proves the code compiles, that the Actions shader tools compiled the four
+`ucode_program_*.ds.glsl` (their headers are now included, so a failure
+there would have failed the build) and that the APK packs. Nothing about
+behaviour. The commit that adds this paragraph changes this file only.
