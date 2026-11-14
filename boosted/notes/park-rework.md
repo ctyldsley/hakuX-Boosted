@@ -25,8 +25,9 @@ Base: `claude/integration-1115` at `5aea2e2`. Pushed only to
      once by a signal of the object it polls.
   5. The main thread's empty yields: the arithmetic says there is little
      there to win ("The main thread").
-  6. Bench rows, and the tables of bench runs 15 and 17 ("Bench results").
-     Run 17 reproduces the phone's result on the runner.
+  6. Bench rows, and the tables of bench runs 15, 17 and 18 ("Bench
+     results"). Run 18 is the final code: the phone's case is a whole core
+     with the first gate and a tenth of one with the adaptive gate.
 - In progress: nothing.
 - Next: the device runs under "What a device run must show". Then "What is
   next".
@@ -351,7 +352,7 @@ waiter never answered, about 6,500 unrelated events a second:
   most a millisecond. Fixed after this run: back from a park, the next look
   comes after 4 yields (`kWaitPassesAfterPark`). The guest still runs its
   own test four times between two parks. The figures of the build with
-  that fix are under "Bench run of the final code" below.
+  that fix are under "Bench run 18" below.
 - The other rows are as in run 15.
 
 Latency with the corrected scenarios: the flag is made true by a plain
@@ -382,10 +383,60 @@ percentile / worst:
   549 / 962 / 1026 with the first (its parks double and reach the longest
   sooner).
 
-### Bench run of the final code
+### Bench run 18, the final code (`9d9b8e0`)
 
-To be added from the run of the commit that carries the fix above (see
-"Build").
+https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43653241495, green.
+**This is the before and after the brief asks for.** "Before" is the column
+"first gate + poll sites": the park as the phone ran it on 2026-11-14, with
+this branch's recognition. "After" is "adaptive + poll sites".
+
+Cores busy, the waiter never answered, about 6,500 unrelated events a
+second:
+
+| Waiter (`_noisy`) | defaults (no parking) | `park_waits` (no poll sites) | before: first gate + poll sites | after: adaptive + poll sites | adaptive, max 500 us | adaptive + skew bound |
+|---|---|---|---|---|---|---|
+| `yield_with_work` (the phone's case) | 1.02 | 0.093 | **1.01** | **0.096** | 0.134 | 0.097 |
+| `yield` | 1.02 | 0.025 | 0.084 | 0.026 | 0.030 | 0.026 |
+| `zero_delay` | 1.02 | 0.025 | 0.089 | 0.025 | 0.031 | 0.026 |
+| `zero_timeout_wait` | 1.02 | 0.027 | 0.217 | 0.028 | 0.034 | 0.028 |
+| `poll_sled` (the profile's shape) | 1.02 | 1.02 | 0.072 | 0.025 | 0.031 | 0.026 |
+| `poll_hint` | 1.02 | 1.01 | 0.073 | 0.025 | 0.031 | 0.026 |
+| `poll_plain` | 1.02 | 1.01 | 0.072 | 0.025 | 0.031 | 0.026 |
+| `spin_lock` | 1.02 | 1.02 | 0.073 | 0.026 | 0.031 | 0.026 |
+| `poll_clock` (left alone on purpose) | 1.02 | 1.02 | 1.02 | 1.02 | 1.02 | 1.02 |
+
+Wake latency: the flag made true by a plain store 2 to 4 ms after the
+waiter last took one, to the waiter seeing it; microseconds; median / 95th
+percentile / worst; same noise:
+
+| Waiter (`_answered_noisy`) | defaults (no parking) | before: first gate + poll sites | after: adaptive + poll sites | adaptive, max 500 us |
+|---|---|---|---|---|
+| `yield_with_work` | 6.3 / 14 / 15 | 6.4 / 13 / 14 (not parked) | 331 / 634 / 773 | 293 / 537 / 546 |
+| `yield` | 0.3 / 1.4 / 38 | 58 / 143 / 145 | 261 / 720 / 823 | 173 / 516 / 533 |
+| `zero_timeout_wait` | 0.4 / 0.5 / 0.5 | 56 / 104 / 113 | 326 / 706 / 720 | 257 / 496 / 547 |
+| `poll_sled` | 0.2 / 0.3 / 0.4 | 83 / 146 / 153 | 342 / 642 / 787 | 204 / 489 / 522 |
+
+Reading it:
+
+- **The phone's case.** A thread that works a few microseconds before each
+  yield, beside unrelated events: a whole core with the first gate (not
+  parked, and its latency is the unparked one), a tenth of a core with the
+  adaptive gate. Alone, the same thread is at 0.074 against 0.325.
+- **Every shape that can be parked is**, at 0.025 to 0.03 of a core under
+  the events, with the adaptive gate. The first gate leaves three to eight
+  times that, because it is woken by the events.
+- **The price** is the latency column: a wait of 2 to 4 ms is answered
+  about 0.3 ms late in the middle and 0.7 to 0.8 ms at worst, inside the
+  bound (a quarter of the wait so far, never more than the longest park).
+  Unparked it is under a microsecond. `max 500 us` brings the worst to
+  0.55 ms for about a fifth more CPU.
+- **Nothing else moved.** `yield_other_ready` 280 ns in every column;
+  the wait and wake round trips 2.15 to 2.18 us on one CPU and 20.0 to
+  20.4 us across two, parked or not; `yield_nothing_ready` with parks at
+  0.008 of a core as before the rework.
+- The rig's notes of "NOT MEASURED: this tree has no setting called ..."
+  in this run are all for the baseline tree (`claude/integration-1113`),
+  which has none of these settings.
 
 ### Bench run 15, commit `82aac63`
 
@@ -638,6 +689,9 @@ None is needed for this branch to work. Two would help:
   run.
 - `161b3e7` (the same code, the corrected scenarios): bench run 17, green,
   https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43651784030.
-- The commit that carries this line adds the look after four yields
-  (`guest_scheduler.cc`, `.h`): its app and bench runs are named below when
-  known.
+- **`9d9b8e0` (the final code, with the look after four yields): bench run
+  18, green,**
+  https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43653241495. App
+  run 139, https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43653241496:
+  result below when known. The commits after it change these notes only
+  and are marked `[skip ci]`.
