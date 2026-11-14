@@ -233,6 +233,8 @@ struct LOAD_CONTEXT_I8
     if (cvars::dead_context_store_verify) {
       e.EmitDeadStoreVerify(XReg(i.dest.reg().getIdx()), offset, 1);
     }
+    e.EmitContextConstantVerify(i.instr, XReg(i.dest.reg().getIdx()), offset,
+                                1);
   }
 };
 struct LOAD_CONTEXT_I16
@@ -265,6 +267,7 @@ struct LOAD_CONTEXT_I64
     if (cvars::dead_context_store_verify) {
       e.EmitDeadStoreVerify(i.dest, offset, 8);
     }
+    e.EmitContextConstantVerify(i.instr, i.dest, offset, 8);
   }
 };
 struct LOAD_CONTEXT_F32

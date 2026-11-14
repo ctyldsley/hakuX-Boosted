@@ -114,6 +114,13 @@ class HIRBuilder {
   };
   PinSyncState& pin_sync() { return pin_sync_; }
 
+  // hakuX-Boosted: context_constant_verify. Context loads the cross-block
+  // constant pass would have replaced, with the constant it expects; the
+  // backend compares the two.
+  std::unordered_map<const Instr*, uint64_t>& context_load_expectations() {
+    return context_load_expectations_;
+  }
+
   // hakuX-Boosted: a counter the simplification passes stamp blocks with
   // (simplification_skip_unchanged_blocks). Stamps are only compared while
   // pass_stamp_floor() is not UINT32_MAX, which ConditionalGroupPass arranges
@@ -394,6 +401,7 @@ class HIRBuilder {
   // hakuX-Boosted
   std::vector<PinnedContextSlot> pinned_context_slots_;
   PinSyncState pin_sync_;
+  std::unordered_map<const Instr*, uint64_t> context_load_expectations_;
   uint32_t pass_stamp_ = 0;
   uint32_t pass_stamp_floor_ = UINT32_MAX;
 

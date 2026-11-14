@@ -295,6 +295,9 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // hakuX-Boosted: the guest registers this function keeps in host
   // registers, as GuestRegisterPinningPass chose them. Empty unless
   // pin_guest_registers is on.
+  load_expectations_ = builder->context_load_expectations().empty()
+                           ? nullptr
+                           : &builder->context_load_expectations();
   call_literals_.clear();
   pins_.clear();
   pins_live_ = false;
@@ -1360,6 +1363,49 @@ static uint64_t ReportDeadStoreRead(void* raw_context, uint64_t function,
         offset, static_cast<uint32_t>(function));
   }
   return 0;
+}
+
+static uint64_t ReportContextConstantMismatch(void* raw_context,
+                                             uint64_t function,
+                                             uint64_t offset) {
+  const uint64_t count =
+      compiler::translation_stats.verify_mismatches.fetch_add(
+          1, std::memory_order_relaxed);
+  if (count < 64) {
+    XELOGE(
+        "TranslatorVerify: propagate_context_constants expected a constant "
+        "the guest register did not hold: context offset {:#x} in guest "
+        "function {:08X}",
+        offset, static_cast<uint32_t>(function));
+  }
+  return 0;
+}
+
+void A64Emitter::EmitContextConstantVerify(const hir::Instr* load,
+                                           const Xbyak_aarch64::XReg& value,
+                                           uint32_t offset, uint32_t size) {
+  if (!load_expectations_) {
+    return;
+  }
+  auto it = load_expectations_->find(load);
+  if (it == load_expectations_->end()) {
+    return;
+  }
+  ForgetFpcrMode();  // the report goes through the thunk
+  Label& fine = NewCachedLabel();
+  if (size == 1) {
+    mov(w17, static_cast<uint64_t>(it->second & 0xFF));
+    eor(w0, WReg(value.getIdx()), w17);
+    and_(x0, x0, 0xFF);
+  } else {
+    mov(x17, it->second);
+    eor(x0, value, x17);
+  }
+  cbz(x0, fine);
+  mov(x1, static_cast<uint64_t>(current_guest_function_));
+  mov(x2, static_cast<uint64_t>(offset));
+  CallNativeSafe(reinterpret_cast<void*>(&ReportContextConstantMismatch));
+  L(fine);
 }
 
 void A64Emitter::EmitStackFixupVerify() {

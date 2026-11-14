@@ -262,6 +262,14 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // a64_pin_verify: compare the pinned register with the context copy and
   // report a difference. Clobbers x0, x1, v0 and nothing else.
   void EmitPinnedVerify(const PinnedGuestRegister& pin);
+  // hakuX-Boosted: context_constant_verify. After a context load the
+  // cross-block constant pass has an expectation for: report if the loaded
+  // value differs. Clobbers x0 to x2 and x17; no flag.
+  void EmitContextConstantVerify(const hir::Instr* load,
+                                 const Xbyak_aarch64::XReg& value,
+                                 uint32_t offset, uint32_t size);
+  const std::unordered_map<const hir::Instr*, uint64_t>* load_expectations_ =
+      nullptr;
   // hakuX-Boosted: a64_stack_access_verify. With w17 holding 1 where a
   // stack-pointer-based address was at or above 0xE0000000 and 0 elsewhere:
   // count the former. Out of line, no call, no register changed but w17.

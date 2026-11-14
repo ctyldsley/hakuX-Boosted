@@ -107,6 +107,13 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
       compiler_->AddPass(std::make_unique<passes::ValidationPass>());
     }
   }
+  // hakuX-Boosted: constants stored to a guest register in one block and
+  // loaded in another. Before the group below, which folds what such a
+  // constant feeds. A no-op unless propagate_context_constants is set.
+  compiler_->AddPass(std::make_unique<passes::ContextConstantPass>());
+  if (validate) {
+    compiler_->AddPass(std::make_unique<passes::ValidationPass>());
+  }
   // Grouped simplification + constant propagation.
   // Loops until no changes are made.
   auto sap = std::make_unique<passes::ConditionalGroupPass>();

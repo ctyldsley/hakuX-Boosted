@@ -27,19 +27,19 @@ describes:
 - Step 2, pinning for most functions (section 2):
   `pin_guest_registers_wide`, `pin_guest_registers_flags`, and why the first
   form pinned 17 functions.
-- Step 3, four of its five items (section 3): dead flag and register stores
-  across blocks (`eliminate_dead_context_stores`), compares fused with their
-  branch and short forward branches (`a64_fuse_compare_branch`,
+- Step 3 (section 3): dead flag and register stores across blocks
+  (`eliminate_dead_context_stores`), compares fused with their branch and
+  short forward branches (`a64_fuse_compare_branch`,
   `a64_short_forward_branches`), linked call sites (`a64_linked_calls`), the
   address fix-up left out of stack accesses on 16 KiB hosts
-  (`a64_stack_access_no_fixup`).
+  (`a64_stack_access_no_fixup`), constants carried across blocks
+  (`propagate_context_constants`).
 - Step 4, translating ahead on a helper thread (section 4):
   `translate_ahead`.
 - A translation bug of upstream's found by the tests (`mcrf`), fixed behind
   `ppc_mcrf_copies_field`.
 
 Not done (section 6 says why and how to go on):
-- Constant propagation across blocks (the fifth item of step 3).
 - More than three integer pins.
 - One open question from the tests: with every setting on at once and
   16 KiB pages, the test run aborts inside glibc's allocator under qemu
@@ -51,7 +51,6 @@ Next, in order:
 2. If `pin_guest_registers_wide` holds up: the allocator change that lets a
    loaded value live in its pin (section 6), which turns the saved memory
    operations into saved instructions.
-3. Constant propagation across blocks.
 
 ## 1. The tests
 
@@ -80,6 +79,7 @@ The tests themselves:
 | `seq_cc_int.s`, `seq_cc_64.s`, `seq_cc_vec.s` | 123 | new. C compiled for PowerPC by gcc (`ci/gen/*.c`, 28 functions): loops, calls inside loops, recursion, indirect calls, jump tables, 64-bit arithmetic in halves and whole, float loops (a mixer among them), AltiVec loops. The expected values of the first two files come from the same C compiled for the host, so they do not depend on this translator at all |
 | `seq_regs_across_calls.s` | 11 | new, by hand: registers live over calls where the callee changes them or reads them, conditional and indirect and tail calls, recursion, a return from inside a loop, float and vector registers over calls |
 | `seq_flags_across_blocks.s` | 19 | new, by hand: condition register bits, the carry, CTR and LR set in one block and used in another or after a call |
+| `seq_constants_across_blocks.s` | 13 | new, by hand: constants stored in one block and read in another, over joins, loops and calls |
 | `seq_mcrf_fields.s` | 3 | new: see "Found" below |
 
 Each run of the tests also writes, per test, a hash of everything the test
@@ -149,14 +149,20 @@ What is known:
   all 141,886 pass with equal states. That is how the matrix line
   "everything, 16k" runs (`#16k-mmap`).
 
+- with glibc's heap checker loaded
+  (`LD_PRELOAD=libc_malloc_debug.so.0 MALLOC_CHECK_=3`, which aborts when a
+  block is freed whose end was written past, and which was seen to catch a
+  one-byte overrun under this qemu): everything on passes all 141,886 at
+  4 KiB and at 16 KiB, with no report.
+
 So it follows the amount of heap the run uses at a page size that is not
-the host's, which is what a fault in qemu's emulation of `brk` would look
-like, and it does not follow any one setting. It was not proved to be
-qemu's. A heap overrun in the translator that only shows with that layout
-is the other possibility, and the way to rule it out is a run of the tests
-built with AddressSanitizer, which this session did not set up. Until then,
-"everything on" has been checked at 4 KiB without reservation and at 16 KiB
-only with that allocator setting.
+the host's, which is what a fault in qemu's emulation of `brk` looks like;
+it does not follow any one setting; and the heap checker finds no overrun
+with the same settings. It was not proved to be qemu's. The remaining
+check is a run of the tests built with AddressSanitizer on real ARM64
+hardware (it does not start under this qemu). Until then, "everything on"
+has been checked at 4 KiB without reservation and at 16 KiB with either of
+those allocator settings.
 
 ### What the tests do not cover
 
@@ -450,6 +456,33 @@ address translation and byte swap on ARM64 (there is no load that swaps;
 made shorter without a host register to hold 0xE0000000, and there is none
 free (section 6).
 
+### 3.6 Constants across blocks (`propagate_context_constants`)
+
+`cpu/compiler/passes/context_constant_pass.cc`, run before the
+simplification and constant propagation group. `ContextPromotionPass`
+forwards a stored value to later loads in the same block; a constant
+stored in one block and loaded in another (`li r3, 0` before a branch, its
+use after) stays a load from memory, and nothing downstream can fold it.
+This pass carries "holds this constant" forward over the function's edges
+for r0 to r31, CTR, LR and the condition register and XER bytes: at a join
+a register is constant only if every path stored the same constant, and a
+call, return, trap, scheduler check or non-branch barrier forgets
+everything (whatever runs there may store to any register). A load of a
+register known constant becomes the constant, and the group that follows
+folds what it feeds.
+
+Saves per load replaced: the `ldr`, and whatever the constant then lets
+the optimiser fold (a compare against it, an add of it). Expect little: on
+the corpus 17 loads of 2,300, and 44 HIR instructions of 18,826. It is the
+smallest of the five, and listed last in section 5.
+
+`context_constant_verify` keeps every load and compares it with the
+constant the pass worked out (`TranslatorVerify:` on a difference).
+`seq_constants_across_blocks.s` holds the joins that matter (different
+constants on two paths, a loop that changes a register that was constant
+on entry, a callee that changes it); with the join or the forgetting at
+calls deliberately broken, the tests fail and the verify mode reports.
+
 ## 4. Translating ahead (`translate_ahead`)
 
 `Processor::QueueTranslateAhead`, `TranslateAheadMain` (`cpu/processor.cc`,
@@ -514,7 +547,8 @@ self-check mode before a run without it.
 | 6b | + `pin_guest_registers_flags`, `pin_guest_registers_max_int = 3`, `_max_vec = 16` | more pins: LR, flag bytes, a third integer, more vectors | more of the same; three integer pins leave the allocator four registers and may cost spills | as 6 | as 6 |
 | 7 | `translate_ahead` | section 4 | translation moves off the title's threads where the helper is first: watch first-run hitches and "functions translated on the thread that needed them" | medium: timing, an extra thread's heat, more code in the cache | |
 | 8 | `eliminate_dead_context_stores = 3` | flags the ABI leaves undefined are dead at calls and returns | most of what a compare costs today: 6 of its 9 instructions, 7 with 5 | high, per title: wrong for hand-written code that returns a flag | `dead_context_store_verify` at level 3 on that title: no `TranslatorVerify:` line |
-| 9 | `ppc_mcrf_copies_field` | `mcrf` copies the field | correctness only | low | |
+| 9 | `propagate_context_constants` | loads of registers that hold a constant on every path become the constant | small: a load and some folding here and there | medium: a wrong join gives a wrong value | `context_constant_verify`: no `TranslatorVerify:` line |
+| 10 | `ppc_mcrf_copies_field` | `mcrf` copies the field | correctness only | low | |
 
 The earlier branches' settings (`simplification_skip_unchanged_blocks`,
 `a64_thunk_fpcr_compare`, `a64_compact_stackpoint_push`,
@@ -533,16 +567,6 @@ paths).
 
 ## 6. Not done, and how to go on
 
-- **Constant propagation across blocks.** The design: a forward data-flow
-  over the same edges as section 2 that carries, per context slot, "holds
-  this constant" from each block's end to its successors (the meet is
-  "same constant on every edge"; anything volatile clears all), then
-  replaces a `LOAD_CONTEXT` of such a slot with the constant before the
-  simplification group runs. Its self-check would keep the load and compare
-  it with the constant. It was left for last because it changes values the
-  optimiser then folds further, so its testing is the widest of the five,
-  and the session's time went to the items above and to chasing the faults
-  the tests found.
 - **More than three integer pins.** Pins come out of the allocator's seven
   registers, x22 to x28. An instruction can need four. The other integer
   registers are scratch in the sequences (the study's 175 uses of x9 to
@@ -582,6 +606,7 @@ simplification: ... ;
 translate ahead: queued, dropped, already done, not attempted, translated
 by the helper, priority boosts; functions translated on the thread that
 needed them;
+context loads made constants across blocks;
 dead context stores: removed of candidates; compares fused with their
 branch; functions emitted twice for short forward branches or linked
 calls; linked call sites, of which point at their callee; address fix-ups
@@ -608,7 +633,7 @@ All marked `hakuX-Boosted:` at each change.
 | `.github/workflows/boosted.yml` | the job "Translator tests" |
 | `cpu/ppc/testing/ppc_testing_main.cc` | `--test_state_dump`; memory cleared before each test; `seq_*.s` files are run as well as `instr_*.s`; the log is started when `--log_file` is given; the self-check counters are printed and fail the run; the `TranslationStats:` lines are printed with `--log_translation_stats` |
 | `cpu/ppc/testing/ci/**` | new: the small build, the scripts, the matrix, the C sources of the generated tests |
-| `cpu/ppc/testing/seq_*.s` (six new files) | new tests |
+| `cpu/ppc/testing/seq_*.s` (seven new files) | new tests |
 | `cpu/ppc/ppc_emit_control.cc` | `ppc_mcrf_copies_field` |
 | `cpu/hir/opcodes.h`, `hir_builder.h`, `.cc` | `CONTEXT_BARRIER_FOR_BRANCH`; `ContextBarrier` takes flags; the per-instruction sync masks (`PinSyncState`) |
 | `cpu/ppc/ppc_hir_builder.cc` | marks the barriers emitted for branch instructions |
@@ -617,6 +642,7 @@ All marked `hakuX-Boosted:` at each change.
 | `cpu/backend/a64/a64_sequences.cc` | `LOAD_CONTEXT` and `STORE_CONTEXT` for I8 ask for a pin |
 | `cpu/compiler/translation_stats.h`, `compiler.cc` | the new counters, `FormatTranslationStats`, `SelfCheckMismatches` |
 | `cpu/compiler/passes/dead_context_store_pass.h`, `.cc` | new: section 3.1 |
+| `cpu/compiler/passes/context_constant_pass.h`, `.cc` | new: section 3.6 |
 | `cpu/compiler/compiler_passes.h`, `cpu/ppc/ppc_translator.cc` | the new pass in the pipeline; the translate-ahead queueing after a function is assembled |
 | `cpu/backend/a64/a64_emitter.h`, `.cc` (further) | `EmitCompareResult`/`TakeFusedCompare`/`FindFusableBranch`; `UseShortBranch` and the two-attempt loop in `Emit`; the locals laid out once; linked call literals; `EmitDeadStoreVerify`, `EmitStackFixupVerify` |
 | `cpu/backend/a64/a64_sequences.cc`, `a64_seq_control.cc` | integer compares end in `EmitCompareResult`; `BRANCH_TRUE`/`BRANCH_FALSE` on I8 ask for a fused compare; the dead-store check after I8 and I64 context loads |

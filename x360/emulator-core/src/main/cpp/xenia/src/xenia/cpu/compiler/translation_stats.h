@@ -53,6 +53,9 @@ struct TranslationStats {
   // dead_context_store_verify, replaced by the marker).
   std::atomic<uint64_t> dead_context_stores_seen{0};
   std::atomic<uint64_t> dead_context_stores_removed{0};
+  // propagate_context_constants: context loads replaced by a constant
+  // known from another block (or, in its verify mode, checked against it).
+  std::atomic<uint64_t> context_constants_propagated{0};
   // a64_fuse_compare_branch: compares emitted as cmp + b.cond.
   std::atomic<uint64_t> compares_fused{0};
   // a64_short_forward_branches: functions emitted a second time because

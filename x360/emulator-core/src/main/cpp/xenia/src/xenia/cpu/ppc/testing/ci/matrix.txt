@@ -66,6 +66,10 @@ dead stores, ABI (verify)   ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|rl|sl|
 fuse, short branches        ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|f|l|st|rl|sl|sr|t)) ; --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true
 short forward, emit twice   ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr|t|v)) ; --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_short_forward_branches_test_retry=true
 
+# Constants carried across blocks.
+constants across blocks     ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr|t)) ; --propagate_context_constants=true
+constants (verify)          ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|rl|sl|sr)) ; --propagate_context_constants=true --context_constant_verify=true
+
 # Linked call sites.
 linked calls                ; ^(seq_|instr_(add|cmp|b|l|st|m)) ; --a64_linked_calls=true
 
@@ -81,5 +85,5 @@ linked calls                ; ^(seq_|instr_(add|cmp|b|l|st|m)) ; --a64_linked_ca
 translate ahead             ; ^(seq_|instr_(add|cmp|b|l|st|m)) ; --translate_ahead=true --translate_ahead_any_module=true
 
 # Everything a device run would turn on, together.
-everything                  ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --eliminate_dead_context_stores=2 --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_linked_calls=true --a64_stack_access_no_fixup=true --simplification_skip_unchanged_blocks=true --a64_compact_stackpoint_push=true --a64_thunk_fpcr_compare=true --ppc_mcrf_copies_field=true --translate_ahead=true --translate_ahead_any_module=true
-everything, 16k             ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --eliminate_dead_context_stores=2 --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_linked_calls=true --a64_stack_access_no_fixup=true --simplification_skip_unchanged_blocks=true --a64_compact_stackpoint_push=true --a64_thunk_fpcr_compare=true --ppc_mcrf_copies_field=true #16k-mmap
+everything                  ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --eliminate_dead_context_stores=2 --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_linked_calls=true --a64_stack_access_no_fixup=true --simplification_skip_unchanged_blocks=true --a64_compact_stackpoint_push=true --a64_thunk_fpcr_compare=true --ppc_mcrf_copies_field=true --propagate_context_constants=true --translate_ahead=true --translate_ahead_any_module=true
+everything, 16k             ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --eliminate_dead_context_stores=2 --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_linked_calls=true --a64_stack_access_no_fixup=true --simplification_skip_unchanged_blocks=true --a64_compact_stackpoint_push=true --a64_thunk_fpcr_compare=true --ppc_mcrf_copies_field=true --propagate_context_constants=true #16k-mmap

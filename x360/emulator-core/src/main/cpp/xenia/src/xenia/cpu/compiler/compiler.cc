@@ -191,6 +191,7 @@ std::string FormatExtraStats() {
       get(t.ahead_skipped), get(t.ahead_translated), get(t.ahead_boosts),
       get(t.translated_on_demand));
   line += fmt::format(
+      "; context loads made constants across blocks {}"
       "; dead context stores: {} of {} candidate stores removed; compares "
       "fused with their branch {}; functions emitted twice for short "
       "forward branches or linked calls {}; linked call sites {} of "
@@ -198,6 +199,7 @@ std::string FormatExtraStats() {
       "address fix-ups emitted {} and left out for stack accesses {}; "
       "stack accesses at 0xE0000000+ {}; "
       "self-check mismatches (TranslatorVerify) {}",
+      get(t.context_constants_propagated),
       get(t.dead_context_stores_removed), get(t.dead_context_stores_seen),
       get(t.compares_fused), get(t.short_forward_retries),
       get(t.linked_call_sites), get(t.linked_call_sites_resolved),
