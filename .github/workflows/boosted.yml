@@ -219,3 +219,66 @@ jobs:
           name: hakuX-Boosted-debug-apk
           path: android/app/build/outputs/apk/debug/*.apk
           retention-days: 14
+
+  # The translator's tests: upstream's PowerPC instruction tests and the
+  # fork's sequence tests, translated by the ARM64 back end and run under
+  # qemu, once with every translator setting at its default and once for
+  # each line of cpu/ppc/testing/ci/matrix.txt. Independent of the two jobs
+  # above: it builds only the CPU sources (cpu/ppc/testing/ci/CMakeLists.txt).
+  ppc-tests:
+    name: Translator tests (PowerPC on the ARM64 back end)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      XE: x360/emulator-core/src/main/cpp/xenia
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The submodules the CPU sources need
+        run: |
+          tp=$XE/third_party
+          git submodule update --init --depth 1 -- $tp/xbyak_aarch64 $tp/fmt \
+            $tp/capstone $tp/cxxopts $tp/date $tp/tomlplusplus $tp/utfcpp \
+            $tp/xxhash $tp/disruptorplus $tp/boost_context/context
+
+      - name: Tools
+        run: |
+          boosted/tools/ci-apt.sh ninja-build ccache clang qemu-user \
+            g++-aarch64-linux-gnu texinfo flex bison
+          qemu-aarch64 --version | head -1
+          clang --version | head -1
+
+      # The PowerPC assembler for the test sources: binutils 2.24 with
+      # xenia's VMX128 patch. Built once and kept.
+      - uses: actions/cache@v4
+        id: binutils
+        with:
+          path: ~/ppc-binutils
+          key: ppc-binutils-2.24-vmx128-${{ hashFiles('x360/emulator-core/src/main/cpp/xenia/third_party/binutils/binutils-2.24-vmx128.patch', 'x360/emulator-core/src/main/cpp/xenia/src/xenia/cpu/ppc/testing/ci/build-binutils.sh') }}
+
+      - name: Build the PowerPC assembler
+        if: steps.binutils.outputs.cache-hit != 'true'
+        run: $XE/src/xenia/cpu/ppc/testing/ci/build-binutils.sh ~/ppc-binutils
+
+      - name: Assemble the tests
+        run: $XE/src/xenia/cpu/ppc/testing/ci/gen-tests.sh ~/ppc-binutils/bin "$RUNNER_TEMP/ppc-test-bin"
+
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ppc-tests-aarch64-cross
+          max-size: 1G
+
+      - name: Build the test runner (ARM64, cross-compiled)
+        run: |
+          ci=$XE/src/xenia/cpu/ppc/testing/ci
+          cmake -S $ci -B "$RUNNER_TEMP/ppc-tests" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$PWD/$ci/aarch64-cross.cmake \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          ninja -C "$RUNNER_TEMP/ppc-tests"
+
+      - name: Run the tests with each translator setting
+        env:
+          WRAPPER: qemu-aarch64 -L /usr/aarch64-linux-gnu
+        run: |
+          $XE/src/xenia/cpu/ppc/testing/ci/run-matrix.sh \
+            "$RUNNER_TEMP/ppc-tests/xenia-cpu-ppc-tests" "$RUNNER_TEMP/ppc-test-bin"

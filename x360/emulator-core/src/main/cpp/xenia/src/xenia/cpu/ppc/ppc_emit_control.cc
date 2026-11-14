@@ -18,6 +18,16 @@
 #include <stddef.h>
 // chrispy: added this, we can have simpler control flow and do dce on the
 // inputs
+// hakuX-Boosted: see InstrEmit_mcrf.
+DEFINE_bool(
+    ppc_mcrf_copies_field, false,
+    "Translate mcrf as PowerPC defines it: the four bits of the source "
+    "condition register field copied to the destination field. Off, mcrf is "
+    "translated as upstream does, which is only right when the source is cr0 "
+    "holding 'less than'. Takes effect for functions translated after it is "
+    "set.",
+    "CPU");
+
 DEFINE_bool(ignore_trap_instructions, true,
             "Generate no code for powerpc trap instructions, can result in "
             "better performance in games that aggressively check with trap.",
@@ -519,6 +529,24 @@ int InstrEmit_crxor(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_mcrf(PPCHIRBuilder& f, const InstrData& i) {
   uint32_t crfd = i.XL.BO >> 2;
+  // hakuX-Boosted: the form below is wrong for most operands. LoadCR(n)
+  // gives field n at its own place in the 32-bit register and StoreCR(d, v)
+  // takes field d's bits out of v, so a copy between two different fields
+  // stores zeros; UpdateCR then replaces them with a compare of the source
+  // field against zero. The upstream tests only copy from cr0 with the LT
+  // bit set, where that happens to give the right answer. The exact form is
+  // behind a setting because it changes what translated code does.
+  if (cvars::ppc_mcrf_copies_field) {
+    uint32_t crfs = i.XL.BI >> 2;
+    Value* bits[4];
+    for (uint32_t b = 0; b < 4; ++b) {
+      bits[b] = f.LoadCRField(crfs, b);
+    }
+    for (uint32_t b = 0; b < 4; ++b) {
+      f.StoreCRField(crfd, b, bits[b]);
+    }
+    return 0;
+  }
   Value* bi = f.LoadCR(i.XL.BI >> 2);
 
   f.StoreCR(crfd, bi);

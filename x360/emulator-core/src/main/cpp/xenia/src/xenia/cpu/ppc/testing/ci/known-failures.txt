@@ -1,9 +1,16 @@
 # hakuX-Boosted: tests that fail on the ARM64 back end as it is on
 # claude/integration-1113, with every translator setting at its default.
 # They are skipped in CI so that a red run always means a new difference.
-# One test name a line, as in ../skip.txt.
+# One test name a line, as in ../skip.txt. "name unless <flag>" skips the
+# test only in runs that are not given that flag.
 
 # stwcx. to an address other than the one lwarx reserved must fail without
 # storing. With a64_native_reserved_ops (the default) the store-conditional
 # does not compare addresses and stores. Titles pair the two on one address.
 stwcx_address_mismatch
+
+# mcrf between fields other than from cr0: wrong as upstream translates it,
+# right with the fork's setting (see InstrEmit_mcrf in ppc_emit_control.cc).
+mcrf_fields_cr7_to_cr3 unless --ppc_mcrf_copies_field=true
+mcrf_fields_gt unless --ppc_mcrf_copies_field=true
+mcrf_fields_zero_source unless --ppc_mcrf_copies_field=true

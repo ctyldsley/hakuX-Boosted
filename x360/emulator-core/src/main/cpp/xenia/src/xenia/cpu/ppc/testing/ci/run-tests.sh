@@ -39,7 +39,12 @@ while read -r suite; do
 done < "$work/all"
 
 # Upstream's skip list and this fork's own (known-failures.txt) as one file.
-grep -h -v '^#' "$tests/skip.txt" "$here/known-failures.txt" | grep . > "$work/skip"
+# A line "name unless <flag>" of known-failures.txt applies only to runs
+# without that flag.
+grep -h -v '^#' "$tests/skip.txt" | grep . > "$work/skip"
+grep -v '^#' "$here/known-failures.txt" | grep . | while read -r name unless flag; do
+  if [ -z "$unless" ] || ! echo " $* " | grep -q -F -- " $flag "; then echo "$name"; fi
+done >> "$work/skip"
 
 pids=()
 for shard in "$work"/shard.*; do

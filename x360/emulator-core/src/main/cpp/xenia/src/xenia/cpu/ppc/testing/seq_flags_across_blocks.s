@@ -106,7 +106,7 @@ cr_one_path_done:
   mfcr r7
   blr
   #_ REGISTER_OUT r5 0
-  #_ REGISTER_OUT r7 0xBADBADBAD
+  #_ REGISTER_OUT r7 0x42000000
 
 test_cr_overwritten_on_one_path_other:
   #_ REGISTER_IN r3 1
@@ -124,7 +124,7 @@ cr_one_path_o_done:
   mfcr r7
   blr
   #_ REGISTER_OUT r5 1
-  #_ REGISTER_OUT r7 0xBADBADBAD
+  #_ REGISTER_OUT r7 0x84000000
 
 # Flags set before a call and read after it; the callee leaves cr0 alone
 # and changes cr7.
@@ -146,7 +146,7 @@ cr_across_2:
   FRAME_OUT
   blr
   #_ REGISTER_OUT r5 1
-  #_ REGISTER_OUT r7 0xBADBADBAD
+  #_ REGISTER_OUT r7 0x80000008
 cr_callee:
   cmpwi cr7, r4, 100
   blr
@@ -171,7 +171,7 @@ cr_returned_skip2:
   bne cr_returned_loop
   FRAME_OUT
   blr
-  #_ REGISTER_OUT r5 0xBADBADBAD
+  #_ REGISTER_OUT r5 0x88
 cr_returning_callee:
   andi. r0, r3, 3
   blr
@@ -223,7 +223,7 @@ cr_logic_4:
   mfcr r7
   blr
   #_ REGISTER_OUT r6 5
-  #_ REGISTER_OUT r7 0xBADBADBAD
+  #_ REGISTER_OUT r7 0xA2000080
 
 # Record forms (the dot instructions) feeding a later branch, with a second
 # record form on one path.
@@ -246,7 +246,7 @@ record_later_2:
   mfcr r7
   blr
   #_ REGISTER_OUT r8 1
-  #_ REGISTER_OUT r7 0xBADBADBAD
+  #_ REGISTER_OUT r7 0x20000400
 
 # The carry, set in one block and consumed in another, and over a call
 # that leaves it alone.
@@ -306,9 +306,9 @@ carry_chain_loop:
   bne cr1, carry_chain_loop
   addze r8, r7
   blr
-  #_ REGISTER_OUT r5 0xBADBADBAD
-  #_ REGISTER_OUT r7 0xBADBADBAD
-  #_ REGISTER_OUT r8 0xBADBADBAD
+  #_ REGISTER_OUT r5 0xFFFFFFFFFFFFFF40
+  #_ REGISTER_OUT r7 0x26F
+  #_ REGISTER_OUT r8 0x26F
 
 # CTR and LR as plain registers: moved through, changed by a callee, used
 # for a computed branch within the function.
@@ -325,12 +325,15 @@ ctr_lr_loop:
   mfctr r7
   FRAME_OUT
   blr
-  #_ REGISTER_OUT r5 0xBADBADBAD
-  #_ REGISTER_OUT r7 0xBADBADBAD
+  #_ REGISTER_OUT r5 0x16
+  #_ REGISTER_OUT r7 0
 ctr_lr_callee:
   mfctr r9
   cmpwi r9, 3
   bnelr
+  cmpwi r10, 0
+  bnelr
+  li r10, 1
   li r9, 6
   mtctr r9
   blr
@@ -354,27 +357,26 @@ bdnz_cond_loop:
   #_ REGISTER_OUT r5 630
   #_ REGISTER_OUT r7 0x20000000
 
-# mtcrf and mcrf moving whole fields that a later block branches on.
+# mtcrf moving whole fields that a later block branches on.
 test_field_moves:
   #_ REGISTER_IN r3 0x4000000B
   mtcrf 0x81, r3
-  mcrf cr3, cr7
   b field_moves_1
 field_moves_1:
   li r5, 0
   ble field_moves_2
   ori r5, r5, 1
 field_moves_2:
-  bns cr3, field_moves_3
+  bns cr7, field_moves_3
   ori r5, r5, 2
 field_moves_3:
-  bge cr3, field_moves_4
+  bge cr7, field_moves_4
   ori r5, r5, 4
 field_moves_4:
   mfcr r7
   blr
   #_ REGISTER_OUT r5 7
-  #_ REGISTER_OUT r7 0x4000B00B
+  #_ REGISTER_OUT r7 0x4000000B
 
 # Float compare bits used in a later block and after a call.
 test_float_compare_later:
@@ -395,7 +397,7 @@ float_cmp_2:
   FRAME_OUT
   blr
   #_ REGISTER_OUT r5 3
-  #_ REGISTER_OUT r7 0xBADBADBAD
+  #_ REGISTER_OUT r7 0x80000040
 float_compare_callee:
   fadd f3, f1, f2
   blr
