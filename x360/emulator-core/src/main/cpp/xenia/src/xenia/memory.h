@@ -312,20 +312,35 @@ class PhysicalHeap : public BaseHeap {
   void EnableAccessCallbacks(uint32_t physical_address, uint32_t length,
                              bool enable_invalidation_notifications,
                              bool enable_data_providers);
+  // hakuX-Boosted: requested_first and requested_last are the pages the
+  // caller asked for; the range may be wider when watches are armed ahead
+  // (memory_watch_arm_ahead_kb), and the pages outside the request are then
+  // marked as armed ahead.
   template <bool enable_invalidation_notifications, bool enable_data_providers>
   XE_NOINLINE void EnableAccessCallbacksInner(
       const uint32_t system_page_first, const uint32_t system_page_last,
-      xe::memory::PageAccess protect_access) XE_RESTRICT;
+      xe::memory::PageAccess protect_access, const uint32_t requested_first,
+      const uint32_t requested_last) XE_RESTRICT;
+
+  // hakuX-Boosted: watches in this view are kept with userfaultfd
+  // write-protection and not mprotect (memory_watch_uffd). Set once, by
+  // Memory::Initialize, after the view has been registered.
+  void set_kernel_write_watch(bool value) { kernel_write_watch_ = value; }
+  bool kernel_write_watch() const { return kernel_write_watch_; }
 
   // Returns true if any page in the range was watched. With
   // invalidate_unwatched the callbacks are raised even when no watch is armed,
   // for a caller that knows the range is about to change rather than one
   // reacting to a fault.
+  // hakuX-Boosted: from_fault says the call comes from the access violation
+  // handler for one faulting page (for the counters, for the pages armed
+  // ahead, and to lift a stray kernel write-protection).
   bool TriggerCallbacks(global_unique_lock_type global_lock_locked_once,
                         uint32_t virtual_address, uint32_t length,
                         bool is_write, bool unwatch_exact_range,
                         bool unprotect = true,
-                        bool invalidate_unwatched = false);
+                        bool invalidate_unwatched = false,
+                        bool from_fault = false);
 
   uint32_t GetPhysicalAddress(uint32_t address) const;
 
@@ -390,10 +405,32 @@ class PhysicalHeap : public BaseHeap {
     // Whether the first access of each page triggers read callbacks. These
     // pages are protected no-access. The watch is one-shot, cleared on access.
     uint64_t notify_on_read = 0;
+    // hakuX-Boosted: pages whose write watch was armed ahead of any request
+    // (memory_watch_arm_ahead_kb). Always a subset of notify_on_invalidation:
+    // such a page is watched like any other, the bit only records that no
+    // cache asked for it, so a fault on it can be counted as wasted.
+    uint64_t armed_ahead = 0;
+    // hakuX-Boosted: faults taken in this block on pages armed ahead. Once it
+    // reaches memory_watch_arm_ahead_spurious_limit nothing more is armed
+    // ahead in the block.
+    uint32_t ahead_spurious = 0;
   };
   // Protected by global_critical_region. Flags for each 64 system pages,
   // interleaved as blocks, so bit scan can be used to quickly extract ranges.
   std::vector<SystemPageFlagsBlock> system_page_flags_;
+
+  // hakuX-Boosted: the host side of arming and lifting watches on system
+  // pages first to last of this view. Arming read-only goes through
+  // userfaultfd when kernel_write_watch_ is set; everything else, and any
+  // ioctl that fails, is mprotect.
+  void WatchHostProtect(uint32_t system_page_first, uint32_t system_page_last,
+                        xe::memory::PageAccess access);
+  void WatchHostKernelUnprotect(uint32_t system_page_first,
+                                uint32_t system_page_last);
+  bool kernel_write_watch_ = false;
+  // An arming ioctl has failed and that range was protected with mprotect:
+  // from then on lifting a watch does both.
+  bool kernel_write_watch_mixed_ = false;
 };
 
 // Models the entire guest memory system on the console.

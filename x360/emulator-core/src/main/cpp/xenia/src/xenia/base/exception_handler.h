@@ -257,6 +257,14 @@ class ExceptionHandler {
 
   // Uninstalls a previously-installed exception handler.
   static void Uninstall(Handler fn, void* data);
+
+  // hakuX-Boosted: a range of addresses (guest memory) in which a fault can
+  // never be a fibre stack overflow, so the handler need not take the fibre
+  // stack registry's lock and search it before running the handlers. Faults
+  // on watched guest pages are the frequent ones. Not set (the default)
+  // leaves every fault checked as before. POSIX only; elsewhere it does
+  // nothing.
+  static void SetNoStackOverflowRange(const void* begin, const void* end);
 };
 
 }  // namespace xe

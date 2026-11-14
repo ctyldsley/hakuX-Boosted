@@ -35,6 +35,16 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/string.h"
 
+// hakuX-Boosted: for the userfaultfd write watch below.
+#if XE_PLATFORM_LINUX
+#include <linux/userfaultfd.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#if defined(__ANDROID__)
+#include <android/api-level.h>
+#endif
+#endif
+
 #if XE_PLATFORM_xendroid
 #include <android/sharedmem.h>
 #endif
@@ -279,8 +289,169 @@ bool Protect(void* base_address, size_t length, PageAccess access,
     XELOGE("mprotect({}, 0x{:X}, {}) failed: {} ({})", base_address, length,
            prot, strerror(errno), errno);
   }
+  // hakuX-Boosted: counted for the memory_watch_log line.
+  if (watch_stats_enabled()) {
+    WatchCounters& counters = watch_counters();
+    counters.mprotect_calls.fetch_add(1, std::memory_order_relaxed);
+    counters.mprotect_pages.fetch_add(
+        (length + (page_size() - 1)) / page_size(), std::memory_order_relaxed);
+  }
   return ret == 0;
 }
+
+// hakuX-Boosted: userfaultfd write-protection, see memory.h. Linux only (the
+// Android build is XE_PLATFORM_LINUX); everywhere else it reports that it is
+// not available and the caller keeps to mprotect.
+#if XE_PLATFORM_LINUX
+namespace {
+// The descriptor, -1 until WriteWatchInitialize succeeds. Never closed: the
+// registered ranges live as long as the process does.
+int write_watch_fd_ = -1;
+
+// Values from linux/userfaultfd.h that older NDK sysroots may lack. The
+// kernel is asked at run time, so a header that knows less is no obstacle.
+#ifndef UFFD_USER_MODE_ONLY
+#define UFFD_USER_MODE_ONLY 1
+#endif
+#ifndef UFFD_FEATURE_WP_HUGETLBFS_SHMEM
+#define UFFD_FEATURE_WP_HUGETLBFS_SHMEM (1 << 12)
+#endif
+}  // namespace
+
+bool WriteWatchInitialize() {
+  if (write_watch_fd_ >= 0) {
+    return true;
+  }
+#if defined(__ANDROID__)
+  // Android's seccomp filter for apps kills the process on a system call it
+  // does not list, and userfaultfd joined the list in Android 12 (API 31,
+  // for ART's collector). Never make the call below that.
+  if (android_get_device_api_level() < 31) {
+    XELOGW(
+        "Write watch: userfaultfd is not open to apps before Android 12 "
+        "(this is API {}), watches stay on mprotect",
+        android_get_device_api_level());
+    return false;
+  }
+#endif
+  // UFFD_USER_MODE_ONLY: Android sets vm.unprivileged_userfaultfd to 0, which
+  // allows an app a descriptor that handles faults taken in user mode only.
+  // That is all a watch needs: a write made by the kernel on the guest's
+  // behalf into a protected page fails with EFAULT, as it does under mprotect.
+  int fd = int(syscall(__NR_userfaultfd, O_CLOEXEC | UFFD_USER_MODE_ONLY));
+  if (fd < 0) {
+    XELOGW(
+        "Write watch: userfaultfd is not available to this process ({}, {}), "
+        "watches stay on mprotect",
+        strerror(errno), errno);
+    return false;
+  }
+  // Write-protect faults on shared memory, delivered as SIGBUS to the
+  // faulting thread and not as messages on the descriptor: the handler must
+  // run on the thread that wrote, before the write completes.
+  struct uffdio_api api;
+  std::memset(&api, 0, sizeof(api));
+  api.api = UFFD_API;
+  api.features = UFFD_FEATURE_SIGBUS | UFFD_FEATURE_PAGEFAULT_FLAG_WP |
+                 UFFD_FEATURE_WP_HUGETLBFS_SHMEM;
+  if (ioctl(fd, UFFDIO_API, &api) != 0) {
+    int api_errno = errno;
+    // Ask again for nothing, only to log what this kernel does offer.
+    uint64_t offered = 0;
+    int probe_fd =
+        int(syscall(__NR_userfaultfd, O_CLOEXEC | UFFD_USER_MODE_ONLY));
+    if (probe_fd >= 0) {
+      struct uffdio_api probe;
+      std::memset(&probe, 0, sizeof(probe));
+      probe.api = UFFD_API;
+      if (ioctl(probe_fd, UFFDIO_API, &probe) == 0) {
+        offered = probe.features;
+      }
+      close(probe_fd);
+    }
+    XELOGW(
+        "Write watch: this kernel's userfaultfd lacks write-protection of "
+        "shared memory with SIGBUS delivery ({}, {}; features offered "
+        "{:#x}, needed {:#x}), watches stay on mprotect",
+        strerror(api_errno), api_errno, offered, uint64_t(api.features));
+    close(fd);
+    return false;
+  }
+  if (!(api.ioctls & (uint64_t(1) << _UFFDIO_REGISTER))) {
+    XELOGW("Write watch: userfaultfd offers no register ioctl, watches stay "
+           "on mprotect");
+    close(fd);
+    return false;
+  }
+  write_watch_fd_ = fd;
+  XELOGI("Write watch: userfaultfd ready (features {:#x})",
+         uint64_t(api.features));
+  return true;
+}
+
+bool WriteWatchRegister(void* base_address, size_t length) {
+  if (write_watch_fd_ < 0) {
+    return false;
+  }
+  struct uffdio_register reg;
+  std::memset(&reg, 0, sizeof(reg));
+  reg.range.start = reinterpret_cast<uintptr_t>(base_address);
+  reg.range.len = length;
+  reg.mode = UFFDIO_REGISTER_MODE_WP;
+  if (ioctl(write_watch_fd_, UFFDIO_REGISTER, &reg) != 0) {
+    XELOGW(
+        "Write watch: registering {} + {:#x} failed ({}, {}), watches there "
+        "stay on mprotect",
+        base_address, length, strerror(errno), errno);
+    return false;
+  }
+  if (!(reg.ioctls & (uint64_t(1) << _UFFDIO_WRITEPROTECT))) {
+    XELOGW(
+        "Write watch: {} + {:#x} registered but the mapping cannot be "
+        "write-protected (ioctls {:#x}), watches there stay on mprotect",
+        base_address, length, uint64_t(reg.ioctls));
+    struct uffdio_range range;
+    range.start = reg.range.start;
+    range.len = reg.range.len;
+    ioctl(write_watch_fd_, UFFDIO_UNREGISTER, &range);
+    return false;
+  }
+  return true;
+}
+
+bool WriteWatchProtect(void* base_address, size_t length, bool protect) {
+  // Called from the fault handler: system calls and atomics only, and errno
+  // is put back.
+  if (write_watch_fd_ < 0) {
+    return false;
+  }
+  int saved_errno = errno;
+  struct uffdio_writeprotect wp;
+  wp.range.start = reinterpret_cast<uintptr_t>(base_address);
+  wp.range.len = length;
+  wp.mode = protect ? UFFDIO_WRITEPROTECT_MODE_WP : 0;
+  int ret;
+  int attempts = 0;
+  do {
+    ret = ioctl(write_watch_fd_, UFFDIO_WRITEPROTECT, &wp);
+  } while (ret != 0 && (errno == EAGAIN || errno == EINTR) && ++attempts < 16);
+  if (watch_stats_enabled()) {
+    WatchCounters& counters = watch_counters();
+    counters.uffd_calls.fetch_add(1, std::memory_order_relaxed);
+    if (ret != 0) {
+      counters.uffd_failures.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  errno = saved_errno;
+  return ret == 0;
+}
+#else
+bool WriteWatchInitialize() { return false; }
+bool WriteWatchRegister(void* base_address, size_t length) { return false; }
+bool WriteWatchProtect(void* base_address, size_t length, bool protect) {
+  return false;
+}
+#endif  // XE_PLATFORM_LINUX
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 #if XE_PLATFORM_MAC

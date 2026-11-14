@@ -183,4 +183,8 @@ void ExceptionHandler::Uninstall(Handler fn, void* data) {
   }
 }
 
+// hakuX-Boosted: nothing to skip here, see exception_handler.h.
+void ExceptionHandler::SetNoStackOverflowRange(const void* begin,
+                                               const void* end) {}
+
 }  // namespace xe
