@@ -294,6 +294,8 @@ static constexpr uint64_t kWaitParkMinUs = 50;
 // hakuX-Boosted: adaptive gate: a park is the burst's age shifted right by
 // this (a quarter).
 static constexpr unsigned kWaitParkAgeShift = 2;
+// hakuX-Boosted: adaptive gate: yields a thread makes between two parks.
+static constexpr uint32_t kWaitPassesAfterPark = 4;
 static constexpr uint64_t kWaitArmWindowUs = 2000;
 static constexpr uint64_t kPollGapUs = 400;
 
@@ -1730,7 +1732,23 @@ bool GuestScheduler::NoteWaitSpin(XThread* self) {
     links.poll_site = 0;
     links.spin_burst_tick = 0;
   }
-  if (!prev || now - prev > 32 * yield_gap_ticks_ || !links.spin_burst_tick) {
+  // hakuX-Boosted: adaptive gate. Back from a park the thread is looked at
+  // again after kWaitPassesAfterPark yields, not 32 (TryWaitPark set the
+  // count so): the guest still runs its own test that many times between
+  // two parks, and a thread that does a few microseconds of work on each
+  // pass is not kept awake for 32 of them every time (bench run 17: such a
+  // thread stayed at a third of a core, 260 us awake for each park). The
+  // cadence that counts as spinning is the same per yield.
+  uint64_t passes = 32;
+  if (park_wait_adaptive_ && prev) {
+    WaitLearn* learn = WaitLearnOf(self);
+    if (learn && learn->short_look) {
+      learn->short_look = false;
+      passes = kWaitPassesAfterPark;
+    }
+  }
+  if (!prev || now - prev > passes * yield_gap_ticks_ ||
+      !links.spin_burst_tick) {
     // The first look of a burst (after a wait of the thread's own), or the
     // thread did something between its yields: a new burst.
     WaitBurstEnded(self);
@@ -2010,6 +2028,11 @@ bool GuestScheduler::TryWaitPark(XThread* self, uint64_t now, bool poll) {
   const uint64_t back = Clock::host_tick_count_raw();
   after.spin_check_tick = back;
   after.spin_calls = 0;
+  if (learn && !poll) {
+    // See NoteWaitSpin: the next look after a few yields.
+    learn->short_look = true;
+    after.spin_calls = 32 - kWaitPassesAfterPark;
+  }
   after.poll_visits = 0;
   after.wait_arm_tick = back;
   if (park_wait_adaptive_) {

@@ -25,8 +25,8 @@ Base: `claude/integration-1115` at `5aea2e2`. Pushed only to
      once by a signal of the object it polls.
   5. The main thread's empty yields: the arithmetic says there is little
      there to win ("The main thread").
-  6. Bench rows, and the table of the first green run, bench run 15 ("Bench
-     results").
+  6. Bench rows, and the tables of bench runs 15 and 17 ("Bench results").
+     Run 17 reproduces the phone's result on the runner.
 - In progress: nothing.
 - Next: the device runs under "What a device run must show". Then "What is
   next".
@@ -140,7 +140,9 @@ BENCH_SCHED_ONLY=busy_wait_poll_sled_noisy BENCH_CORE_LOG=1 ./bench_core \
    `guest_scheduler_park_wait_after_us` old, the thread is parked at its
    next look whatever has happened.
 2. **How long.** A quarter of the time the burst has lasted so far, no less
-   than 100 us and no more than `guest_scheduler_park_wait_max_us`.
+   than 100 us and no more than `guest_scheduler_park_wait_max_us`. Between
+   two parks the thread makes four passes of its own loop (32 before the
+   first park of a burst).
 3. **What an event may do: end a park early, after the thread's hold-off.**
    The hold-off starts at 50 us. It is learnt per thread from what follows
    an early wake:
@@ -319,6 +321,71 @@ which is a poll loop.
 Runner numbers (a GitHub ARM64 runner), not phone numbers. They say what a
 path costs relative to another on a server core; nothing about frame rate
 or heat on a phone.
+
+### Bench run 17: the phone's result reproduced on the runner
+
+https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43651784030, green,
+the code of `82aac63` with the scenarios as corrected after run 15
+(`yield_with_work`, a varied delay, a fresh burst for each wait). Cores busy,
+waiter never answered, about 6,500 unrelated events a second:
+
+| Waiter (`_noisy`) | defaults | `park_waits` (no poll sites) | first gate + poll sites | adaptive + poll sites | adaptive, max 500 us | adaptive + skew bound |
+|---|---|---|---|---|---|---|
+| `yield_with_work` | 1.02 | 0.345 | **1.02** | **0.346** | 0.493 | 0.347 |
+| `yield` | 1.02 | 0.026 | 0.081 | 0.025 | 0.032 | 0.026 |
+| `zero_delay` | 1.02 | 0.028 | 0.086 | 0.027 | 0.034 | 0.027 |
+| `zero_timeout_wait` | 1.02 | 0.038 | 0.214 | 0.037 | 0.052 | 0.037 |
+| `poll_sled` | 1.02 | 1.02 | 0.070 | 0.025 | 0.030 | 0.025 |
+| `poll_hint` | 1.02 | 1.01 | 0.070 | 0.025 | 0.031 | 0.025 |
+| `poll_plain` | 1.02 | 1.02 | 0.069 | 0.025 | 0.030 | 0.026 |
+| `spin_lock` | 1.01 | 1.02 | 0.071 | 0.025 | 0.031 | 0.026 |
+| `poll_clock` | 1.02 | 1.02 | 1.03 | 1.02 | 1.02 | 1.02 |
+
+- **`yield_with_work` with the first gate: 1.02, nothing parked.** This is
+  the phone's result on the runner: a thread that does a few microseconds
+  of work before each yield, beside unrelated events, is never parked by
+  "no event since the last look". With the adaptive gate it is.
+- **But only down to a third of a core, in this run.** The scheduler looked
+  at a thread every 32 yields, also straight after a park, so this thread
+  was awake for 32 passes of its work (about 260 us) for every park of at
+  most a millisecond. Fixed after this run: back from a park, the next look
+  comes after 4 yields (`kWaitPassesAfterPark`). The guest still runs its
+  own test four times between two parks. The figures of the build with
+  that fix are under "Bench run of the final code" below.
+- The other rows are as in run 15.
+
+Latency with the corrected scenarios: the flag is made true by a plain
+store 2 to 4 ms after the waiter last took one; microseconds; median / 95th
+percentile / worst:
+
+| Waiter (`_answered_noisy`) | defaults | first gate + poll sites | adaptive + poll sites | adaptive, max 500 us |
+|---|---|---|---|---|
+| `yield` | 0.3 / 1.7 / 34 | 56 / 147 / 154 | 321 / 719 / 762 | 165 / 476 / 497 |
+| `zero_delay` | 0.2 / 0.3 / 0.3 | 73 / 138 / 148 | 326 / 702 / 774 | 222 / 417 / 473 |
+| `zero_timeout_wait` | 0.4 / 0.5 / 0.7 | 47 / 103 / 125 | 329 / 717 / 771 | 169 / 462 / 499 |
+| `zero_timeout_wait`, its own event signalled | 0.4 / 0.5 / 0.6 | 11 / 78 / 99 | 11 / 14 / 16 | 11 / 14 / 17 |
+| `poll_sled` | 0.3 / 0.3 / 0.3 | 81 / 149 / 155 | 262 / 642 / 690 | 151 / 451 / 523 |
+| `poll_plain` | 0.2 / 0.3 / 0.3 | 82 / 150 / 152 | 254 / 703 / 826 | 246 / 488 / 529 |
+| `spin_lock` | 0.3 / 0.4 / 0.4 | 54 / 143 / 153 | 299 / 775 / 802 | 237 / 447 / 499 |
+
+- With the adaptive gate a wait of 2 to 4 ms is answered about 0.3 ms late
+  in the middle and 0.7 to 0.8 ms at worst: the designed bound (a quarter
+  of the wait so far, at most the longest park) and not more. With `max
+  500 us` the worst is 0.5 ms.
+- The first gate answers sooner here (0.15 ms at worst) because on this
+  machine it is woken by the unrelated events, about every 150 us. That is
+  the same behaviour that leaves it three to six times the CPU in the table
+  above, and on the phone it did not park at all.
+- A waiter that polls an object with a zero timeout sees that object's
+  signal in 11 us.
+- Quiet, `yield_answered_quiet`: 392 / 746 / 882 with the adaptive gate,
+  549 / 962 / 1026 with the first (its parks double and reach the longest
+  sooner).
+
+### Bench run of the final code
+
+To be added from the run of the commit that carries the fix above (see
+"Build").
 
 ### Bench run 15, commit `82aac63`
 
@@ -563,8 +630,14 @@ None is needed for this branch to work. Two would help:
 
 ## Build
 
-- `82aac63` (all the code): bench run 15, green,
+- `82aac63` (the code but for the last fix): bench run 15, green,
   https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43649224652. App
   run 137, https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43649224679:
-  result below when known.
-- The commits after it change the bench's scenarios and these notes only.
+  "Xbox core" and "APK (both cores)" green; its "Translator tests" job
+  (about 100 minutes) was still running when the next push replaced the
+  run.
+- `161b3e7` (the same code, the corrected scenarios): bench run 17, green,
+  https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43651784030.
+- The commit that carries this line adds the look after four yields
+  (`guest_scheduler.cc`, `.h`): its app and bench runs are named below when
+  known.

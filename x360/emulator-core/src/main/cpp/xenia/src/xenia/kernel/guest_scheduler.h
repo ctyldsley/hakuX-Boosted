@@ -538,6 +538,9 @@ class GuestScheduler {
     // not yet known whether the wait was over.
     bool woke_early = false;
     uint32_t parks_since_probe = 0;
+    // The thread is just back from a park: its next look comes after
+    // kWaitPassesAfterPark yields, not 32 (NoteWaitSpin).
+    bool short_look = false;
     // The object the thread last polled with a zero timeout in this burst
     // (NoteEmptyWait), null if none. Read by signallers.
     std::atomic<const XObject*> polled{nullptr};
