@@ -99,12 +99,20 @@ inline int futex_wake(std::atomic<uint32_t>* addr, int count) {
 // through the previous thread's TLS base and the global lock took that
 // thread's id as its owner (kernel/xthread.cc, XThread::GetCurrentThread).
 XE_NOINLINE pid_t gettid() {
+#if defined(__ANDROID__)
+  // hakuX-Boosted: bionic keeps the id in the thread's own control block and
+  // reads it without the TLS resolver, which the thread_local below goes
+  // through on every lock (boosted/notes/guest-waits.md, "What remains
+  // through the resolver").
+  return ::gettid();
+#else
   // Cached per thread: this is on the xe_global_mutex lock/unlock fast path
   // (taken per kernel call and per GPU packet), and the raw syscall showed up
   // as ~2% of the GPU command processor thread in profiles.
   static thread_local const pid_t tid =
       static_cast<pid_t>(syscall(SYS_gettid));
   return tid;
+#endif
 }
 
 }  // namespace

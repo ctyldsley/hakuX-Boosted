@@ -5,7 +5,7 @@ where the work stands, what is waiting on whom, and how to work in this
 repository. **Update it before a session ends** (the "Right now" section
 and a line in the log at the bottom), and commit it with the work.
 
-Last updated: 2026-11-12 (run 37 tested on a cold shader cache; the build on the phone is run 37, `42f03a8`).
+Last updated: 2026-11-14 (`claude/integration-1115` made: everything in one build, not yet on the phone; the build on the phone is run 90 of `claude/integration-1113`, `91b7a7a`).
 
 ## The backlog: promised to the owner, not yet in a build
 
@@ -89,6 +89,14 @@ Until those branches are merged, this session keeps out of the files
 they own.
 
 ## Right now
+
+- **One build with everything, 2026-11-14 evening: branch `claude/integration-1115`, made by the desktop session from `claude/integration-1114` (`1ba8d00`). Nothing in it has run on a device.** `claude/integration-1113` (run 90) is still what is on the owner's phone and still the known-good build.
+  - **Merged with `--no-ff`, no conflict in any:** `claude/guest-waits` at `5e67bde` (notes only over what 1114 had), `claude/shader-first-run` at `b718ad5` (12 commits: the pixel interpreter, depth-only async, the adaptive creation threads, the fetch's vector sign step, the record's import and export), `claude/translator-wide` at `0665311` (15 commits, all new: the translator tests in CI, wide pinning, the cheaper-code settings, translate ahead). `claude/defaults-config`, `claude/bench-harness` and `claude/memory-watches` were already in 1114.
+  - **Applied from the notes' "files I do not own" lists** (each marked `hakuX-Boosted:` and in `ARCHITECTURE.md`): `config.cc`, `SaveConfig` and `SaveGameConfig` write a `.tmp` and rename it over the file (defaults-config); `gpu/command_processor.cc` calls `NoteWaitEvent()` after the read pointer write-back (guest-waits; does nothing unless `guest_scheduler_park_waits` has parked a thread); `base/mutex.cc` uses bionic's `gettid()` on Android (guest-waits). The first and third change what a build with nothing set does: to check on the first run (settings still save; no `.tmp` left beside the config; no hang at start, since the global lock's owner id now comes from bionic).
+  - **Not applied, on purpose:** the defaults `guest_scheduler_skew_bound_us = 2000` and `guest_scheduler_skew_cap_multiple = 100` (guest-waits asks for a cold start with the first frame back near 8 s first); `defaults_date = 2026080113` (unproven on the phone); the other pause idioms in `ppc_emit_alu.cc` (changes translation for every title, and its notes say it is not needed); memory-watches' vertex-buffer tail page and `MakeRangeValid` lock in `gpu/shared_memory.cc` and the lock-free fibre stack registry in `base/threading_fiber.cc` (real changes that want their own branch and the phone's `memory watch:` line first); the app's "preparing shaders" screen and the two export and import settings rows (shader-first-run; Kotlin work, the core side is in). These stay on the backlog.
+  - **New settings since 1114's list, all defaulting to today's behaviour.** shader-first-run: `vulkan_placeholder_depth_only_async`, `vulkan_placeholder_ps_mode = 3`, `vulkan_pipeline_creation_adaptive` (and `_frame_ms`), `spirv_tfetch_vector_signs`, `vulkan_placeholder_interpreter_vertex_textures`, `vulkan_placeholder_interpreter_vertex_budget`, `shader_record_export_path`, `shader_record_import_path`. translator-wide: `pin_guest_registers_wide`, `pin_guest_registers_flags`, `pin_guest_registers_max_int`, `_max_vec`, `eliminate_dead_context_stores` (0 to 3), `a64_fuse_compare_branch`, `a64_short_forward_branches`, `a64_linked_calls`, `a64_stack_access_no_fixup`, `propagate_context_constants`, `translate_ahead`, `ppc_mcrf_copies_field`, and the verify modes `a64_pin_verify`, `dead_context_store_verify`, `a64_stack_access_verify`, `context_constant_verify`.
+  - **Order on the phone** (the owner plays; a handful of runs; config built whole on the PC, pushed, read back; back up the config and `content/` before the first install, the config store is new code): run A, the working config plus `host_thread_state_slot`, `guest_scheduler_lean_yield` (one launch with `host_thread_state_verify` first), cold, for the time to the first frame with `guest_scheduler_skew_host_progress`; run B, shader-first-run's table rows 1 to 6 (`shader-first-run.md`, "Settings, in the order to try them"); run C, the translator's table (`translator-wide.md`, section 5), verify modes first, saves backed up. `guest_scheduler_park_waits`, `park_pause_poll_loops` and the memory watch settings after those, in 1114's order below.
+  - **Builds:** the plain merge is `caf0f80`; the commit with the three changes follows it. Run numbers are added here when the builds finish.
 
 - **The overnight merge, 2026-11-14 07:00 UTC: branch `claude/integration-1114`, made by the scheduled routine (Section B of `boosted/notes/OVERNIGHT-2-ROUTINES.md`). Nothing in this build has run on a device.** Every statement below about behaviour is what the branches' notes say the code is meant to do; the only checks are the GitHub Actions builds. `claude/integration-1113` was not pushed to and is still the known-good build on the owner's phone. The merge added what the branches hold and nothing else: no default and no code was changed by the routine, and the changes the notes ask the desktop session to make in files their sessions did not own are listed below, not applied.
   - **Merged, in this order, all without a conflict** (each cut from `claude/integration-1113`; head commit; its own app build):
@@ -1327,6 +1335,13 @@ build locally and use adb; the device etiquette in upstream's own
 ## Session log
 
 Newest first. One or two lines each: what changed, what was verified.
+
+- **2026-11-14 (desktop, evening).** `claude/integration-1115`: 1114 plus
+  the heads of `claude/guest-waits`, `claude/shader-first-run` and
+  `claude/translator-wide`, and three small changes their notes asked for
+  (`config.cc` atomic writes, `NoteWaitEvent` in the GPU worker, bionic's
+  `gettid()`). Verified: the builds named in "Right now" once they finish.
+  Not verified: anything on a device.
 
 - **2026-11-12 (desktop, 22:30).** Runs 38 and 39 built; run 39 (hand-off
   change plus full-screen waits) on the phone stalled after 5518 frames.

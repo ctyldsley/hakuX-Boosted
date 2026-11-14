@@ -28,6 +28,7 @@
 #include "xenia/gpu/sampler_info.h"
 #include "xenia/gpu/texture_info.h"
 #include "xenia/gpu/xenos_zpd_report.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 
@@ -736,6 +737,12 @@ void CommandProcessor::WorkerThreadMain() {
     if (read_ptr_writeback_ptr_) {
       xe::store_and_swap<uint32_t>(
           memory_->TranslatePhysical(read_ptr_writeback_ptr_), read_ptr_index_);
+      // hakuX-Boosted: a guest thread parked in a busy wait on the read
+      // pointer (guest_scheduler_park_waits) ends its park with the GPU's
+      // progress instead of at its deadline. One load when nobody is parked.
+      if (auto* guest_scheduler = kernel_state_->guest_scheduler()) {
+        guest_scheduler->NoteWaitEvent();
+      }
     }
 
     // FIXME: We're supposed to process the WAIT_UNTIL register at this point,

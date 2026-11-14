@@ -172,6 +172,22 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/base/memory.h`, `memory.cc`, `memory_posix.cc`, `memory_win.cc` | `WatchCounters` and its switch; the three `WriteWatch*` functions (the userfaultfd wrapper on POSIX, stubs on Windows); counting in `Protect` |
 | `xenia/base/exception_handler.h`, `_posix.cc`, `_win.cc` | `SetNoStackOverflowRange`; the timing wrapper around the signal handler (`ExceptionHandlerCallbackTimed`), which is what is now installed |
 | `xenia/base/memory_watch_test.cc` | New file, the test of the watches. The build skips `*_test.cc` and the file is empty without `XE_MEMORY_WATCH_HARNESS` |
+| `xenia/gpu/spirv_shader_translator_fetch.cc`, `spirv_shader_translator.cc`, `gpu_flags.h`, `.cc` | `spirv_tfetch_vector_signs` (the vector form of a fetch's sign step, beside the switch); the assertion in `PWLGammaToLinear` (`claude/shader-first-run` at `b718ad5`, merged 2026-11-14 into `claude/integration-1115`, as are the next two rows) |
+| `xenia/gpu/command_processor.h` | `GetShaderPreparationProgress` |
+| `xenia/gpu/vulkan/vulkan_pipeline_cache.h`, `.cc`, `vulkan_command_processor.h`, `.cc` (further) | The pixel interpreter (`vulkan_placeholder_ps_mode = 3`), its textures, samplers and float constants; `vulkan_placeholder_depth_only_async`; the vertex texture switch and the vertex budget; the `first run split:` line; the creation threads' adaptive policy; the driver cache check, the progress counters, import and export of the shader record |
+| `.github/workflows/boosted.yml` | The job "Translator tests" (`claude/translator-wide` at `0665311`, merged 2026-11-14 into `claude/integration-1115`, as are the rows down to `entry_table.cc`; the full table is in `boosted/notes/translator-wide.md`) |
+| `xenia/cpu/ppc/testing/ppc_testing_main.cc`, `testing/ci/**`, `testing/seq_*.s` | The test runner's state dump, self-check counters and `seq_*.s` files; new: the small ARM64 build, its scripts and matrix, seven test files |
+| `xenia/cpu/ppc/ppc_emit_control.cc` | `ppc_mcrf_copies_field` |
+| `xenia/cpu/hir/opcodes.h`, `hir_builder.h`, `.cc`, `cpu/ppc/ppc_hir_builder.cc` | `CONTEXT_BARRIER_FOR_BRANCH`; `ContextBarrier` takes flags; the per-instruction sync masks; the barriers of branch instructions marked |
+| `xenia/cpu/compiler/passes/guest_register_pinning_pass.h`, `.cc` | `RunWide` and `pin_guest_registers_wide`, `_flags`, `_max_int`, `_max_vec` |
+| `xenia/cpu/compiler/passes/dead_context_store_pass.*`, `context_constant_pass.*` | New files: `eliminate_dead_context_stores`, `propagate_context_constants` |
+| `xenia/cpu/compiler/translation_stats.h`, `compiler.cc`, `compiler_passes.h`, `cpu/ppc/ppc_translator.cc` | The new counters and `SelfCheckMismatches`; the new passes in the pipeline; the translate-ahead queueing |
+| `xenia/cpu/backend/a64/a64_emitter.h`, `.cc`, `a64_sequences.cc`, `a64_seq_control.cc`, `a64_seq_util.h` | Masked write-back and reload, 8-bit pins, block counters; fused compare and branch; short branches and the two-attempt loop in `Emit`; linked call literals; the stack fix-up left out or counted; the verify modes |
+| `xenia/cpu/backend/a64/a64_code_cache.h`, `.cc`, `a64_function.h` | `LinkCallSites` and the literal list a function carries to it |
+| `xenia/cpu/processor.h`, `.cc`, `cpu/entry_table.cc` | The translate-ahead helper, its stop in `~Processor`, the priority boost from the entry table's wait |
+| `xenia/config.cc` | `SaveConfig` and `SaveGameConfig` write a `.tmp`, flush (and `fsync` in `SaveConfig`) and rename over the file (asked for by `claude/defaults-config`; applied on `claude/integration-1115`, as are the next two rows) |
+| `xenia/gpu/command_processor.cc` | `NoteWaitEvent()` after the read pointer write-back, so a parked busy wait ends with the GPU's progress (asked for by `claude/guest-waits`) |
+| `xenia/base/mutex.cc` | On Android `gettid()` is bionic's, which does not go through the TLS resolver (asked for by `claude/guest-waits`) |
 
 ## Taking a newer hakuX
 

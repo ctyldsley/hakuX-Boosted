@@ -10,7 +10,15 @@
 #include "config.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <fstream>
 #include <sstream>
+#include <system_error>
+
+#include "xenia/base/platform.h"
+#if XE_PLATFORM_LINUX
+#include <unistd.h>  // hakuX-Boosted: fsync, for SaveConfig's atomic write.
+#endif
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
@@ -369,7 +377,11 @@ void SaveGameConfig(uint32_t title_id, const toml::table& config_table) {
 
   try {
     xe::filesystem::CreateParentFolder(game_config_path);
-    std::ofstream file(game_config_path);
+    // hakuX-Boosted: written beside the file and renamed over it, as
+    // SaveConfig does, so a kill inside the write cannot truncate it.
+    auto tmp_path = game_config_path;
+    tmp_path += ".tmp";
+    std::ofstream file(tmp_path);
     if (!file.is_open()) {
       throw std::runtime_error("Failed to open file for writing");
     }
@@ -377,7 +389,15 @@ void SaveGameConfig(uint32_t title_id, const toml::table& config_table) {
     file << "# Game-specific config overrides\n";
     file << "# Title ID: " << fmt::format("{:08X}", title_id) << "\n\n";
     file << config_table << "\n";
+    file.flush();
+    const bool written = file.good();
     file.close();
+    if (!written) {
+      std::error_code ec;
+      std::filesystem::remove(tmp_path, ec);
+      throw std::runtime_error("Failed to write file");
+    }
+    std::filesystem::rename(tmp_path, game_config_path);
 
     XELOGI("Saved game config for title {:08X}", title_id);
   } catch (const std::exception& e) {
@@ -626,12 +646,29 @@ void SaveConfig() {
   // save the config file
   xe::filesystem::CreateParentFolder(config_path);
 
-  auto handle = xe::filesystem::OpenFile(config_path, "wb");
+  // hakuX-Boosted: written beside the file and renamed over it, so a process
+  // killed inside the write leaves the old config whole instead of a
+  // truncated one (boosted/notes/defaults-config.md, step 2).
+  auto tmp_path = config_path;
+  tmp_path += ".tmp";
+  auto handle = xe::filesystem::OpenFile(tmp_path, "wb");
   if (!handle) {
-    XELOGE("Failed to open '{}' for writing.", config_path);
+    XELOGE("Failed to open '{}' for writing.", tmp_path);
   } else {
-    fwrite(sb.buffer(), 1, sb.length(), handle);
-    fclose(handle);
+    bool written = fwrite(sb.buffer(), 1, sb.length(), handle) == sb.length();
+    written = fflush(handle) == 0 && written;
+#if XE_PLATFORM_LINUX
+    written = fsync(fileno(handle)) == 0 && written;
+#endif
+    written = fclose(handle) == 0 && written;
+    std::error_code ec;
+    if (written) {
+      std::filesystem::rename(tmp_path, config_path, ec);
+    }
+    if (!written || ec) {
+      XELOGE("Failed to write '{}'; the previous file is kept.", config_path);
+      std::filesystem::remove(tmp_path, ec);
+    }
   }
 
   // Notify that config was saved
