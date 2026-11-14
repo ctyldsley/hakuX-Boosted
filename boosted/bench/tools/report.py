@@ -217,7 +217,7 @@ def main():
 
     env = [(k, v) for k, v in notes.items()
            if k[1] in ("cpu", "kernel", "libc", "lse_atomics", "cores",
-                       "instruction_counter", "compiler")]
+                       "instruction_counter", "compiler", "c++ library")]
     if env:
         out.append("| Runner | |")
         out.append("|---|---|")

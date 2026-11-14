@@ -426,6 +426,9 @@ int RunSchedSuite(const std::string& label, void* slot_address) {
   Env* env = CreateEnv(true);
   g_env = env;
   EmitNote(s, "thread-locals (" + label + ")", TlsMode());
+#ifdef BENCH_CXX_LIBRARY
+  EmitNote(s, "c++ library", BENCH_CXX_LIBRARY);
+#endif
 
   Thunks t;
   t.begin = env->ImportThunk("BenchBegin", HostBegin);

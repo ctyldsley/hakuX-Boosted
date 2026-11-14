@@ -190,6 +190,9 @@ int main(int argc, char** argv) {
                   "bionic (Android's libc and linker), API level " +
                       std::to_string(android_get_device_api_level()));
 #endif
+#ifdef BENCH_CXX_LIBRARY
+  bench::EmitNote(s, "c++ library", BENCH_CXX_LIBRARY);
+#endif
   const bool has_lse = (getauxval(AT_HWCAP) & HWCAP_ATOMICS) != 0;
   bench::EmitNote(s, "lse_atomics", has_lse ? "yes" : "no");
   bench::EmitNote(s, "cores", std::to_string(sysconf(_SC_NPROCESSORS_ONLN)));

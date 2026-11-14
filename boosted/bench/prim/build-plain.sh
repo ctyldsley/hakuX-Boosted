@@ -17,6 +17,12 @@ asm="$here/../../../x360/emulator-core/src/main/cpp/xenia/third_party/boost_cont
 flags=(-O2 -DNDEBUG -march=armv8-a -fno-strict-aliasing -fno-omit-frame-pointer)
 # PRIM_EXTRA_FLAGS: more flags for every compile and link, space separated
 # (the workflow passes -fno-emulated-tls inside the Termux container).
+mkdir -p "$out"
+# libc++ where the compiler has it, as in the app and in the CMake build.
+if echo 'int main(){}' | "$cxx" -x c++ -stdlib=libc++ - -o "$out/.probe" 2> /dev/null; then
+  flags+=(-stdlib=libc++ '-DBENCH_CXX_LIBRARY="libc++"')
+fi
+rm -f "$out/.probe"
 read -r -a extra <<< "${PRIM_EXTRA_FLAGS:-}"
 flags+=("${extra[@]}")
 mkdir -p "$out"

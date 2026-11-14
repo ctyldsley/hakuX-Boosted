@@ -95,6 +95,10 @@ jobs:
         run: |
           mkdir -p results
           if command -v clang++ > /dev/null; then cc=clang; cxx=clang++; else cc=gcc; cxx=g++; fi
+          if [ "$cxx" = clang++ ] && ! echo 'int main(){}' | clang++ -x c++ -stdlib=libc++ - -o /tmp/libcxx-probe 2> /dev/null; then
+            sudo timeout 240 apt-get -o Acquire::Retries=2 update > /dev/null 2>&1 || true
+            sudo timeout 240 apt-get install -y --no-install-recommends libc++-dev libc++abi-dev > /dev/null 2>&1 || true
+          fi
           boosted/bench/prim/build-plain.sh "$RUNNER_TEMP/prim-glibc" "$cc" "$cxx"
           cd "$RUNNER_TEMP/prim-glibc"
           for round in 1 2; do
@@ -212,6 +216,10 @@ jobs:
           for tool in clang:clang ninja:ninja-build ccache:ccache cmake:cmake; do
             command -v "${tool%%:*}" > /dev/null || missing+=("${tool##*:}")
           done
+          # libc++, the C++ library the app is built against
+          if ! echo 'int main(){}' | clang++ -x c++ -stdlib=libc++ - -o /tmp/libcxx-probe 2> /dev/null; then
+            missing+=(libc++-dev libc++abi-dev)
+          fi
           if [ "${#missing[@]}" -gt 0 ]; then
             sudo timeout 240 apt-get -o Acquire::Retries=2 update || true
             sudo timeout 240 apt-get install -y --no-install-recommends "${missing[@]}"
@@ -307,6 +315,10 @@ jobs:
         run: |
           if [ -f "$RUNNER_TEMP/bin/target/FAILED" ]; then
             echo "::error::the rig did not build: $(tr '\n' ' ' < "$RUNNER_TEMP/bin/target/FAILED")"
+            exit 1
+          fi
+          if grep -q "NOT libc++" results/target.jsonl; then
+            echo "::error::the rig was not built against libc++"
             exit 1
           fi
           if grep -q "NOT MEASURED\|WRONG" results/target.jsonl; then
