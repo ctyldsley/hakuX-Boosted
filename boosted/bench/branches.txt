@@ -5,3 +5,8 @@
 # One branch a line. A branch that does not exist is skipped.
 claude/guest-waits
 claude/translator-wide
+# These two change defaults and guest memory, which the rig's "defaults"
+# columns and its loads and stores would show. claude/shader-first-run is
+# not here: the rig builds nothing under gpu/.
+claude/defaults-config
+claude/memory-watches

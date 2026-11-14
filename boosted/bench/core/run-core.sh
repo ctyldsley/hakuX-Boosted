@@ -48,10 +48,9 @@ run bench_core sched "all of the above" $lean $park $slot $skew
 run bench_core sched "a64_thunk_fpcr_compare" a64_thunk_fpcr_compare=true
 run bench_core sched "a64_lean_extern_thunk" a64_lean_extern_thunk=true
 run bench_core_static sched "static TLS (not Android's)"
-# Not a setting of the core: the kernel's timer slack lowered from its
-# default 50 us to 1 ns for the whole process, to see which paths are waiting
-# on a timed sleep (boosted/notes/bench-harness.md, "The one-CPU hand-over").
-BENCH_TIMER_SLACK_NS=1 run bench_core sched "timer slack 1 ns (a test)"
+# BENCH_TIMER_SLACK_NS=1 before any of these lines runs it with the kernel's
+# timer slack at 1 ns instead of the default 50 us: a test of whether a path
+# is waiting on a short timed sleep. (None of these is: tried on 2026-11-14.)
 
 # --- 3. The translator ---------------------------------------------------------
 run bench_core xlat "defaults"
