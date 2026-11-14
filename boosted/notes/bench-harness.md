@@ -18,11 +18,11 @@ changes.
   machine, prints both and the difference in the job summary, and uploads
   the raw numbers.
 - Done: green on Actions with real numbers (see "First results").
-- Done: `claude/guest-waits` measured against `claude/integration-1113`
-  with the rig (see "First results"). `claude/translator-wide` did not exist
-  yet when the rig last ran; it is in `boosted/bench/branches.txt`, with
-  `claude/defaults-config` and `claude/memory-watches`, and each is measured
-  at the next push to this branch once it exists.
+- Done: `claude/guest-waits`, `claude/defaults-config` and
+  `claude/memory-watches` measured against `claude/integration-1113` with
+  the rig (see "First results"). `claude/translator-wide` did not exist
+  yet when the rig last ran; it is in `boosted/bench/branches.txt` and is
+  measured at the next push to this branch once it does.
 - Done, and worth knowing before trusting any rig like this: the first runs
   were built against the runner's GNU C++ library and showed an event
   hand-over on one guest CPU taking 111 microseconds. Built against libc++,
@@ -425,7 +425,7 @@ machine. Everything in the scheduler section that moved by more than 3%:
 | yield, another fiber ready, slot | 242 | 262 | -7.5% |
 | the same, lean yield + slot | 246 | 261 | -5.5% |
 | the same, all five | 260 | 277 | -6.3% |
-| zero delay, nothing ready, defaults | 66.8 | 63.8 | +4.7% |
+| zero delay, nothing ready, defaults (see below: not a cost of the branch) | 66.8 | 63.8 | +4.7% |
 | the same, skew 2000 us | 70.0 | 66.9 | +4.7% |
 | the same, static TLS | 60.3 | 57.7 | +4.5% |
 
@@ -437,11 +437,41 @@ the slot read 10.1 against 11.8 in this run and 11.9 against 10.3 in the
 run before: the two-level figure described above, not a change.
 
 So, on this runner: guest-waits makes the lean empty yield about a quarter
-cheaper and the lean zero delay about a seventh, makes the slot worth 8%
-of an empty yield where it was worth 7%, and costs 3 ns on a zero delay
-with every new setting off (seen in every column where the new paths are
-off, in both runs). Whether any of that is visible on the phone is for the
-phone.
+cheaper and the lean zero delay about a seventh, and makes the slot worth
+8% more of an empty yield than it was. Whether any of that is visible on
+the phone is for the phone.
+
+The zero delay with every new setting off reads 3 ns higher on guest-waits
+in every column where the new paths are off, in both runs, and I first
+took that for a small cost of the branch. It is not established:
+`claude/memory-watches`, which does not touch the scheduler, shows the
+same 3 ns on the same rows (66.2 against 63.8). It looks like a second
+level that any rebuild of the library can land on (where the code falls),
+like `Fiber::SwitchTo`'s. See the rule under "Between two builds" below.
+
+### `claude/defaults-config` and `claude/memory-watches`
+
+Run 43553613094 (commit `82ee402`), a job each. `claude/defaults-config`:
+nothing in the scheduler or translator sections moved outside the noise
+(one two-CPU round trip by 4.3%, the two-speed loops, one translation
+time), so at that commit it had not changed a default that the rig's
+"defaults" columns run through. `claude/memory-watches`: the 3 ns on the
+zero delay just described, `Fiber::SwitchTo` with the slot at its other
+level, the two-speed loops; the `copy` loop's instruction counts (its loads
+and stores are the path that branch could touch) are identical to the
+baseline's. The rig has no benchmark for what either branch is for.
+
+### Between two builds
+
+Two runs of the same binaries agree to 1% on almost every scheduler row.
+Two builds of different sources do not agree that well even where the
+changed code is not on the measured path: a 3 to 5% step on a 60 ns row,
+15% on the 10 ns `Fiber::SwitchTo`, 17% on the `copy` loop, have all
+appeared from nothing but where the code landed. So: between a branch and
+the baseline, believe a change that is large (the lean yield's 27% is),
+or that comes with a changed instruction count, or that has a mechanism
+you can name. Do not act on a few per cent of a short path on the rig's
+word alone.
 
 ## Findings for the other sessions
 
@@ -550,8 +580,9 @@ fiber ready, a wait and wake on one and on two dispatch threads) with
 six synthetic PowerPC loops through the translator with
 `pin_guest_registers`, `simplification_skip_unchanged_blocks`,
 `a64_thunk_fpcr_compare` and `a64_lean_extern_thunk` off and on, in host
-instructions and nanoseconds per guest instruction; and `claude/guest-waits`
-against `claude/integration-1113`.
+instructions and nanoseconds per guest instruction; and `claude/guest-waits`,
+`claude/defaults-config` and `claude/memory-watches` against
+`claude/integration-1113`.
 
 Not measured: anything on the phone or on a phone's CPU; frame rate;
 anything under heat; bionic's dynamic TLS resolver (the container's bionic
@@ -560,9 +591,10 @@ is too old for ELF thread-locals); the scheduler under Android's linker
 differs from the app"); `kernel_state.cc` (stood in for); a title's real
 mix of calls; register pinning's effect (it never applied to the loops);
 the GPU, audio, memory watches and file access; `claude/translator-wide`
-(it did not exist when the rig last ran), `claude/shader-first-run`,
-`claude/defaults-config` and `claude/memory-watches` (the rig has no
-benchmark for what they change). No speed-up on the phone is claimed for
+(it did not exist when the rig last ran) and `claude/shader-first-run`
+(the rig builds nothing under `gpu/`); what `claude/defaults-config` and
+`claude/memory-watches` are for (they were run through the rig, which has
+no benchmark for their own changes). No speed-up on the phone is claimed for
 anything.
 
 ## Files
