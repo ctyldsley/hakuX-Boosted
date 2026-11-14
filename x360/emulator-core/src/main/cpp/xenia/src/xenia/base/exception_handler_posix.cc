@@ -10,6 +10,7 @@
 #include "xenia/base/exception_handler.h"
 
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 #include <atomic>
 #include <cstdint>
@@ -19,6 +20,7 @@
 #include "xenia/base/host_thread_context.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/threading.h"
 
@@ -445,12 +447,45 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
   signal(signal_number, SIG_DFL);
 }
 
+// hakuX-Boosted: the installed handler. It times the real one for the
+// memory_watch_log line when that setting is on, and otherwise only tests one
+// flag. clock_gettime is async-signal-safe. A fault taken inside the handler
+// (SA_NODEFER) is counted and timed as its own delivery, so its time is in
+// the outer one's as well.
+static void ExceptionHandlerCallbackTimed(int signal_number,
+                                          siginfo_t* signal_info,
+                                          void* signal_context) {
+  if (!xe::memory::watch_stats_enabled() ||
+      (signal_number != SIGSEGV && signal_number != SIGBUS)) {
+    ExceptionHandlerCallback(signal_number, signal_info, signal_context);
+    return;
+  }
+  struct timespec start;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  ExceptionHandlerCallback(signal_number, signal_info, signal_context);
+  struct timespec end;
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  uint64_t elapsed_ns =
+      uint64_t(int64_t(end.tv_sec - start.tv_sec) * INT64_C(1000000000) +
+               int64_t(end.tv_nsec - start.tv_nsec));
+  xe::memory::WatchCounters& counters = xe::memory::watch_counters();
+  counters.fault_signals.fetch_add(1, std::memory_order_relaxed);
+  counters.fault_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+  uint64_t previous_max = counters.fault_ns_max.load(std::memory_order_relaxed);
+  while (elapsed_ns > previous_max &&
+         !counters.fault_ns_max.compare_exchange_weak(
+             previous_max, elapsed_ns, std::memory_order_relaxed)) {
+  }
+}
+
 void ExceptionHandler::Install(Handler fn, void* data) {
   if (!signal_handlers_installed_) {
     struct sigaction signal_handler;
 
     std::memset(&signal_handler, 0, sizeof(signal_handler));
-    signal_handler.sa_sigaction = ExceptionHandlerCallback;
+    // hakuX-Boosted: the timing wrapper above, which calls
+    // ExceptionHandlerCallback.
+    signal_handler.sa_sigaction = ExceptionHandlerCallbackTimed;
     // SA_ONSTACK: an exhausted fiber stack cannot host the handler frame, run
     // on the per-thread sigaltstack instead.
     // SA_NODEFER: the handler faults on guest memory it protects itself, and a

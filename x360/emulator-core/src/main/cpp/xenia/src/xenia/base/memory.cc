@@ -25,6 +25,10 @@ DEFINE_bool(
 namespace xe {
 namespace memory {
 
+// hakuX-Boosted: see WatchCounters in memory.h.
+bool watch_stats_enabled_ = false;
+WatchCounters watch_counters_;
+
 bool IsWritableExecutableMemoryPreferred() {
   return IsWritableExecutableMemorySupported() &&
          cvars::writable_executable_memory;

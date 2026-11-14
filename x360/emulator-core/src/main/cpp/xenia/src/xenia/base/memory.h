@@ -10,6 +10,8 @@
 #ifndef XENIA_BASE_MEMORY_H_
 #define XENIA_BASE_MEMORY_H_
 
+#include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -111,6 +113,78 @@ bool Protect(void* base_address, size_t length, PageAccess access,
 // rights. The length will start from the first byte of the first page of
 // the region.
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out);
+
+// hakuX-Boosted: counters for the guest memory watches (the page protection
+// the GPU caches use to learn of guest writes), so a device run can show what
+// they cost. Nothing is counted unless watch_stats_enabled() (the setting
+// memory_watch_log in xenia/memory.cc). Written from guest threads inside the
+// fault handler and from the GPU command thread, hence atomic; read once a
+// second by the log line.
+struct WatchCounters {
+  // Every mprotect made through Protect(), whoever asked.
+  std::atomic<uint64_t> mprotect_calls{0};
+  std::atomic<uint64_t> mprotect_pages{0};
+  // Requests to watch a range (one per heap view that had the range).
+  std::atomic<uint64_t> arm_requests{0};
+  std::atomic<uint64_t> arm_request_pages{0};
+  // Host calls made to arm watches, and the pages they covered.
+  std::atomic<uint64_t> arm_calls{0};
+  std::atomic<uint64_t> arm_pages{0};
+  // Of arm_pages: pages watched ahead of any request, and pages inside a
+  // call only because the run was bridged over them.
+  std::atomic<uint64_t> arm_ahead_pages{0};
+  std::atomic<uint64_t> arm_bridged_pages{0};
+  // Host calls made to lift watches, and the pages they covered.
+  std::atomic<uint64_t> unwatch_calls{0};
+  std::atomic<uint64_t> unwatch_pages{0};
+  // Of the arm and unwatch calls: those that were a userfaultfd ioctl and not
+  // an mprotect, and ioctls that failed (each falls back to mprotect).
+  std::atomic<uint64_t> uffd_calls{0};
+  std::atomic<uint64_t> uffd_failures{0};
+  // SIGSEGV and SIGBUS deliveries, and the time from handler entry to exit.
+  std::atomic<uint64_t> fault_signals{0};
+  std::atomic<uint64_t> fault_ns{0};
+  std::atomic<uint64_t> fault_ns_max{0};
+  // Faults that reached a physical heap view, by what they found: a watch
+  // that fired its callbacks, a page watched only ahead of a request, a read
+  // watch, nothing to do (another thread got there first), not ours.
+  std::atomic<uint64_t> fault_watch_hits{0};
+  std::atomic<uint64_t> fault_ahead_hits{0};
+  std::atomic<uint64_t> fault_read_hits{0};
+  std::atomic<uint64_t> fault_races{0};
+  std::atomic<uint64_t> fault_unhandled{0};
+  // Callbacks raised without a fault (allocation, release, guest protect,
+  // host code announcing a write).
+  std::atomic<uint64_t> announced_triggers{0};
+  // Guest requests to change protection, and those that asked for what the
+  // pages already had.
+  std::atomic<uint64_t> guest_protect_calls{0};
+  std::atomic<uint64_t> guest_protect_unchanged{0};
+};
+extern bool watch_stats_enabled_;
+extern WatchCounters watch_counters_;
+inline bool watch_stats_enabled() { return watch_stats_enabled_; }
+inline void set_watch_stats_enabled(bool enabled) {
+  watch_stats_enabled_ = enabled;
+}
+inline WatchCounters& watch_counters() { return watch_counters_; }
+
+// hakuX-Boosted: write-protection of shared file mappings through Linux
+// userfaultfd, as a cheaper way to watch for writes than mprotect: it changes
+// only page table entries under the mmap read lock, where mprotect takes the
+// write lock and splits and merges mappings. A write to a protected page
+// raises SIGBUS at the faulting address (UFFD_FEATURE_SIGBUS), which the
+// exception handler already receives beside SIGSEGV.
+//
+// WriteWatchInitialize opens the descriptor and negotiates the features;
+// false where the platform, the kernel or the app sandbox does not allow it,
+// with the reason logged. WriteWatchRegister puts a mapped range under it.
+// WriteWatchProtect sets (protect) or clears write-protection on whole pages
+// of a registered range; it is one ioctl, async-signal-safe, and returns
+// false on any failure, leaving the caller to use Protect().
+bool WriteWatchInitialize();
+bool WriteWatchRegister(void* base_address, size_t length);
+bool WriteWatchProtect(void* base_address, size_t length, bool protect);
 
 // Allocates a block of memory for a type with the given alignment.
 // The memory must be freed with AlignedFree.

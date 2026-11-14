@@ -9,7 +9,10 @@
 
 #include "xenia/memory.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <random>
 
@@ -58,6 +61,34 @@ DEFINE_int32(scribble_heap_value, 0,
 DEFINE_uint32(mmap_address_high,8,
               "1-124",
               "Memory");
+// hakuX-Boosted: the guest memory watches (boosted/notes/memory-watches.md).
+// Every one of these defaults to the behaviour before it existed.
+DEFINE_bool(memory_watch_log, false,
+            "Log once a second what the guest memory watches cost: mprotect "
+            "calls and pages, watches armed and lifted, faults taken and the "
+            "time spent in the fault handler.",
+            "Memory");
+DEFINE_bool(memory_watch_bridge_runs, false,
+            "When arming or lifting watches over a range, make one host call "
+            "across pages that already have the wanted protection instead of "
+            "one call per run of pages that need it.",
+            "Memory");
+DEFINE_uint32(memory_watch_arm_ahead_kb, 0,
+              "When a watch has to be armed, arm the whole surrounding block "
+              "of this many KB (a power of two, 4096 at most) in the same "
+              "call, so later requests inside the block need no call. 0 arms "
+              "only what was asked for.",
+              "Memory");
+DEFINE_uint32(memory_watch_arm_ahead_spurious_limit, 4,
+              "With memory_watch_arm_ahead_kb: after this many faults on "
+              "pages that were armed ahead and never asked for, stop arming "
+              "ahead in that block of 64 host pages.",
+              "Memory");
+DEFINE_bool(memory_watch_uffd, false,
+            "Keep write watches with userfaultfd write-protection instead of "
+            "mprotect where the kernel and Android allow it (falls back to "
+            "mprotect, with a log line, where they do not).",
+            "Memory");
 namespace xe {
 uint32_t get_page_count(uint32_t value, uint32_t page_size) {
   return xe::round_up(value, page_size) / page_size;
@@ -271,6 +302,26 @@ bool Memory::Initialize() {
                               &heaps_.physical);
   heaps_.vE0000000.Initialize(this, virtual_membase_, HeapType::kGuestPhysical,
                               0xE0000000, 0x1FD00000, 4096, &heaps_.physical);
+
+  // hakuX-Boosted: the watch counters, and userfaultfd write-protection for
+  // the three guest views of physical memory (the only places watches are
+  // armed). The views are adjacent and registered as one range, before
+  // anything in them is watched. Where it cannot be had the heaps keep to
+  // mprotect, and the reason is in the log.
+  xe::memory::set_watch_stats_enabled(cvars::memory_watch_log);
+  if (cvars::memory_watch_uffd) {
+    if (xe::memory::WriteWatchInitialize() &&
+        xe::memory::WriteWatchRegister(virtual_membase_ + 0xA0000000ull,
+                                       0x60000000ull)) {
+      heaps_.vA0000000.set_kernel_write_watch(true);
+      heaps_.vC0000000.set_kernel_write_watch(true);
+      heaps_.vE0000000.set_kernel_write_watch(true);
+      XELOGI("Memory: write watches use userfaultfd write-protection");
+    } else {
+      XELOGW("Memory: memory_watch_uffd is set but not available, write "
+             "watches use mprotect");
+    }
+  }
 
   // Protect the first and last 64kb of memory.
   heaps_.v00000000.AllocFixed(
@@ -696,8 +747,10 @@ bool Memory::AccessViolationCallback(
   // Will be rounded to physical page boundaries internally, so just pass 1 as
   // the length - guranteed not to cross page boundaries also.
   auto physical_heap = static_cast<PhysicalHeap*>(heap);
+  // hakuX-Boosted: the last argument marks the call as a fault.
   return physical_heap->TriggerCallbacks(std::move(global_lock_locked_once),
-                                         virtual_address, 1, is_write, false);
+                                         virtual_address, 1, is_write, false,
+                                         true, false, true);
 }
 
 bool Memory::AccessViolationCallbackThunk(
@@ -770,9 +823,88 @@ void Memory::UnregisterPhysicalMemoryReadCallback(void* callback_handle) {
   delete entry;
 }
 
+// hakuX-Boosted: the memory_watch_log line. Called where watches are armed
+// (the GPU command thread, many times a frame), never from the fault handler,
+// so it may format and log. One caller a second wins the exchange and prints
+// the difference from the previous line.
+static void LogWatchStatsIfDue() {
+  static std::atomic<uint64_t> next_due_ns{0};
+  static uint64_t last_ns = 0;
+  static uint64_t last[20] = {};
+  uint64_t now_ns = uint64_t(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  uint64_t due_ns = next_due_ns.load(std::memory_order_relaxed);
+  if (now_ns < due_ns) {
+    return;
+  }
+  if (!next_due_ns.compare_exchange_strong(due_ns, now_ns + 1000000000ull,
+                                           std::memory_order_relaxed)) {
+    return;
+  }
+  xe::memory::WatchCounters& c = xe::memory::watch_counters();
+  const uint64_t now[20] = {
+      c.mprotect_calls.load(std::memory_order_relaxed),
+      c.mprotect_pages.load(std::memory_order_relaxed),
+      c.arm_requests.load(std::memory_order_relaxed),
+      c.arm_request_pages.load(std::memory_order_relaxed),
+      c.arm_calls.load(std::memory_order_relaxed),
+      c.arm_pages.load(std::memory_order_relaxed),
+      c.arm_ahead_pages.load(std::memory_order_relaxed),
+      c.arm_bridged_pages.load(std::memory_order_relaxed),
+      c.unwatch_calls.load(std::memory_order_relaxed),
+      c.unwatch_pages.load(std::memory_order_relaxed),
+      c.uffd_calls.load(std::memory_order_relaxed),
+      c.uffd_failures.load(std::memory_order_relaxed),
+      c.fault_signals.load(std::memory_order_relaxed),
+      c.fault_ns.load(std::memory_order_relaxed),
+      c.fault_watch_hits.load(std::memory_order_relaxed),
+      c.fault_ahead_hits.load(std::memory_order_relaxed),
+      c.fault_read_hits.load(std::memory_order_relaxed),
+      c.fault_races.load(std::memory_order_relaxed),
+      c.fault_unhandled.load(std::memory_order_relaxed),
+      c.announced_triggers.load(std::memory_order_relaxed),
+  };
+  uint64_t fault_ns_max = c.fault_ns_max.exchange(0, std::memory_order_relaxed);
+  uint64_t guest_protect_calls =
+      c.guest_protect_calls.exchange(0, std::memory_order_relaxed);
+  uint64_t guest_protect_unchanged =
+      c.guest_protect_unchanged.exchange(0, std::memory_order_relaxed);
+  if (due_ns != 0) {
+    uint64_t d[20];
+    for (size_t i = 0; i < 20; ++i) {
+      d[i] = now[i] - last[i];
+    }
+    XELOGI(
+        "memory watch: {} ms: mprotect {} calls {} pages; armed {} calls {} "
+        "pages for {} requests of {} pages (ahead {} bridged {}); lifted {} "
+        "calls {} pages; uffd {} ioctls {} failed; faults {} signals {} us "
+        "in handler (longest {} us): watch {} ahead {} read {} raced {} "
+        "unhandled {}; announced {}; guest protect {} ({} unchanged)",
+        (now_ns - last_ns) / 1000000, d[0], d[1], d[4], d[5], d[2], d[3], d[6],
+        d[7], d[8], d[9], d[10], d[11], d[12], d[13] / 1000,
+        fault_ns_max / 1000, d[14], d[15], d[16], d[17], d[18], d[19],
+        guest_protect_calls, guest_protect_unchanged);
+  }
+  for (size_t i = 0; i < 20; ++i) {
+    last[i] = now[i];
+  }
+  last_ns = now_ns;
+}
+
 void Memory::EnablePhysicalMemoryAccessCallbacks(
     uint32_t physical_address, uint32_t length,
     bool enable_invalidation_notifications, bool enable_data_providers) {
+  // hakuX-Boosted: the once-a-second counters line, when asked for.
+  if (xe::memory::watch_stats_enabled()) {
+    LogWatchStatsIfDue();
+    xe::memory::WatchCounters& counters = xe::memory::watch_counters();
+    counters.arm_requests.fetch_add(1, std::memory_order_relaxed);
+    counters.arm_request_pages.fetch_add(
+        (uint64_t(length) + (system_page_size_ - 1)) / system_page_size_,
+        std::memory_order_relaxed);
+  }
   heaps_.vA0000000.EnableAccessCallbacks(physical_address, length,
                                          enable_invalidation_notifications,
                                          enable_data_providers);
@@ -1818,7 +1950,11 @@ xe::memory::PageAccess BaseHeap::QueryRangeAccess(uint32_t low_address,
     for (uint32_t i = low_page_number; i <= high_page_number; ++i) {
       uint32_t page_protect = page_table_[i].current_protect;
       if (!(page_protect & kMemoryProtectRead)) {
+        // hakuX-Boosted: one unreadable page settles the answer (no access),
+        // so stop reading the table. The GPU's upload path asks this for
+        // every range it copies.
         all_readable = false;
+        break;
       }
       // Check if page is writable in any form (Write or WriteCombine)
       if (!(page_protect & kMemoryProtectWrite) &&
@@ -2113,6 +2249,25 @@ bool PhysicalHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
                            uint32_t* old_protect) {
   auto global_lock = global_critical_region_.Acquire();
 
+  // hakuX-Boosted: counted for the memory_watch_log line, with how many of
+  // the requests ask for what every page already has (those are the calls a
+  // table check could skip).
+  if (xe::memory::watch_stats_enabled() && size && address >= heap_base_) {
+    uint32_t first_page = (address - heap_base_) >> page_size_shift_;
+    uint32_t last_page =
+        uint32_t((uint64_t(address) + size - 1 - heap_base_) >>
+                 page_size_shift_);
+    bool unchanged = last_page < page_table_.size();
+    for (uint32_t i = first_page; unchanged && i <= last_page; ++i) {
+      unchanged = page_table_[i].current_protect == protect;
+    }
+    xe::memory::WatchCounters& counters = xe::memory::watch_counters();
+    counters.guest_protect_calls.fetch_add(1, std::memory_order_relaxed);
+    if (unchanged) {
+      counters.guest_protect_unchanged.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
   // Only invalidate if making writable again, for simplicity - not when simply
   // marking some range as immutable, for instance. The guest is announcing a
   // write rather than reacting to a fault, so invalidate even with no watch
@@ -2173,26 +2328,142 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address,
                             : xe::memory::PageAccess::kReadOnly;
 
   auto global_lock = global_critical_region_.Acquire();
+
+  // hakuX-Boosted: arming ahead (memory_watch_arm_ahead_kb). If any page of
+  // a write-watch request is not watched yet, a host call is about to be
+  // made; widen the range to the surrounding block so that call covers it
+  // all, and later requests inside the block find their pages watched and
+  // make no call. The pages outside the request become ordinary watches (the
+  // callbacks may fire for pages no cache cares about, which the interface
+  // allows), marked as armed ahead so a fault on one can be told apart.
+  const uint32_t requested_first = system_page_first;
+  const uint32_t requested_last = system_page_last;
+  if (enable_invalidation_notifications && !enable_data_providers &&
+      cvars::memory_watch_arm_ahead_kb) {
+    uint32_t ahead_bytes =
+        std::min(cvars::memory_watch_arm_ahead_kb, uint32_t(4096)) * 1024;
+    uint32_t ahead_pages = ahead_bytes >> system_page_shift_;
+    if (ahead_pages > 1) {
+      ahead_pages = uint32_t(1) << xe::log2_floor(ahead_pages);
+      bool any_unwatched = false;
+      for (uint32_t i = system_page_first >> 6;
+           i <= (system_page_last >> 6) && !any_unwatched; ++i) {
+        uint64_t unwatched = ~system_page_flags_[i].notify_on_invalidation;
+        if (i == (system_page_first >> 6)) {
+          unwatched &= ~((uint64_t(1) << (system_page_first & 63)) - 1);
+        }
+        if (i == (system_page_last >> 6) && (system_page_last & 63) != 63) {
+          unwatched &= (uint64_t(1) << ((system_page_last & 63) + 1)) - 1;
+        }
+        any_unwatched = unwatched != 0;
+      }
+      if (any_unwatched) {
+        system_page_first &= ~(ahead_pages - 1);
+        system_page_last = std::min(system_page_last | (ahead_pages - 1),
+                                    system_page_count_ - 1);
+      }
+    }
+  }
+
   if (enable_invalidation_notifications) {
     if (enable_data_providers) {
-      EnableAccessCallbacksInner<true, true>(system_page_first,
-                                             system_page_last, protect_access);
+      if (kernel_write_watch_) {
+        // hakuX-Boosted: with kernel write-protection the write watch and
+        // the read watch are two different protections on the page, so each
+        // is armed by its own pass.
+        EnableAccessCallbacksInner<true, false>(
+            system_page_first, system_page_last,
+            xe::memory::PageAccess::kReadOnly, requested_first, requested_last);
+        EnableAccessCallbacksInner<false, true>(
+            system_page_first, system_page_last, protect_access,
+            requested_first, requested_last);
+      } else {
+        EnableAccessCallbacksInner<true, true>(
+            system_page_first, system_page_last, protect_access,
+            requested_first, requested_last);
+      }
     } else {
-      EnableAccessCallbacksInner<true, false>(system_page_first,
-                                              system_page_last, protect_access);
+      EnableAccessCallbacksInner<true, false>(
+          system_page_first, system_page_last, protect_access, requested_first,
+          requested_last);
     }
   } else {
     EnableAccessCallbacksInner<false, true>(system_page_first, system_page_last,
-                                            protect_access);
+                                            protect_access, requested_first,
+                                            requested_last);
   }
+}
+
+// hakuX-Boosted: one host call that arms a run of system pages.
+void PhysicalHeap::WatchHostProtect(uint32_t system_page_first,
+                                    uint32_t system_page_last,
+                                    xe::memory::PageAccess access) {
+  uint8_t* base =
+      membase_ + heap_base_ + (size_t(system_page_first) << system_page_shift_);
+  size_t length = size_t(system_page_last - system_page_first + 1)
+                  << system_page_shift_;
+  if (kernel_write_watch_ && access == xe::memory::PageAccess::kReadOnly) {
+    if (xe::memory::WriteWatchProtect(base, length, true)) {
+      return;
+    }
+    // The watch must still be armed, so use mprotect, and remember that from
+    // now on some pages of this view are protected that way.
+    if (!kernel_write_watch_mixed_) {
+      kernel_write_watch_mixed_ = true;
+      XELOGW(
+          "PhysicalHeap {:08X}: userfaultfd write-protect failed, this view "
+          "now mixes it with mprotect",
+          heap_base_);
+    }
+  }
+  xe::memory::Protect(base, length, access);
+}
+
+// hakuX-Boosted: lifts kernel write-protection from a run of system pages.
+// One ioctl, safe in the fault handler. Pages that were not protected are
+// left as they are, so it can be given a whole range.
+void PhysicalHeap::WatchHostKernelUnprotect(uint32_t system_page_first,
+                                            uint32_t system_page_last) {
+  xe::memory::WriteWatchProtect(
+      membase_ + heap_base_ + (size_t(system_page_first) << system_page_shift_),
+      size_t(system_page_last - system_page_first + 1) << system_page_shift_,
+      false);
 }
 
 template <bool enable_invalidation_notifications, bool enable_data_providers>
 XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
     const uint32_t system_page_first, const uint32_t system_page_last,
-    xe::memory::PageAccess protect_access) XE_RESTRICT {
-  uint8_t* protect_base = membase_ + heap_base_;
+    xe::memory::PageAccess protect_access, const uint32_t requested_first,
+    const uint32_t requested_last) XE_RESTRICT {
   uint32_t protect_system_page_first = UINT32_MAX;
+  // hakuX-Boosted: the run of pages to protect in one host call is
+  // [protect_system_page_first, protect_system_page_last]. Without
+  // memory_watch_bridge_runs a run ends at the first page that needs no
+  // protecting, as before. With it the run carries on across pages whose host
+  // protection is already what the call would set, so the call is harmless
+  // for them, and ends only at a page the call would change wrongly.
+  uint32_t protect_system_page_last = 0;
+  uint32_t run_pages_needed = 0;
+  const bool bridge_runs = cvars::memory_watch_bridge_runs;
+  // Write watches by userfaultfd in this call (never the read watches).
+  const bool kernel_watch =
+      kernel_write_watch_ &&
+      protect_access == xe::memory::PageAccess::kReadOnly;
+  const uint32_t ahead_spurious_limit =
+      cvars::memory_watch_arm_ahead_spurious_limit;
+  const bool count_stats = xe::memory::watch_stats_enabled();
+  uint32_t stat_calls = 0, stat_pages = 0, stat_bridged = 0, stat_ahead = 0;
+  auto flush_run = [&]() {
+    WatchHostProtect(protect_system_page_first, protect_system_page_last,
+                     protect_access);
+    uint32_t run_pages =
+        protect_system_page_last - protect_system_page_first + 1;
+    ++stat_calls;
+    stat_pages += run_pages;
+    stat_bridged += run_pages - run_pages_needed;
+    protect_system_page_first = UINT32_MAX;
+    run_pages_needed = 0;
+  };
 
   SystemPageFlagsBlock* XE_RESTRICT sys_page_flags = system_page_flags_.data();
 
@@ -2245,15 +2516,33 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
     // callbacks - because real access violations are needed there. And don't
     // enable invalidation notifications for read-only pages for the same
     // reason.
+    // hakuX-Boosted: a page outside the request is here only to be armed
+    // ahead, unless its block has had too many wasted faults.
+    const bool ahead_page = i < requested_first || i > requested_last;
     if (current_page_access != xe::memory::PageAccess::kNoAccess) {
       if constexpr (enable_invalidation_notifications) {
-        if (current_page_access != xe::memory::PageAccess::kReadOnly &&
-            (page_flags_block.notify_on_invalidation & page_flags_bit) == 0) {
-          page_flags_block.notify_on_invalidation |= page_flags_bit;
-          // A read-watched page is already protected no-access, stricter than
-          // read-only, so don't loosen it here.
-          if ((page_flags_block.notify_on_read & page_flags_bit) == 0) {
-            protect_system_page = true;
+        if (current_page_access != xe::memory::PageAccess::kReadOnly) {
+          if ((page_flags_block.notify_on_invalidation & page_flags_bit) == 0) {
+            if (!ahead_page ||
+                page_flags_block.ahead_spurious < ahead_spurious_limit) {
+              page_flags_block.notify_on_invalidation |= page_flags_bit;
+              if (ahead_page) {
+                page_flags_block.armed_ahead |= page_flags_bit;
+                ++stat_ahead;
+              }
+              // A read-watched page is already protected no-access, stricter
+              // than read-only, so don't loosen it here.
+              // hakuX-Boosted: kernel write-protection is a separate bit
+              // that loosens nothing, and is what must stop the write once
+              // the read watch has gone, so it is set regardless.
+              if ((page_flags_block.notify_on_read & page_flags_bit) == 0 ||
+                  kernel_watch) {
+                protect_system_page = true;
+              }
+            }
+          } else if (!ahead_page) {
+            // hakuX-Boosted: watched already, and now asked for.
+            page_flags_block.armed_ahead &= ~page_flags_bit;
           }
         }
       }
@@ -2270,29 +2559,70 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
       if (protect_system_page_first == UINT32_MAX) {
         protect_system_page_first = i;
       }
+      protect_system_page_last = i;
+      ++run_pages_needed;
     } else {
       if (protect_system_page_first != UINT32_MAX) {
-        xe::memory::Protect(
-            protect_base + (protect_system_page_first << system_page_shift_),
-            (i - protect_system_page_first) << system_page_shift_,
-            protect_access);
-        protect_system_page_first = UINT32_MAX;
+        // hakuX-Boosted: may the open run cross this page? Only if the host
+        // protection the call sets is the one the page has now.
+        bool can_bridge = false;
+        if (bridge_runs) {
+          const bool write_watched =
+              (page_flags_block.notify_on_invalidation & page_flags_bit) != 0;
+          const bool read_watched =
+              (page_flags_block.notify_on_read & page_flags_bit) != 0;
+          if (kernel_watch) {
+            // Write-protected by the kernel exactly when write-watched.
+            can_bridge = write_watched;
+          } else if (protect_access == xe::memory::PageAccess::kReadOnly) {
+            // Read-only on the host: a page the guest holds read-only, or a
+            // writable one with a write watch; in both cases only while no
+            // read watch has it at no access.
+            can_bridge =
+                !read_watched &&
+                (current_page_access == xe::memory::PageAccess::kReadOnly ||
+                 (current_page_access == xe::memory::PageAccess::kReadWrite &&
+                  write_watched));
+          } else {
+            // No access on the host for certain only under a read watch (a
+            // page the guest has released may still be accessible).
+            can_bridge = read_watched;
+          }
+        }
+        if (!can_bridge) {
+          flush_run();
+        }
       }
     }
   }
 
   if (protect_system_page_first != UINT32_MAX) {
-    xe::memory::Protect(
-        protect_base + (protect_system_page_first << system_page_shift_),
-        (system_page_last + 1 - protect_system_page_first)
-            << system_page_shift_,
-        protect_access);
+    flush_run();
+  }
+
+  if (count_stats) {
+    xe::memory::WatchCounters& counters = xe::memory::watch_counters();
+    if (stat_calls) {
+      counters.arm_calls.fetch_add(stat_calls, std::memory_order_relaxed);
+      counters.arm_pages.fetch_add(stat_pages, std::memory_order_relaxed);
+      counters.arm_bridged_pages.fetch_add(stat_bridged,
+                                           std::memory_order_relaxed);
+    }
+    if (stat_ahead) {
+      counters.arm_ahead_pages.fetch_add(stat_ahead, std::memory_order_relaxed);
+    }
   }
 }
 bool PhysicalHeap::TriggerCallbacks(
     global_unique_lock_type global_lock_locked_once, uint32_t virtual_address,
     uint32_t length, bool is_write, bool unwatch_exact_range, bool unprotect,
-    bool invalidate_unwatched) {
+    bool invalidate_unwatched, bool from_fault) {
+  // hakuX-Boosted: counters only; relaxed atomics, safe in the fault handler.
+  const bool count_stats = xe::memory::watch_stats_enabled();
+  if (count_stats && !from_fault) {
+    xe::memory::watch_counters().announced_triggers.fetch_add(
+        1, std::memory_order_relaxed);
+  }
   if (virtual_address < heap_base_) {
     if (heap_base_ - virtual_address >= length) {
       return false;
@@ -2343,8 +2673,18 @@ bool PhysicalHeap::TriggerCallbacks(
       // with another thread that cleared the watch, so retry. If it is
       // no-access it is a genuine access violation, so propagate. Checked via
       // the page table to stay signal safe.
-      return SystemPageGuestAccess(system_page_first) !=
-             xe::memory::PageAccess::kNoAccess;
+      bool retry_read = SystemPageGuestAccess(system_page_first) !=
+                        xe::memory::PageAccess::kNoAccess;
+      if (count_stats && from_fault) {
+        xe::memory::WatchCounters& counters = xe::memory::watch_counters();
+        (retry_read ? counters.fault_races : counters.fault_unhandled)
+            .fetch_add(1, std::memory_order_relaxed);
+      }
+      return retry_read;
+    }
+    if (count_stats && from_fault) {
+      xe::memory::watch_counters().fault_read_hits.fetch_add(
+          1, std::memory_order_relaxed);
     }
     uint32_t physical_address_offset = GetPhysicalAddress(heap_base_);
     uint32_t physical_address_start =
@@ -2376,7 +2716,11 @@ bool PhysicalHeap::TriggerCallbacks(
         xe::memory::PageAccess target;
         if (guest_access == xe::memory::PageAccess::kNoAccess) {
           target = xe::memory::PageAccess::kNoAccess;
-        } else if (flags.notify_on_invalidation & bit) {
+        } else if ((flags.notify_on_invalidation & bit) &&
+                   (!kernel_write_watch_ || kernel_write_watch_mixed_)) {
+          // hakuX-Boosted: not when the write watch is the kernel's
+          // write-protection bit, which stays on the page whatever mprotect
+          // sets here; then the guest's own protection is the target.
           target = xe::memory::PageAccess::kReadOnly;
         } else {
           target = guest_access;
@@ -2423,8 +2767,43 @@ bool PhysicalHeap::TriggerCallbacks(
     // MMIOHandler::ExceptionCallback. If the guest doesn't permit the write
     // either, retrying it faults forever, so report it unhandled and let the
     // violation surface.
-    return SystemPageGuestAccess(system_page_first) ==
-           xe::memory::PageAccess::kReadWrite;
+    bool retry_write = SystemPageGuestAccess(system_page_first) ==
+                       xe::memory::PageAccess::kReadWrite;
+    if (from_fault) {
+      // hakuX-Boosted: with kernel write-protection, make sure the retry can
+      // succeed. No watch flag is set on this page, so it should carry no
+      // write-protection either; lifting it where there is none is a no-op,
+      // and where one was left behind this stops the write faulting for
+      // ever.
+      if (retry_write && kernel_write_watch_) {
+        WatchHostKernelUnprotect(system_page_first, system_page_last);
+      }
+      if (count_stats) {
+        xe::memory::WatchCounters& counters = xe::memory::watch_counters();
+        (retry_write ? counters.fault_races : counters.fault_unhandled)
+            .fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    return retry_write;
+  }
+
+  // hakuX-Boosted: a fault on a page that was armed ahead and never asked
+  // for. It is handled like any watched page (the callbacks fire, the range
+  // is unwatched), and counted against its block so arming ahead stops where
+  // it keeps being wasted.
+  if (from_fault) {
+    SystemPageFlagsBlock& fault_block =
+        system_page_flags_[system_page_first >> 6];
+    bool fault_on_ahead = (fault_block.armed_ahead &
+                           (uint64_t(1) << (system_page_first & 63))) != 0;
+    if (fault_on_ahead && fault_block.ahead_spurious != UINT32_MAX) {
+      ++fault_block.ahead_spurious;
+    }
+    if (count_stats) {
+      xe::memory::WatchCounters& counters = xe::memory::watch_counters();
+      (fault_on_ahead ? counters.fault_ahead_hits : counters.fault_watch_hits)
+          .fetch_add(1, std::memory_order_relaxed);
+    }
   }
 
   // Trigger callbacks.
@@ -2489,17 +2868,70 @@ bool PhysicalHeap::TriggerCallbacks(
     block_index_last = system_page_last >> 6;
   }
 
+  // hakuX-Boosted: with kernel write-protection the watch on every page of
+  // the range is lifted by one ioctl over the whole range, whatever the
+  // caller's unprotect says and whatever the guest's protection is: the flags
+  // below are cleared for all of it, and a page must never keep the
+  // write-protection without its flag (the guest's own protection is
+  // mprotect's and is not touched by this). The mprotect loop is then needed
+  // only for read watches, or once an arming ioctl has failed.
+  uint32_t stat_calls = 0, stat_pages = 0;
+  bool unprotect_with_mprotect = unprotect;
+  if (kernel_write_watch_) {
+    bool any_write_watched = false;
+    bool any_read_watched = false;
+    for (uint32_t i = block_index_first; i <= block_index_last; ++i) {
+      uint64_t range_bits = UINT64_MAX;
+      if (i == block_index_first) {
+        range_bits &= ~((uint64_t(1) << (system_page_first & 63)) - 1);
+      }
+      if (i == block_index_last && (system_page_last & 63) != 63) {
+        range_bits &= (uint64_t(1) << ((system_page_last & 63) + 1)) - 1;
+      }
+      any_write_watched |=
+          (system_page_flags_[i].notify_on_invalidation & range_bits) != 0;
+      any_read_watched |=
+          (system_page_flags_[i].notify_on_read & range_bits) != 0;
+    }
+    if (any_write_watched) {
+      WatchHostKernelUnprotect(system_page_first, system_page_last);
+      ++stat_calls;
+      stat_pages += system_page_last - system_page_first + 1;
+    }
+    unprotect_with_mprotect =
+        unprotect && (any_read_watched || kernel_write_watch_mixed_);
+  }
+
   // Unprotect ranges that need unprotection.
-  if (unprotect) {
+  if (unprotect_with_mprotect) {
     uint8_t* protect_base = membase_ + heap_base_;
     uint32_t unprotect_system_page_first = UINT32_MAX;
+    // hakuX-Boosted: as in EnableAccessCallbacksInner, the run to unprotect
+    // is [first, last], and with memory_watch_bridge_runs it carries on
+    // across pages that are read-write on the host already: unwatched pages
+    // the guest holds read-write.
+    uint32_t unprotect_system_page_last = 0;
+    const bool bridge_runs = cvars::memory_watch_bridge_runs;
+    auto flush_run = [&]() {
+      uint32_t run_pages =
+          unprotect_system_page_last - unprotect_system_page_first + 1;
+      xe::memory::Protect(
+          protect_base +
+              (size_t(unprotect_system_page_first) << system_page_shift_),
+          size_t(run_pages) << system_page_shift_,
+          xe::memory::PageAccess::kReadWrite);
+      ++stat_calls;
+      stat_pages += run_pages;
+      unprotect_system_page_first = UINT32_MAX;
+    };
     for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
       // Check if need to allow writing to this page. Read-watched pages are
       // unprotected here too so a write to one doesn't re-fault.
-      bool unprotect_page =
+      const bool watched_page =
           ((system_page_flags_[i >> 6].notify_on_invalidation |
             system_page_flags_[i >> 6].notify_on_read) &
            (uint64_t(1) << (i & 63))) != 0;
+      bool unprotect_page = watched_page;
       if (unprotect_page) {
         if (SystemPageGuestAccess(i) != xe::memory::PageAccess::kReadWrite) {
           unprotect_page = false;
@@ -2509,24 +2941,25 @@ bool PhysicalHeap::TriggerCallbacks(
         if (unprotect_system_page_first == UINT32_MAX) {
           unprotect_system_page_first = i;
         }
+        unprotect_system_page_last = i;
       } else {
         if (unprotect_system_page_first != UINT32_MAX) {
-          xe::memory::Protect(
-              protect_base +
-                  (unprotect_system_page_first << system_page_shift_),
-              (i - unprotect_system_page_first) << system_page_shift_,
-              xe::memory::PageAccess::kReadWrite);
-          unprotect_system_page_first = UINT32_MAX;
+          if (!(bridge_runs && !watched_page &&
+                SystemPageGuestAccess(i) ==
+                    xe::memory::PageAccess::kReadWrite)) {
+            flush_run();
+          }
         }
       }
     }
     if (unprotect_system_page_first != UINT32_MAX) {
-      xe::memory::Protect(
-          protect_base + (unprotect_system_page_first << system_page_shift_),
-          (system_page_last + 1 - unprotect_system_page_first)
-              << system_page_shift_,
-          xe::memory::PageAccess::kReadWrite);
+      flush_run();
     }
+  }
+  if (count_stats && stat_calls) {
+    xe::memory::WatchCounters& counters = xe::memory::watch_counters();
+    counters.unwatch_calls.fetch_add(stat_calls, std::memory_order_relaxed);
+    counters.unwatch_pages.fetch_add(stat_pages, std::memory_order_relaxed);
   }
 
   // Mark pages as not write-watched. Unprotected pages are readable and
@@ -2541,6 +2974,8 @@ bool PhysicalHeap::TriggerCallbacks(
     }
     system_page_flags_[i].notify_on_invalidation &= mask;
     system_page_flags_[i].notify_on_read &= mask;
+    // hakuX-Boosted: armed_ahead is a subset of the write watches.
+    system_page_flags_[i].armed_ahead &= mask;
   }
 
   return true;

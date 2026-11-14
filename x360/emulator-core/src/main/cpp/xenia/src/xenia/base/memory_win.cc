@@ -27,6 +27,13 @@ XE_NTDLL_IMPORT(NtQueryVirtualMemory, cls_NtQueryVirtualMemory,
 namespace xe {
 namespace memory {
 
+// hakuX-Boosted: no userfaultfd here; the caller keeps to Protect().
+bool WriteWatchInitialize() { return false; }
+bool WriteWatchRegister(void* base_address, size_t length) { return false; }
+bool WriteWatchProtect(void* base_address, size_t length, bool protect) {
+  return false;
+}
+
 size_t page_size() {
 #if XE_ARCH_AMD64 == 1
   return 4096;
