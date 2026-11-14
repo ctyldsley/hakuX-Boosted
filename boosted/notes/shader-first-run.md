@@ -403,4 +403,11 @@ why, and mode 2 is the fallback), and everything about timing.
 
 ## Builds of the last commits
 
-BUILD_STATE
+- Run 124 (`ea37bf2`: the pixel interpreter in the draw path, the fetch's
+  vector form): its first job (the Xbox core) was green; its APK job was
+  still compiling when the next push replaced it, so it did not finish.
+- The push after it carries everything else on this branch. Its run is the
+  one that vouches for the branch as it stands; its result is added below
+  when it is known. Until a line here says green, treat the commits after
+  `46837f0` (run 122, green) as compiled on the host only.
+
