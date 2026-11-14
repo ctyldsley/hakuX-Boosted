@@ -715,21 +715,21 @@ void AddPixelTests(std::vector<Test>& tests) {
   for (uint32_t op = 24; op <= 27; ++op) {
     tests.push_back(MakePixelTest("ps_kill_vector_" + std::to_string(op),
                                   [&](Asm& assembler) {
+                                    // Two interpolators that cross
+                                    // each other on the screen.
                                     assembler.Exec(std::vector<Alu>{
-                                        Vec(11 /* floor */, 4, "xyzw",
-                                            R(1, "xyxy")),
-                                        Vec(op, 5, "xyzw", R(4),
-                                            R(4, "yxwz"))});
+                                        Vec(op, 5, "xyzw", R(1, "wwww"),
+                                            R(3, "xxxx"))});
                                     export_colors(assembler, 2);
                                   }));
   }
   for (uint32_t op = 35; op <= 39; ++op) {
     tests.push_back(MakePixelTest("ps_kill_scalar_" + std::to_string(op),
                                   [&](Asm& assembler) {
+                                    // A value that changes sign down
+                                    // the screen.
                                     assembler.Exec(std::vector<Alu>{
-                                        Vec(11 /* floor */, 4, "xyzw",
-                                            R(2, "xyxy")),
-                                        Scal(op, 5, "x___", R(4, "xyzw"))});
+                                        Scal(op, 5, "x___", R(1, "wwww"))});
                                     export_colors(assembler, 2);
                                   }));
   }
@@ -739,13 +739,12 @@ void AddPixelTests(std::vector<Test>& tests) {
     tests.push_back(MakePixelTest(
         "ps_alpha_test_" + std::to_string(function),
         [&](Asm& assembler) {
-          assembler.Exec(std::vector<Alu>{
-              Vec(11 /* floor */, 4, "xyzw", R(1, "wwww")),
-              Export(0, R(4))});
+          assembler.Exec(std::vector<Alu>{Export(0, R(1))});
         },
         [function](Environment& environment) {
+          // Interpolator 1's w goes from 0.6 at the top to -0.4.
           environment.system_constants.flags = function << 11;
-          environment.system_constants.alpha_test_reference = 0.0f;
+          environment.system_constants.alpha_test_reference = 0.1f;
         }));
   }
   // Without colour 0 there is no alpha test.
