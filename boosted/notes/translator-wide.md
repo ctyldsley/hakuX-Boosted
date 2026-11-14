@@ -128,8 +128,10 @@ qemu can give the program 16 KiB pages (`qemu-aarch64 -p 16384`), the
 phone's page size. The translator then emits the address fix-up for guest
 addresses from 0xE0000000 at every computed load and store, as it does on
 the phone and does not on a 4 KiB host. Lines of the matrix that end in
-`#16k` run that way, as many short processes (see the next heading). With every setting at its default, all 141,886 tests
-pass at 16 KiB and leave the same state as at 4 KiB.
+`#16k` run that way, in short processes (see the next heading). With every
+setting at its default, all 141,886 tests pass at 16 KiB and leave the same
+state as at 4 KiB (checked in the cloud session; the matrix runs the
+defaults at 16 KiB over a subset and everything-on over all of them).
 
 ### The allocator abort at 16 KiB, and why it is qemu's
 
@@ -152,12 +154,19 @@ heap overrun in this branch's code. It is not:
   everything on, four processes) passes all 141,899 tests when the same
   work is split over 48 processes, with no allocator setting.
 
-So the abort follows how much heap one emulated process has been through
-at a page size that is not the host's. The `#16k` lines of the matrix
-therefore run as 96 short processes (`SHARDS`, `run-tests.sh`). Telling
-glibc to keep large allocations off the `brk` heap, which the first version
-of the matrix did for the everything-on line, hid it in the cloud session
-and not on GitHub's runner, and is gone.
+So the abort follows how much one emulated process has been through at a
+page size that is not the host's: it was seen after 4,000 tests at the
+earliest (everything on) and after about 11,000 with the defaults. The
+`#16k` lines of the matrix therefore pack the suites into processes of at
+most 1,500 tests (`MAX_TESTS`, `run-tests.sh`), and the twelve files that
+hold more than that (four hold 15,600 tests) are run in slices
+(`--test_slice`, new in the runner). Two earlier attempts are in the
+history and did not hold: telling glibc to keep large allocations off the
+`brk` heap hid the abort in the cloud session and not on GitHub's runner
+(run 129), and splitting by file only (run 130) left the largest files in
+one process each. Many tiny processes are not the answer either: a process
+costs about 14 seconds under qemu before its first test, setting up the
+guest's memory.
 
 An AddressSanitizer run on real ARM64 hardware is still worth having as a
 general check of the translator (it does not start under this qemu), but
@@ -689,8 +698,13 @@ All marked `hakuX-Boosted:` at each change.
   pages passed, "everything" among them; the two lines over all tests at
   16 KiB aborted in glibc's allocator under qemu, one of them with every
   setting off (section 1 has what that showed).
-- The commit after it runs the 16 KiB lines as short processes. See the
-  branch tip's run.
+- `08c6ae7` (16 KiB lines split by file into 96 processes): Actions run 130
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43604824447).
+  The other two jobs green. Every line of the matrix passed, "16k,
+  defaults" included, except the last, "everything, 16k", where the two
+  processes that each held one 15,600-test file aborted in the same way.
+- The commit after it packs the 16 KiB lines by test count and slices the
+  large files. See the branch tip's run.
 
 Local checks before each push, in the cloud session's container (x86-64,
 tests cross-compiled for ARM64 and run under qemu-aarch64 8.2): every line

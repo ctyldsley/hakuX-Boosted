@@ -6,9 +6,13 @@
 #
 # Environment:
 #   JOBS     shards to run at once (default: the number of cores)
-#   SHARDS   how many shards (processes) to split the suites over (default:
-#            JOBS). More shards than jobs means shorter-lived processes, run
-#            JOBS at a time.
+#   MAX_TESTS  instead of one list of suites per job: pack the suites into
+#            as few processes as hold at most this many tests each, and run
+#            a suite with more tests than that as several processes that
+#            each take every n-th of its tests. For runs where a process
+#            must stay short (qemu with 16 KiB pages). A process costs about
+#            14 s of start-up under qemu (the guest's memory being set up),
+#            so fewer, fuller processes are much the faster.
 #   WRAPPER  a command to run the binary under, for example
 #            "qemu-aarch64 -L /usr/aarch64-linux-gnu" on a host that is not ARM64
 #   SUITES   a regular expression over suite names (instr_add, seq_branch_carry):
@@ -40,12 +44,31 @@ trap 'rm -rf "$work"' EXIT
 ls -S "$bins"/*.bin | xargs -n1 basename | sed 's/\.bin$//' \
   | grep -E "${SUITES:-.}" > "$work/all"
 if [ ! -s "$work/all" ]; then echo "no test suite matches"; exit 1; fi
-shards=${SHARDS:-$jobs}
-i=0
-while read -r suite; do
-  echo "$suite" >> "$work/shard.$((i % shards))"
-  i=$((i + 1))
-done < "$work/all"
+# Work items: files shard.<name>.s<k>of<n> listing suites; the process for
+# one runs slice k of n of each suite's tests (0of1: all of them).
+if [ -n "${MAX_TESTS:-}" ]; then
+  while read -r suite; do
+    echo "$(grep -c ' t test_' "$bins/$suite.map") $suite"
+  done < "$work/all" | sort -rn | awk -v max="$MAX_TESTS" -v dir="$work" '
+    $1 > max {
+      n = int(($1 + max - 1) / max)
+      for (k = 0; k < n; k++) print $2 > (dir "/shard.big" big ".s" k "of" n)
+      big++; next
+    }
+    {
+      # first fit, largest first
+      for (b = 0; b < bins; b++) if (used[b] + $1 <= max) break
+      if (b == bins) bins++
+      used[b] += $1
+      print $2 >> (dir "/shard." b ".s0of1")
+    }'
+else
+  i=0
+  while read -r suite; do
+    echo "$suite" >> "$work/shard.$((i % jobs)).s0of1"
+    i=$((i + 1))
+  done < "$work/all"
+fi
 
 # Upstream's skip list and this fork's own (known-failures.txt) as one file.
 # A line "name unless <flag>" of known-failures.txt applies only to runs
@@ -73,11 +96,13 @@ fi
 
 pids=()
 for shard in "$work"/shard.*; do
+  slice=${shard##*.s}
+  slice=${slice/of//}
   (
     # shellcheck disable=SC2086
     ${WRAPPER:-} "$runner" --test_path="$tests" --test_bin_path="$bins" \
       --test_skip_file="$work/skip" --log_file="$shard.xe.log" \
-      --test_state_dump="$shard.state" "$@" \
+      --test_state_dump="$shard.state" --test_slice="$slice" "$@" \
       $(cat "$shard") > "$shard.out" 2>&1
     echo $? > "$shard.status"
   ) &
@@ -88,12 +113,14 @@ done
 wait "${pids[@]}" 2>/dev/null || true
 
 total=0; passed=0; failed=0; bad=0
-for shard in "$work"/shard.[0-9]*; do
+for shard in "$work"/shard.*; do
   case $shard in *.out|*.status|*.log|*.state) continue ;; esac
   status=$(cat "$shard.status" 2>/dev/null || echo 255)
   t=$(sed -n 's/^Total tests: //p' "$shard.out" | tail -1)
   p=$(sed -n 's/^Passed: //p' "$shard.out" | tail -1)
   f=$(sed -n 's/^Failed: //p' "$shard.out" | tail -1)
+  # A slice of a few small suites can hold no test at all.
+  if [ -z "$t" ] && grep -q '^Running .* 0 test cases' "$shard.out" && [ "$status" = 0 ]; then continue; fi
   if [ -z "$t" ]; then
     echo "::error::a shard did not finish (exit status $status); its last lines:"
     tail -25 "$shard.out"

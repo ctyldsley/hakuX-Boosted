@@ -55,6 +55,13 @@ DEFINE_path(test_bin_path, "src/xenia/cpu/ppc/testing/bin/",
 DEFINE_path(test_skip_file, "src/xenia/cpu/ppc/testing/skip.txt",
             "File containing test case names to skip (one per line).", "Other");
 DEFINE_transient_string(test_name, "", "Test suite name.", "General");
+// hakuX-Boosted: one process can then run a fraction of even the largest
+// suite (one file holds 15,600 tests), which is what keeps a process short
+// enough under qemu with 16 KiB pages (ci/run-tests.sh, SLICES).
+DEFINE_string(test_slice, "",
+              "'k/n': run only the tests whose position in their suite, "
+              "counting the tests that are not skipped, is k modulo n.",
+              "Other");
 // hakuX-Boosted: the state every test leaves behind, one line a test, so
 // that two runs of the same tests with different translator settings can be
 // compared (ci/run-tests.sh does). The upstream tests assert a register or
@@ -750,12 +757,25 @@ bool RunTests(const std::vector<std::string>& test_names) {
       }
     }
   }
+  // hakuX-Boosted: --test_slice=k/n.
+  unsigned slice_index = 0;
+  unsigned slice_count = 1;
+  if (!cvars::test_slice.empty() &&
+      (sscanf(cvars::test_slice.c_str(), "%u/%u", &slice_index,
+              &slice_count) != 2 ||
+       !slice_count || slice_index >= slice_count)) {
+    fprintf(stderr, "bad --test_slice: %s\n", cvars::test_slice.c_str());
+    return false;
+  }
   for (auto& test_suite : test_suites) {
     // Collect non-skipped test cases for this suite
     std::vector<TestCase*> suite_tests;
+    unsigned position = 0;
     for (auto& test_case : test_suite.test_cases()) {
       if (skip_list.find(test_case.name) == skip_list.end()) {
-        suite_tests.push_back(&test_case);
+        if (position++ % slice_count == slice_index) {
+          suite_tests.push_back(&test_case);
+        }
       }
     }
     if (suite_tests.empty()) {

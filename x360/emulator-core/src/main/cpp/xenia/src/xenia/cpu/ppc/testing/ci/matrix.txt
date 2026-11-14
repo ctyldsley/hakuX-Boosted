@@ -4,19 +4,19 @@
 #
 # Every line is run after the reference (all defaults) and compared with it.
 # "." runs all 142 thousand tests (about nine minutes a line on GitHub's
-# runner); the narrower expressions keep the job's length down. Six lines
+# runner); the narrower expressions keep the job's length down. Five lines
 # run everything: the two stress lines of wide pinning, the ABI level of the
-# dead store pass, the defaults at 16 KiB, and everything together at both
-# page sizes. Every line was run over all the tests at least once in the
+# dead store pass, and everything together at both page sizes. Every line was run over all the tests at least once in the
 # session that wrote it (boosted/notes/translator-wide.md). The seq_
 # suites (loops, calls, flags over blocks) run with every line.
 #
 # Markers at the end of the flags:
 #   #ignore=flags   leave the full flags hash out of the comparison
-#   #16k            run under qemu with 16 KiB pages (the phone's page size)
-#                   in 96 short processes: a long-lived process under
-#                   qemu at that page size aborts in glibc's allocator,
-#                   with every setting off as well (see the notes)
+#   #16k            run under qemu with 16 KiB pages (the phone's page size),
+#                   in processes of at most 1,500 tests each: a long-lived
+#                   process under qemu at that page size aborts in glibc's
+#                   allocator, with every setting off as well (see the
+#                   notes)
 #
 # Settings that already existed on claude/integration-1113:
 short backward branches     ; ^(seq_|instr_(add|cmp|b|l|st|m|f)) ; --a64_short_backward_branches=true
@@ -73,7 +73,7 @@ linked calls                ; ^(seq_|instr_(add|cmp|b|l|st|m)) ; --a64_linked_ca
 
 # 16 KiB pages: the address fix-up for guest addresses from 0xE0000000 is
 # only emitted there, and a64_stack_access_no_fixup only acts there.
-16k, defaults               ; . ; #16k
+16k, defaults               ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|xor|l|st|b|f|m|cr|t|v)) ; #16k
 16k, stack accesses         ; ^(seq_|instr_(add|cmp|b|l|st|m|f|v)) ; --a64_stack_access_no_fixup=true #16k
 16k, stack (verify)         ; ^(seq_|instr_(add|cmp|b|l|st|m|f|v)) ; --a64_stack_access_no_fixup=true --a64_stack_access_verify=true #16k
 16k, wide stress            ; ^(seq_|instr_(add|cmp|b|l|st|m|f|v)) ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_stress=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 #16k

@@ -50,15 +50,16 @@ while IFS=';' read -r label suites flags; do
   # for guest addresses from 0xE0000000 that a 4 KiB host does not need.
   # Only possible when the tests run under qemu (WRAPPER names it).
   wrapper=${WRAPPER:-}
-  line_shards=${SHARDS:-}
+  line_max=${MAX_TESTS:-}
   case "$flags" in *'#16k'*)
-    # Many short processes: under qemu with a page size that is not the
-    # host's, a long-lived process aborts in glibc's allocator (with every
-    # translator setting off too, so it is not the translator's doing; see
-    # the notes). The abort follows how much heap one process has been
-    # through, and a process that runs a twenty-fourth of what one did before
-    # stays far below where it was seen.
-    line_shards=96
+    # Short processes: under qemu with a page size that is not the host's, a
+    # long-lived process aborts in glibc's allocator (with every translator
+    # setting off too, so it is not the translator's doing; see the notes).
+    # The abort follows how much one process has been through: it was seen
+    # after 4,000 tests at the earliest. So the suites are packed into
+    # processes of at most 1,500 tests, and the twelve files with more than
+    # that are run in slices (run-tests.sh, MAX_TESTS).
+    line_max=1500
     extra=""
     case "$flags" in *'#16k-mmap'*) extra="-E GLIBC_TUNABLES=glibc.malloc.mmap_threshold=8192" ;; esac
     flags=${flags%%#16k*}
@@ -68,7 +69,7 @@ while IFS=';' read -r label suites flags; do
     esac ;;
   esac
   # shellcheck disable=SC2086
-  if ! SHARDS="$line_shards" WRAPPER="$wrapper" LABEL="$label" STATE_REF="$work/reference.state" SUITES="$suites" STATE_IGNORE="$ignore" \
+  if ! MAX_TESTS="$line_max" WRAPPER="$wrapper" LABEL="$label" STATE_REF="$work/reference.state" SUITES="$suites" STATE_IGNORE="$ignore" \
       "$here/run-tests.sh" "$runner" "$bins" $flags; then
     failed+=("$label")
   fi
