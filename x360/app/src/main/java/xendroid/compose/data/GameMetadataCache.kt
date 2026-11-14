@@ -61,6 +61,17 @@ class GameMetadataCache(cacheDir: File) {
     /** The cached entry for [launchUri], or null if absent. */
     fun get(launchUri: String): Entry? = synchronized(lock) { entries[launchUri] }
 
+    /** hakuX-Boosted: each cached title's display name by its title ID (upper case),
+     *  for rows that know a title by its ID alone (the settings' shader caches). */
+    fun namesByTitleId(): Map<String, String> = synchronized(lock) {
+        val out = HashMap<String, String>()
+        for (entry in entries.values) {
+            val id = entry.titleId?.uppercase() ?: continue
+            if (entry.name.isNotBlank()) out[id] = entry.name
+        }
+        out
+    }
+
     /** Record an extraction result. A non-cacheable signature (see [Signature.cacheable])
      *  is NOT stored: an unreliable SAF signature must re-extract every scan. */
     fun put(

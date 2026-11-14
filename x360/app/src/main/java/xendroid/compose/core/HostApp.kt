@@ -233,7 +233,12 @@ object HostApp {
         footer: LazyListScope.() -> Unit = {},
     ) {
         val settings = rememberHostSettings()
-        HostSettingsPane(settings.vm, settings.failed, modifier, header, footer)
+        // hakuX-Boosted: the GPU driver is one of the host's own rows above the list
+        // ([GpuDriverSetting]); in the Vulkan section as well it was on the tab twice.
+        HostSettingsPane(
+            settings.vm, settings.failed, modifier, header, footer,
+            omit = setOf("Vulkan|vulkan_lib_path"),
+        )
     }
 
     /**

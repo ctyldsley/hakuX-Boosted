@@ -2,7 +2,6 @@ package xendroid.compose.settings
 
 import android.content.Context
 import xendroid.compose.Application
-import xendroid.emulator.Emulator
 import java.io.File
 
 /** Sources the live global config file and the bundled default template baseline. */
@@ -20,40 +19,27 @@ class ConfigStore(private val appContext: Context) {
 
     /** Open the per-game SPARSE overlay for editing. Bootstraps an EMPTY toml table
      *  when missing (NOT the default template — that would make every key an override,
-     *  destroying sparseness). Mirrors [openLive]'s catch-and-retry but seeds "". */
+     *  destroying sparseness).
+     *
+     *  hakuX-Boosted: a file that does not parse is no longer wiped: its backup is put
+     *  back if there is one, the unreadable file is kept aside and the player is told
+     *  ([ConfigGuard.ensureGameConfig]). */
     fun openGameConfig(titleId: String): ConfigHandle {
         val file = perGameConfigFile(titleId)
-        ensureEmptyFileExists(file)
-        return try {
-            ConfigHandle.openFile(file.absolutePath)
-        } catch (e: Emulator.ConfigFileException) {
-            // Corrupt existing -> reset to an empty table, retry once.
-            file.writeText("")
-            ConfigHandle.openFile(file.absolutePath)
-        }
+        ConfigGuard.ensureGameConfig(file, titleId)
+        return ConfigHandle.openFile(file.absolutePath)
     }
 
-    /** The config/ subdir is NOT auto-created (only the global parent is, below);
-     *  seed an empty file (toml++ parses empty input to an empty table) since
-     *  open_config_file throws on a missing file. */
-    private fun ensureEmptyFileExists(file: File) {
-        if (file.exists()) return
-        file.parentFile?.mkdirs()
-        file.writeText("")
-    }
-
-    /** Open the live config for editing. Bootstraps from the default template if the
-     *  file is missing/unparseable (open does NOT auto-create). */
+    /** Open the live config for editing.
+     *
+     *  hakuX-Boosted: a missing or unparseable file is no longer replaced by the
+     *  bundled defaults here. [ConfigGuard.ensureLive] first puts the backup back, and
+     *  only without one uses the defaults, keeping the player's profile signed in and
+     *  leaving a notice. Closing the handle writes beside the file and renames
+     *  (xendroid.compose.ConfigFiles), keeping the previous file as the backup. */
     fun openLive(): ConfigHandle {
-        val file = globalConfigFile()
-        ensureLiveFileExists(file)
-        return try {
-            ConfigHandle.openFile(file.absolutePath)
-        } catch (e: Emulator.ConfigFileException) {
-            // Corrupt/empty file -> reseed from template, retry once.
-            file.writeText(defaultTemplateText())
-            ConfigHandle.openFile(file.absolutePath)
-        }
+        ConfigGuard.ensureLive(appContext, this)
+        return ConfigHandle.openFile(globalConfigFile().absolutePath)
     }
 
     /** Open the live config READ-ONLY from a text snapshot. Unlike [openLive], the
@@ -62,9 +48,8 @@ class ConfigStore(private val appContext: Context) {
      *  only disk-write path, would needlessly re-serialize on every read). Use this
      *  for pure reads; use [openLive] when you intend to persist edits. */
     fun openLiveSnapshot(): ConfigHandle {
-        val file = globalConfigFile()
-        ensureLiveFileExists(file)
-        return ConfigHandle.openString(file.readText())
+        ConfigGuard.ensureLive(appContext, this)
+        return ConfigHandle.openString(globalConfigFile().readText())
     }
 
     /** Read-only baseline parsed from the bundled asset template, for modified-from-default diffing. */
@@ -79,12 +64,4 @@ class ConfigStore(private val appContext: Context) {
     private fun loadTemplateText(): String =
         appContext.assets.open("config/default_config.toml").use { it.readBytes().toString(Charsets.UTF_8) }
 
-    private fun ensureLiveFileExists(file: File) {
-        if (file.exists()) return
-        file.parentFile?.mkdirs()
-        // Prefer the on-disk template materialized on first run; fall back to the asset.
-        val template = Application.get_default_config_file()
-        if (template.exists()) template.copyTo(file, overwrite = false)
-        else file.writeText(defaultTemplateText())
-    }
 }

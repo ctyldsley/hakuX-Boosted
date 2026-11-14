@@ -115,16 +115,20 @@ class GameSettingsRepository(private val store: ConfigStore, private val titleId
         when (val plan = rebuildPlan(overrides)) {
             is RebuildPlan.Delete -> file.delete()  // LoadGameConfig skips a missing file
             is RebuildPlan.Write -> {
-                file.parentFile?.mkdirs()
-                file.writeText("")  // start from an EMPTY table
-                val h = store.openGameConfig(titleId)
+                // hakuX-Boosted: the table is built in memory from an EMPTY one and the
+                // file replaced whole (beside, synced, renamed, the old one kept as the
+                // backup). It used to be blanked in place first, which left the game
+                // without its settings if the app died before the rewrite.
+                val h = ConfigHandle.openString("")
+                var text: String? = null
                 try {
                     SettingsSchema.allSettings.forEach { s ->
                         if (s.key in plan.keys) overrides[s.key]?.let { raw -> putTyped(h, s, raw) }
                     }
                 } finally {
-                    h.closeFile()  // the ONLY disk write
+                    text = runCatching { h.closeString() }.getOrNull()
                 }
+                text?.let { xendroid.compose.ConfigFiles.writeAtomic(file, it) }  // the ONLY disk write
             }
         }
     }

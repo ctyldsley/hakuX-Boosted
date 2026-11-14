@@ -24,7 +24,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -63,14 +62,14 @@ fun PauseMenuPanel(
     BoxWithConstraints(
         modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.6f))
+            .background(xendroid.compose.ui.theme.GameOverlayLook.Scrim)  // hakuX-Boosted: one dimming for every in-game panel
             // Swallow taps meant for the game surface underneath.
             .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } },
         contentAlignment = Alignment.Center,
     ) {
         val compact = maxHeight < 400.dp
         val outerPadding = if (compact) 8.dp else 24.dp
-        val innerPadding = if (compact) 12.dp else 20.dp
+        val innerPadding = if (compact) xendroid.compose.ui.theme.LookSpacing.PanelCompact else xendroid.compose.ui.theme.LookSpacing.Panel
 
         Surface(
             modifier = Modifier
@@ -147,13 +146,13 @@ fun InGameSettingsPanel(
     BoxWithConstraints(
         modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.6f))
+            .background(xendroid.compose.ui.theme.GameOverlayLook.Scrim)  // hakuX-Boosted: one dimming for every in-game panel
             .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } },
         contentAlignment = Alignment.Center,
     ) {
         val compact = maxHeight < 400.dp
         val outerPadding = if (compact) 8.dp else 24.dp
-        val innerPadding = if (compact) 12.dp else 20.dp
+        val innerPadding = if (compact) xendroid.compose.ui.theme.LookSpacing.PanelCompact else xendroid.compose.ui.theme.LookSpacing.Panel
 
         // Headings are list entries too, so a row's place in the list is not its index.
         val entries = remember(rows) {

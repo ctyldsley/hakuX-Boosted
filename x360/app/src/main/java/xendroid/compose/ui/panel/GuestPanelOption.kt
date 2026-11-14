@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -32,10 +32,13 @@ fun GuestPanelOption(
         Text(label, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
     if (selected) {
-        Button(
+        // hakuX-Boosted: what a controller is on looks here as it does on every other
+        // screen: a ring in the accent colour around it and a tonal fill, not a solid
+        // accent block (ui/theme/HostTheme.kt, the focus ring).
+        FilledTonalButton(
             onClick = onClick,
             shape = shape,
-            modifier = sizing.border(2.dp, MaterialTheme.colorScheme.onPrimaryContainer, shape),
+            modifier = sizing.border(2.dp, MaterialTheme.colorScheme.primary, shape),
         ) { content() }
     } else {
         OutlinedButton(onClick = onClick, shape = shape, modifier = sizing) { content() }

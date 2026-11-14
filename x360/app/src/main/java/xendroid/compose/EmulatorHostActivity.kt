@@ -253,6 +253,17 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         xendroid.compose.core.TitleDefaults.seed(applicationContext, java.io.File(Utils.get_storage_root_path()))
         // hakuX-Boosted: the bundled Turnip driver, before the core reads vulkan_lib_path.
         xendroid.compose.core.BundledDriver.install(applicationContext)
+        // hakuX-Boosted: the core must never start on a missing or unreadable config
+        // (it would run on its built-in defaults with nobody signed in). The guard puts
+        // the backup back first; whatever it had to do, the player is told once here
+        // and the notice stays in the settings until dismissed.
+        runCatching {
+            xendroid.compose.settings.ConfigGuard.ensureLive(
+                applicationContext, ConfigStore(applicationContext))
+            xendroid.compose.settings.ConfigGuard.takeNoticeToAnnounce()?.let { notice ->
+                Toast.makeText(this, notice.title + ". " + notice.body, Toast.LENGTH_LONG).show()
+            }
+        }.onFailure { Log.w(TAG, "config guard at launch failed", it) }
         session.setupContext(this)
         session.setupGamePathReal(absPath)
         session.setupLaunchArgs(arrayOf(

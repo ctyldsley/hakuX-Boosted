@@ -99,7 +99,6 @@ private fun SettingsIndex(
                     },
                     modifier = Modifier.clickable { onOpen(cat) },
                 )
-                HorizontalDivider()
             }
         }
     }
@@ -129,7 +128,6 @@ private fun SettingsCategoryDetail(
             items(category.settings, key = { it.key }) { setting ->
                 val sv = values[setting.key]
                 SettingRow(vm, setting, modified = sv?.modified == true, raw = sv?.raw)
-                HorizontalDivider()
             }
         }
     }

@@ -103,7 +103,15 @@ public class Application extends android.app.Application{
         String bundled_config=load_default_config_str(ctx);
         if(!default_config_file.exists()
                 || !bundled_config.equals(Utils.load_string(default_config_file)))
-            Utils.save_string(default_config_file,bundled_config);
+        {
+            // hakuX-Boosted: written whole (beside, synced, renamed), never half.
+            try {
+                ConfigFiles.writeAtomic(default_config_file,
+                        bundled_config.getBytes(java.nio.charset.StandardCharsets.UTF_8), false);
+            } catch (IOException e) {
+                Utils.save_string(default_config_file,bundled_config);
+            }
+        }
 
         if(!should_delay_load())
             Emulator.load_library();
