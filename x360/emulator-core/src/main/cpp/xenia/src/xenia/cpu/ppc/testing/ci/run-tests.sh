@@ -15,6 +15,8 @@
 #              sorted: registers, flags and memory as hashes)
 #   STATE_REF  such a file from another run: this run's states must equal it,
 #              test for test (the tests named in nondeterministic.txt apart)
+#   STATE_KEEP_CODESIZE  compare the size of each test function's machine
+#              code too (for two builds of the translator, same settings)
 #   STATE_IGNORE  a field of the state lines to leave out of that comparison
 #              ("flags": the run changes condition register bits that the
 #              ABI leaves undefined at a return; "abiflags" is still compared)
@@ -116,7 +118,12 @@ if [ -n "${STATE_REF:-}" ]; then
   names() { cut -d' ' -f1 "$1" | sort -u; }
   # only the tests both runs have (a run may cover a subset of the suites)
   join <(names "$work/state") <(names "$STATE_REF") | grep -v -x -F -f "$work/nondet" > "$work/common" || true
-  strip() { if [ -n "${STATE_IGNORE:-}" ]; then sed -E "s/ ${STATE_IGNORE}=[0-9a-f]+//"; else cat; fi; }
+  # The code size is for comparing two builds with the same settings; with
+  # different settings it differs by design.
+  strip() {
+    if [ -n "${STATE_KEEP_CODESIZE:-}" ]; then cat; else sed -E 's/ codesize=[0-9]+//'; fi \
+      | if [ -n "${STATE_IGNORE:-}" ]; then sed -E "s/ ${STATE_IGNORE}=[0-9a-f]+//"; else cat; fi
+  }
   join "$work/common" "$work/state" | strip > "$work/a"
   join "$work/common" "$STATE_REF" | strip > "$work/b"
   if ! cmp -s "$work/a" "$work/b"; then

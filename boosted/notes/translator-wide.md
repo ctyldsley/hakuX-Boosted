@@ -344,6 +344,33 @@ Not checked: `longjmp` into a pinned function (the resume stubs now reload
 the registers live after that call; the path cannot run in the tests), the
 preemption yield with pins, kernel calls with pins.
 
+## Defaults: what "unchanged" was checked against
+
+Every setting here is off by default. That the code translated with them
+off is what `claude/integration-1113` translates was checked, not only
+read: the test runner was also built from the base branch (`8e03766`, with
+this branch's runner and tests copied in) and both builds were run over all
+the tests with every setting at its default.
+
+- Every test passes on both and leaves the same registers, flags and memory
+  (141,879 states compared).
+- The size of the machine code of each test's function is the same for 95%
+  of them and differs by one instruction (4 bytes, either way) for 7,748.
+  On one of those the two builds' code was dumped and compared: the same
+  instructions in the same order, differing only in the immediate values of
+  two host addresses (a table base and a host function), which sit at
+  different places in two builds of the program and take one `movk` more or
+  fewer depending on their bits. No other difference was looked for
+  function by function beyond that sample.
+
+What does run differently with everything off, by reading: a compare's
+sequence ends in a call that emits the same `cset`; the emitter's attempt
+loop runs once; three passes are entered and return at once; the code cache
+tests one setting when a function is placed; the translator tests one after
+a function is assembled. With `log_translation_stats` on (it is off by
+default) every block head gains four instructions for the block counts,
+which is new.
+
 ## 3. Cheaper code, each behind its own setting
 
 "Saves" is read off the emitter for one occurrence. How often each occurs
@@ -649,3 +676,22 @@ All marked `hakuX-Boosted:` at each change.
 | `cpu/backend/a64/a64_seq_util.h` | `IsGuestStackPointerValue`; the fix-up left out or counted in `ComputeMemoryAddress` |
 | `cpu/backend/a64/a64_code_cache.h`, `.cc`, `a64_function.h` | `LinkCallSites` and the literal list a function carries to it |
 | `cpu/processor.h`, `.cc`, `cpu/entry_table.cc` | the translate-ahead helper, its stop in `~Processor`, the priority boost from the entry table's wait |
+
+## Build state
+
+- `5db5308` (steps 1 and 2): Actions run 127, green, all three jobs
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43579735396).
+  The translator tests took 85 minutes there with that commit's matrix.
+- `0b682e8` (steps 3 and 4 without the constant pass): Actions run 128
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43592153452).
+- The commit after it adds the constant pass, its tests, the code size in
+  the state dump and this file's last sections. See the branch tip's run;
+  if it is not green, the last green commit above holds everything before
+  it.
+
+Local checks before each push, in the cloud session's container (x86-64,
+tests cross-compiled for ARM64 and run under qemu-aarch64 8.2): every line
+of `ci/matrix.txt` over all the tests at least once, the deliberate faults
+of sections 2 and 3, and every changed source file compiled with the
+compiler's default warnings as errors (the test build itself silences
+warnings; the app's build does not).

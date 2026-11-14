@@ -397,7 +397,7 @@ class TestRunner {
     fn->Call(thread_state_.get(), uint32_t(ctx->lr));
 
     // hakuX-Boosted: the whole state, for comparing two runs.
-    DumpState(test_case);
+    DumpState(test_case, fn);
 
     // Assert test state expectations.
     bool result = CheckTestResults(test_case);
@@ -425,9 +425,16 @@ class TestRunner {
   // registers with CTR (LR is left out: the runner sets it), the float
   // registers, the vector registers, the condition, XER, FPSCR and VSCR
   // state, the scratch memory tests write to and the top 32 KiB of the stack.
-  void DumpState(TestCase& test_case) {
+  void DumpState(TestCase& test_case, Function* fn) {
     if (cvars::test_state_dump.empty()) {
       return;
+    }
+    // The size of the machine code the test's own function was translated
+    // to: with every setting off this must not change from one build of the
+    // translator to the next unless the change was meant to.
+    size_t code_size = 0;
+    if (fn && fn->is_guest()) {
+      code_size = static_cast<GuestFunction*>(fn)->machine_code_length();
     }
     if (!state_dump_file_) {
       state_dump_file_ = filesystem::OpenFile(cvars::test_state_dump, "a");
@@ -459,13 +466,13 @@ class TestRunner {
                kStackDumpSize, mem);
     fprintf(state_dump_file_,
             "%s gpr=%016llx fpr=%016llx vr=%016llx flags=%016llx "
-            "mem=%016llx abiflags=%016llx\n",
+            "mem=%016llx abiflags=%016llx codesize=%zu\n",
             test_case.name.c_str(), static_cast<unsigned long long>(gpr),
             static_cast<unsigned long long>(fpr),
             static_cast<unsigned long long>(vr),
             static_cast<unsigned long long>(flags),
             static_cast<unsigned long long>(mem),
-            static_cast<unsigned long long>(abi_flags));
+            static_cast<unsigned long long>(abi_flags), code_size);
     fflush(state_dump_file_);
   }
 
