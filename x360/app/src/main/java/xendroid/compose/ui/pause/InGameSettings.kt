@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import xendroid.compose.core.EmuShutdown
 import xendroid.compose.core.EmulatorSession
 import xendroid.compose.gamepad.GamepadConfigDto
 import xendroid.compose.gamepad.GamepadController
@@ -200,7 +201,8 @@ class InGameSettingsController(
             onActivate = {
                 val updated = padConfig.copy(globals = next(padConfig.globals))
                 padConfig = updated
-                scope.launch { runCatching { gamepad.save(updated) } }
+                // hakuX-Boosted: tracked for the shutdown, as the config writes below.
+                scope.launch { EmuShutdown.tracked { runCatching { gamepad.save(updated) } } }
             },
         ))
     }
@@ -215,7 +217,8 @@ class InGameSettingsController(
             return
         }
         values[s.key] = next
-        scope.launch(Dispatchers.IO) {
+        // hakuX-Boosted: tracked, so quitting straight after waits for the write (EmuShutdown).
+        scope.launch(Dispatchers.IO) { EmuShutdown.tracked {
             writes.withLock {
                 runCatching {
                     val handle = store.openGameConfig(id)
@@ -233,7 +236,7 @@ class InGameSettingsController(
                     }
                 }.onFailure { Log.w(TAG, "writing ${s.key} to the config of $id failed", it) }
             }
-        }
+        } }
     }
 
     /** A list of numbers is an integer in the config (the frame rate limit, the scales). */
