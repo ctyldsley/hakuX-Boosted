@@ -28,6 +28,25 @@ run() {  # run <launcher> <suite> <label> [name=value ...]
   fi
 }
 
+# --- 1b. The core's Fiber class ------------------------------------------------
+run bench_core fiber "defaults"
+run bench_core fiber "host_thread_state_slot" host_thread_state_slot=true
+run bench_core_static fiber "static TLS (not Android's)"
+
+# --- 2. The guest scheduler ----------------------------------------------------
+lean="guest_scheduler_lean_yield=true"
+park="guest_scheduler_park_yield_spinners=true"
+slot="host_thread_state_slot=true"
+skew="guest_scheduler_skew_bound_us=2000 guest_scheduler_skew_cap_multiple=100"
+run bench_core sched "defaults"
+run bench_core sched "lean_yield" $lean
+run bench_core sched "park_yield_spinners" $park
+run bench_core sched "host_thread_state_slot" $slot
+run bench_core sched "skew_bound_us=2000" $skew
+run bench_core sched "lean_yield + slot" $lean $slot
+run bench_core sched "all of the above" $lean $park $slot $skew
+run bench_core_static sched "static TLS (not Android's)"
+
 # --- 3. The translator ---------------------------------------------------------
 run bench_core xlat "defaults"
 run bench_core xlat "pin_guest_registers" pin_guest_registers=true

@@ -70,6 +70,8 @@
 #define protected public
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xevent.h"
+#include "xenia/kernel/xthread.h"
 #undef private
 #undef protected
 
@@ -209,6 +211,10 @@ namespace bench {
 xe::cpu::Export* FindKernelExport(const std::string& name) {
   auto it = ExportTable().find(name);
   return it == ExportTable().end() ? nullptr : it->second;
+}
+
+xe::threading::WaitHandle* ThreadExitHandle(xe::kernel::XThread* thread) {
+  return thread->GetWaitHandle();
 }
 
 xe::kernel::KernelState* CreateKernelState(Env* env) {

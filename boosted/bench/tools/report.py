@@ -14,21 +14,29 @@ import sys
 SECTION_TITLES = [
     ("prim", "1. Host primitives",
      "One call of a function that is not inlined; `call_empty` is the call "
-     "and return alone. Nanoseconds, lowest of the samples."),
+     "and return alone, to subtract. Nanoseconds, lowest of the samples."),
     ("fiber", "1b. Fiber switch through the core's own Fiber class",
      "`xe::threading::Fiber::SwitchTo` as the scheduler calls it, per switch."),
     ("sched", "2. The guest scheduler's paths",
      "The core's `guest_scheduler.cc`, `xthread.cc`, `xobject.cc`, "
-     "`xevent.cc` and `xboxkrnl_threading.cc`, unmodified, driven from guest "
-     "threads the harness creates. Nanoseconds per kernel call, lowest of "
-     "the samples."),
+     "`xevent.cc` and `xboxkrnl_threading.cc`, unmodified. Guest threads made "
+     "with `XThread::Create` run PowerPC loops that call the kernel exports "
+     "through import thunks. One operation is one pass of the loop: one "
+     "kernel call, or for `wait_wake_round_trip` a set and a blocking wait "
+     "on each of two threads. `loop_alone` and "
+     "`kernel_call_that_does_nothing` are what to subtract."),
     ("xlat", "3. The translator",
      "Synthetic PowerPC loops written for this rig, translated and run by "
-     "the ARM64 backend."),
+     "the core's frontend, passes and ARM64 backend. Each result is checked "
+     "against a C++ model of the loop. \"Emitted\" counts the whole "
+     "function's host code, prologue and cold paths included, over its "
+     "guest instructions; \"run\" is what the CPU's counter saw per guest "
+     "instruction inside the loop."),
 ]
 
 METRIC_LABELS = {
-    "ns_per_op": "ns per call",
+    "ns_per_op": "ns per operation",
+    "cores_busy": "cores busy (process CPU time over wall time)",
     "ns_per_guest_insn": "ns per guest instruction",
     "host_insn_per_guest_insn": "host instructions run per guest instruction",
     "host_code_insn_per_guest_insn":
@@ -89,12 +97,31 @@ def main():
     parser.add_argument("--title", default="hakuX-Boosted bench")
     parser.add_argument("--out", help="write the report here as well")
     parser.add_argument("--json-out", help="write the reduced numbers here")
+    parser.add_argument("--compact", action="store_true",
+                        help="print one short line a number instead of the "
+                             "report (for reading a job log)")
     args = parser.parse_args()
 
     values, notes, order = load(args.target)
     base_values, base_notes = {}, {}
     if args.baseline:
         base_values, base_notes, _ = load(args.baseline)
+
+    if args.compact:
+        for key in order:
+            if key[3].endswith(SPREAD_SUFFIX):
+                continue
+            best = min(values[key])
+            line = [key[0], key[1], key[2], key[3], fmt(best)]
+            if key in base_values:
+                base = min(base_values[key])
+                line.append(fmt(base))
+                if base > 0:
+                    line.append(f"{(best - base) / base * 100:+.1f}%")
+            print("|".join(line))
+        for (section, name), text in notes.items():
+            print("|".join(["note", section, name, text]))
+        return
 
     out = []
     out.append(f"# {args.title}")

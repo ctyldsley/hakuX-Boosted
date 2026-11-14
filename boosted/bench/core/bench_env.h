@@ -23,6 +23,10 @@ struct PPCContext_s;
 }  // namespace cpu
 namespace kernel {
 class KernelState;
+class XThread;
+}  // namespace kernel
+namespace threading {
+class WaitHandle;
 }
 }  // namespace xe
 
@@ -66,6 +70,8 @@ Env* CreateEnv(bool with_kernel);
 // kernel_shim.cc
 xe::kernel::KernelState* CreateKernelState(Env* env);
 xe::cpu::Export* FindKernelExport(const std::string& name);
+// The host event a guest thread signals when it has exited.
+xe::threading::WaitHandle* ThreadExitHandle(xe::kernel::XThread* thread);
 
 }  // namespace bench
 

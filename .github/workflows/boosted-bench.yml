@@ -239,3 +239,12 @@ jobs:
             exit 1
           fi
           test "$(grep -c '"metric"' results/target.jsonl)" -gt 50
+
+      # The numbers once more, one short line each: easier to read in the
+      # raw job log than the Markdown table above.
+      - name: Numbers
+        if: always()
+        run: |
+          args=(--target results/target.jsonl --compact)
+          [ -f results/baseline.jsonl ] && args+=(--baseline results/baseline.jsonl)
+          python3 boosted/bench/tools/report.py "${args[@]}" || true

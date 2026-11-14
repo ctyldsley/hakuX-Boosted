@@ -89,6 +89,11 @@ target_compile_definitions(xecore PUBLIC
   XE_PLATFORM_xendroid=1)
 target_compile_definitions(xecore PRIVATE HAVE_CONFIG_H)
 target_include_directories(xecore PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/compat")
+# host_thread_state_slot on Linux: see shadow_host_thread_state.h.in.
+configure_file(shadow_host_thread_state.h.in
+  "${CMAKE_CURRENT_BINARY_DIR}/shadow/xenia/base/host_thread_state.h" @ONLY)
+target_include_directories(xecore BEFORE PUBLIC
+  "${CMAKE_CURRENT_BINARY_DIR}/shadow")
 target_compile_options(xecore PRIVATE -w
   "$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/compat/bench_compat.h>")
 target_link_libraries(xecore PUBLIC benchcommon pthread dl rt)

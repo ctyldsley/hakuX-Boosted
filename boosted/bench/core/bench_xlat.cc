@@ -55,11 +55,13 @@ struct Program {
 // --- 1. Integer arithmetic and a data-dependent branch ----------------------
 Program BuildInteger(Env& env) {
   Asm a(env.NextCodeAddress());
-  Asm::Label loop, skip;
+  Asm::Label loop, skip, done;
+  a.li(6, 0);
+  a.cmpwi(6, 3, 0);  // no passes asked for: straight to the exit
+  a.beq(6, done);
   a.mtctr(3);
   a.li(4, 1);
   a.li(5, 7);
-  a.li(6, 0);
   a.Bind(loop);
   a.mulli(4, 4, 33);
   a.add(4, 4, 5);
@@ -73,6 +75,7 @@ Program BuildInteger(Env& env) {
   a.addi(6, 6, 1);
   a.Bind(skip);
   a.bdnz(loop);
+  a.Bind(done);
   a.mr(3, 6);
   a.blr();
   Program p;
@@ -82,7 +85,7 @@ Program BuildInteger(Env& env) {
   p.guest_words = uint32_t(a.count());
   auto model = [](uint32_t iterations, uint64_t* insns) {
     uint32_t r4 = 1, r5 = 7, r6 = 0;
-    uint64_t count = 4;
+    uint64_t count = 6;
     for (uint32_t i = 0; i < iterations; ++i) {
       r4 = r4 * 33 + r5;
       uint32_t r7 = (r4 << 5) | (r4 >> 27);
@@ -541,6 +544,10 @@ int RunXlatSuite(const std::string& label) {
       return double(value.load(std::memory_order_relaxed));
     };
     const std::string all = "(translator counters)";
+    if (load(stats.pin_functions_considered) == 0 &&
+        load(stats.simplify_block_walks) == 0) {
+      // Neither setting is on: nothing was counted.
+    } else {
     Emit(s, all, label, "functions considered for pinning",
          load(stats.pin_functions_considered));
     Emit(s, all, label, "of those, functions with a loop",
@@ -555,6 +562,7 @@ int RunXlatSuite(const std::string& label) {
          load(stats.simplify_block_skips));
     Emit(s, all, label, "simplification skip mismatches",
          load(stats.simplify_skip_mismatches));
+    }
   }
 #else
   EmitNote(s, "(translator counters)",
