@@ -9,6 +9,9 @@
 
 #include "xenia/cpu/backend/a64/a64_code_cache.h"
 
+#include "xenia/cpu/backend/a64/a64_function.h"
+#include "xenia/cpu/compiler/translation_stats.h"
+
 #include <cstdint>
 
 #include "xenia/base/cvar.h"
@@ -27,6 +30,17 @@
 #include <cstring>
 #endif
 
+// hakuX-Boosted: see A64CodeCache::LinkCallSites.
+DEFINE_bool(
+    a64_linked_calls, false,
+    "A call to a guest function that had no translated code yet when its "
+    "caller was translated loads the callee's address from a literal beside "
+    "the caller's code, which is filled in when the callee is translated, "
+    "instead of looking the callee up in the indirection table on every "
+    "call. Set before launch: it must be on when a function is placed for "
+    "its callers to be linked.",
+    "a64");
+
 DEFINE_bool(a64_perf_map, true,
             "Write a simpleperf/perf 'generic JIT symbols' map file "
             "(perf-<pid>.map) mapping generated code to guest function "
@@ -44,9 +58,66 @@ A64CodeCache::~A64CodeCache() {
   }
 }
 
+// hakuX-Boosted: see the declaration.
+void A64CodeCache::LinkCallSites(uint32_t guest_address,
+                                 GuestFunction* function_info,
+                                 void* code_execute_address) {
+  if (!guest_address || !function_info) {
+    return;
+  }
+  const auto to_write_view = [this](uint64_t execute_address) {
+    return reinterpret_cast<uint64_t*>(
+        generated_code_write_base_ +
+        (execute_address -
+         reinterpret_cast<uint64_t>(generated_code_execute_base_)));
+  };
+  const auto store = [](uint64_t* literal, uint64_t value) {
+    // Aligned (the emitter and the cache see to that), so one store that
+    // another thread's load sees whole.
+    __atomic_store_n(literal, value, __ATOMIC_RELEASE);
+  };
+  const uint64_t self_address =
+      reinterpret_cast<uint64_t>(code_execute_address);
+  uint64_t linked_now = 0;
+  std::lock_guard<std::mutex> lock(link_mutex_);
+  // The new function's own call sites.
+  for (const auto& literal :
+       static_cast<A64Function*>(function_info)->call_literals()) {
+    uint64_t* slot = to_write_view(self_address + literal.second);
+    auto known = linked_targets_.find(literal.first);
+    if (literal.first == guest_address) {
+      store(slot, self_address);  // recursion
+      ++linked_now;
+    } else if (known != linked_targets_.end()) {
+      store(slot, known->second);
+      ++linked_now;
+    } else {
+      pending_literals_[literal.first].push_back(slot);
+    }
+  }
+  // The call sites that were waiting for it. A function placed a second time
+  // at the same guest address (it can be translated again) takes over for
+  // calls linked from now on; literals already pointed at the first copy
+  // keep it, which stays valid: code is never freed.
+  linked_targets_[guest_address] = self_address;
+  auto waiting = pending_literals_.find(guest_address);
+  if (waiting != pending_literals_.end()) {
+    for (uint64_t* slot : waiting->second) {
+      store(slot, self_address);
+    }
+    linked_now += waiting->second.size();
+    pending_literals_.erase(waiting);
+  }
+  compiler::translation_stats.linked_call_sites_resolved.fetch_add(
+      linked_now, std::memory_order_relaxed);
+}
+
 void A64CodeCache::OnCodePlaced(uint32_t guest_address,
                                 GuestFunction* function_info,
                                 void* code_execute_address, size_t code_size) {
+  if (cvars::a64_linked_calls) {
+    LinkCallSites(guest_address, function_info, code_execute_address);
+  }
 #if defined(__linux__)
   if (!cvars::a64_perf_map) {
     return;

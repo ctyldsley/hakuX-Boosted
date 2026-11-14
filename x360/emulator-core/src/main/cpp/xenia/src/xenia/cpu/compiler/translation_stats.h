@@ -58,6 +58,11 @@ struct TranslationStats {
   // a64_short_forward_branches: functions emitted a second time because
   // they were too large for it.
   std::atomic<uint64_t> short_forward_retries{0};
+  // a64_linked_calls: call sites emitted with a literal.
+  std::atomic<uint64_t> linked_call_sites{0};
+  // ... and how many of those literals have been pointed at their callee
+  // (the rest still go through the resolve thunk: callee not translated).
+  std::atomic<uint64_t> linked_call_sites_resolved{0};
   // pin_guest_registers_wide.
   std::atomic<uint64_t> pin_functions_pinned_no_loop{0};
   std::atomic<uint64_t> pin_flag_slots{0};

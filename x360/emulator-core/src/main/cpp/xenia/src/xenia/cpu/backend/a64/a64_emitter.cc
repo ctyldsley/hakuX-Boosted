@@ -34,6 +34,7 @@ DECLARE_bool(a64_enable_host_guest_stack_synchronization);
 
 DECLARE_bool(a64_lean_extern_thunk);
 DECLARE_bool(log_translation_stats);  // hakuX-Boosted
+DECLARE_bool(a64_linked_calls);
 DECLARE_int32(eliminate_dead_context_stores);
 DECLARE_bool(dead_context_store_verify);
 
@@ -190,6 +191,7 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
   // a function are closer than its length), or the assembler refuses one,
   // the function is emitted again from the same HIR with the long form.
   short_forward_ok_ = cvars::a64_short_forward_branches;
+  linked_calls_ok_ = cvars::a64_linked_calls;
   locals_laid_out_ = false;
   for (int attempt = 0; attempt < 2; ++attempt) {
     used_short_forward19_ = false;
@@ -198,13 +200,17 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
     try {
       emitted = Emit(builder, func_info);
     } catch (const Xbyak_aarch64::Error& e) {
-      if (!(used_short_forward19_ || used_short_forward14_)) {
+      if (!(used_short_forward19_ || used_short_forward14_ ||
+            !call_literals_.empty())) {
         XELOGE("A64: assembler error while emitting guest function {:08X}: {}",
                current_guest_function_, e.what());
       }
       emitted = false;
     }
-    const bool used_short = used_short_forward19_ || used_short_forward14_;
+    // (A linked call's literal load has the reach of a conditional
+    // branch and is retried on the same terms.)
+    const bool used_short = used_short_forward19_ || used_short_forward14_ ||
+                            !call_literals_.empty();
     if (!used_short) {
       break;
     }
@@ -222,13 +228,26 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
     ResetPerFunctionState();
     source_map_arena_.Reset();
     short_forward_ok_ = false;
+    linked_calls_ok_ = false;
     emitted = false;
   }
   short_forward_ok_ = false;
+  linked_calls_ok_ = false;
   if (!emitted) {
     // Emplace only runs on success, so a failed compile has to reset too.
     ResetPerFunctionState();
     return false;
+  }
+
+  // hakuX-Boosted: a64_linked_calls. The cache links these when it places
+  // the function.
+  {
+    std::vector<std::pair<uint32_t, uint32_t>> literals;
+    literals.reserve(call_literals_.size());
+    for (const auto& literal : call_literals_) {
+      literals.emplace_back(literal.guest_target, literal.code_offset);
+    }
+    static_cast<A64Function*>(function)->SetCallLiterals(std::move(literals));
   }
 
   // hakuX-Boosted: a function with pinned guest registers tells
@@ -258,6 +277,7 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // hakuX-Boosted: the guest registers this function keeps in host
   // registers, as GuestRegisterPinningPass chose them. Empty unless
   // pin_guest_registers is on.
+  call_literals_.clear();
   pins_.clear();
   pins_live_ = false;
   pin_verify_ = cvars::a64_pin_verify;
@@ -597,6 +617,24 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     compiler::translation_stats.pin_resume_stubs.fetch_add(
         pinned_resume_stubs_.size(), std::memory_order_relaxed);
   }
+  // hakuX-Boosted: the literals of the linked call sites, 8 bytes each on
+  // an 8-byte boundary (functions are placed on 16-byte boundaries), each
+  // holding the resolve thunk's address until the cache links it.
+  if (!call_literals_.empty()) {
+    if (getSize() & 7) {
+      nop();
+    }
+    const uint64_t thunk =
+        reinterpret_cast<uint64_t>(backend()->resolve_function_thunk());
+    for (auto& literal : call_literals_) {
+      L(*literal.label);
+      literal.code_offset = static_cast<uint32_t>(getSize());
+      dd(static_cast<uint32_t>(thunk));
+      dd(static_cast<uint32_t>(thunk >> 32));
+    }
+    compiler::translation_stats.linked_call_sites.fetch_add(
+        call_literals_.size(), std::memory_order_relaxed);
+  }
   code_offsets.tail = getSize();
 
   // Fill in EmitFunctionInfo metrics.
@@ -905,7 +943,14 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   if (code_cache_->has_indirection_table()) {
     // Must leave the guest address in w16 for the resolve thunk to read.
     mov(w16, function->address());
-    if (!code_cache_->encoded_indirection()) {
+    if (linked_calls_ok_) {
+      // hakuX-Boosted: a64_linked_calls. The target comes from a literal in
+      // this function's tail: the resolve thunk until the callee has code,
+      // the callee from then on (A64CodeCache::LinkCallSites).
+      auto& literal = NewCachedLabel();
+      call_literals_.push_back({function->address(), &literal, 0});
+      ldr(x9, literal);
+    } else if (!code_cache_->encoded_indirection()) {
       // Fast path: table mapped at host VA == guest addr; slot holds raw
       // 32-bit host target.
       ldr(w9, ptr(x16, static_cast<uint32_t>(0)));

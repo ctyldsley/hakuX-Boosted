@@ -12,6 +12,8 @@
 
 #include <cstdio>
 #include <memory>
+#include <unordered_map>
+#include <vector>
 #include <mutex>
 
 #include "xenia/cpu/backend/code_cache_base.h"
@@ -51,6 +53,23 @@ class A64CodeCache : public CodeCacheBase<A64CodeCache> {
 
  protected:
   A64CodeCache() = default;
+
+  // hakuX-Boosted: a64_linked_calls. A call site that did not know its
+  // callee's host address when it was emitted loads it from an 8-byte
+  // literal in its own function's tail code, which starts out as the
+  // resolve thunk's address. LinkCallSites, called for every guest function
+  // as it is placed, points the new function's literals at the callees that
+  // already have code, remembers the rest, and points every remembered
+  // literal that was waiting for the new function at it. A literal is data:
+  // changing it is one aligned 8-byte store, and a caller that reads it a
+  // moment too early just goes through the thunk once more.
+  void LinkCallSites(uint32_t guest_address, GuestFunction* function_info,
+                     void* code_execute_address);
+  std::mutex link_mutex_;
+  // Guest address -> host address, for every guest function placed.
+  std::unordered_map<uint32_t, uint64_t> linked_targets_;
+  // Guest address -> literals (write view) waiting for that function.
+  std::unordered_map<uint32_t, std::vector<uint64_t*>> pending_literals_;
 
   std::mutex perf_map_mutex_;
   FILE* perf_map_file_ = nullptr;

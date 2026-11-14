@@ -186,9 +186,12 @@ std::string FormatExtraStats() {
   line += fmt::format(
       "; dead context stores: {} of {} candidate stores removed; compares "
       "fused with their branch {}; functions emitted twice for short "
-      "forward branches {}; self-check mismatches (TranslatorVerify) {}",
+      "forward branches or linked calls {}; linked call sites {} of "
+      "which {} point at their callee; "
+      "self-check mismatches (TranslatorVerify) {}",
       get(t.dead_context_stores_removed), get(t.dead_context_stores_seen),
       get(t.compares_fused), get(t.short_forward_retries),
+      get(t.linked_call_sites), get(t.linked_call_sites_resolved),
       get(t.verify_mismatches));
   return line;
 }

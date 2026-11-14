@@ -325,6 +325,17 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   bool UseShortBranch(const Xbyak_aarch64::Label& label, size_t max_distance);
   std::unordered_set<const Xbyak_aarch64::Label*> block_labels_;
   bool short_forward_ok_ = false;
+  // hakuX-Boosted: a64_linked_calls. The literals of this function's linked
+  // call sites, emitted after its tail code. linked_calls_ok_ is cleared
+  // for the second attempt at a function too large for a literal load to
+  // be certain to reach its literal.
+  struct CallLiteral {
+    uint32_t guest_target;
+    Xbyak_aarch64::Label* label;
+    uint32_t code_offset;
+  };
+  std::vector<CallLiteral> call_literals_;
+  bool linked_calls_ok_ = false;
   // The locals' stack offsets are assigned once per function (see Emit).
   bool locals_laid_out_ = false;
   size_t locals_stack_size_ = 0;

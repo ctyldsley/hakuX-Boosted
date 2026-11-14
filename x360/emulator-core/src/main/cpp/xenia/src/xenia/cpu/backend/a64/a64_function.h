@@ -53,6 +53,18 @@ class A64Function : public GuestFunction {
   // Host address of the stub for a return site, or 0 if it has none.
   uintptr_t MapPinnedResumeAddress(uint32_t guest_address) const;
 
+  // hakuX-Boosted: a64_linked_calls. The call sites of this function that
+  // load their target from a literal in its tail code: the guest address
+  // called and the literal's offset in the function's code. Set by the
+  // emitter before the code is placed; read once by the code cache when it
+  // is (A64CodeCache::OnCodePlaced).
+  void SetCallLiterals(std::vector<std::pair<uint32_t, uint32_t>> literals) {
+    call_literals_ = std::move(literals);
+  }
+  const std::vector<std::pair<uint32_t, uint32_t>>& call_literals() const {
+    return call_literals_;
+  }
+
  protected:
   bool CallImpl(ThreadState* thread_state, uint32_t return_address) override;
 
@@ -62,6 +74,7 @@ class A64Function : public GuestFunction {
   // hakuX-Boosted
   std::vector<std::pair<uint32_t, uint32_t>> pinned_resume_stubs_;
   std::atomic<bool> has_pinned_guest_registers_{false};
+  std::vector<std::pair<uint32_t, uint32_t>> call_literals_;
 };
 
 }  // namespace a64

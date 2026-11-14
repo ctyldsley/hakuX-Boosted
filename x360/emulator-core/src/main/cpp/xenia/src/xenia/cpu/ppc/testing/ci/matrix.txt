@@ -52,3 +52,6 @@ dead stores, ABI (verify)   ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|rl|sl|
 # forward branches gets.
 fuse, short branches        ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|f|l|st|rl|sl|sr|t)) ; --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true
 short forward, emit twice   ; . ; --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_short_forward_branches_test_retry=true
+
+# Linked call sites.
+linked calls                ; ^(seq_|instr_(add|cmp|b|l|st|m)) ; --a64_linked_calls=true
