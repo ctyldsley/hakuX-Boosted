@@ -12,7 +12,8 @@ Base: `claude/integration-1113` at `8e03766`. Pushed only to
 
 ## Done / in progress / next
 
-- Done, built by Actions (see "Build"): all five steps of the brief.
+- Done, built green by Actions (run 102, see "Build"): all five steps of
+  the brief.
   1. The current-thread and current-CPU lookups off the TLS resolver.
   2. The empty yield's short way, and parks for yield spinners that work
      for a thread that spins in bursts and are ended by events.
@@ -508,6 +509,12 @@ the APC test in `NtYieldExecution`, the dispatch-thread wake going through
 
 ## Build
 
-- `1692228` (step 1): Actions run 98.
-- `e64aaae` (steps 2 to 5): Actions run 100.
-- Results are recorded here by the commit that follows them.
+- `1692228` (step 1): run 98, the Xbox core job green, the APK job
+  cancelled by the next push.
+- `e64aaae` (steps 2 to 5): run 100, cancelled by the next push.
+- **`fc5767e` (all the code, with these notes): Actions run 102, green,
+  both jobs** (hakuX's core, and the APK with the 360 core, arm64 backend
+  included),
+  https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43526024888.
+  The APK to test is this run's artifact.
+- The commit that records this result changes this file only.
