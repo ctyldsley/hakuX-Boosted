@@ -498,16 +498,26 @@ dword_result_t KeDelayExecutionThread_entry(dword_t processor_mode,
 DECLARE_XBOXKRNL_EXPORT3(KeDelayExecutionThread, kThreading, kImplemented,
                          kBlocking, kHighFrequency);
 
-dword_result_t NtYieldExecution_entry() {
+// hakuX-Boosted: takes the context. A title's main thread calls this half a
+// million times a second with nothing else to run (run 90's profile), and
+// each call looked its thread up through the dynamic TLS resolver three
+// times before it reached the scheduler: the bound PPC context for the APC
+// test, the current thread here, and again inside. The context is in a
+// register already; the APC test reads it directly and the thread is found
+// from it (GuestScheduler::FiberThreadOfContext).
+dword_result_t NtYieldExecution_entry(const ppc_context_t& ctx) {
   SCOPE_profile_cpu_i("guestsync", "NtYieldExecution");
-  xeProcessKernelApcs(nullptr);
-  if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread()) {
+  xeProcessKernelApcs(ctx);
+  XThread* fiber_thread = GuestScheduler::enabled()
+                              ? GuestScheduler::FiberThreadOfContext(ctx)
+                              : nullptr;
+  if (fiber_thread) {
     // NT reports whether anything else ran. Guests fall back to an alertable
     // sleep on no-yield, which is where their pending APCs get pumped.
     // hakuX-Boosted: named as the guest's own yield, for the scheduler's
     // counters and its guest_scheduler_lean_yield path.
     if (!kernel_state()->guest_scheduler()->YieldCurrentThread(
-            true, true, GuestScheduler::YieldCause::kNtYield)) {
+            true, true, GuestScheduler::YieldCause::kNtYield, fiber_thread)) {
       return X_STATUS_NO_YIELD_PERFORMED;
     }
   } else {

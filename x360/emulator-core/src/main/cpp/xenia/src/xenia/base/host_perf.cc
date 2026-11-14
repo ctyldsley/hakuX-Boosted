@@ -854,7 +854,16 @@ ThreadSet ScanThreads(const std::vector<std::string>& helper_names) {
     if (!strncmp(name, "Guest CPU ", 10) && name[10] >= '0' &&
         name[10] < '0' + kDispatchCount && name[11] == '\0') {
       dispatch[name[10] - '0'].Offer(tid);
-    } else if (!strcmp(name, "GPU Commands")) {
+    } else if (!strncmp(name, "GPU Commands", 12) &&
+               (name[12] == '\0' || name[12] == ' ')) {
+      // hakuX-Boosted: the thread is a guest-visible host thread, and
+      // XThread::set_name appends its handle: "GPU Commands (F8000010)",
+      // which the kernel cuts to 15 characters. On the device its comm is
+      // "GPU Commands (0", so the exact compare never matched: the log said
+      // "GPU missing" and the hint session and the core policy left the
+      // thread out (run 73). The name up to the space is the match; the
+      // threads it starts carry the same comm until they are renamed, and
+      // of those the one that started first is taken, as before.
       gpu.Offer(tid);
     } else {
       for (const std::string& helper : helper_names) {

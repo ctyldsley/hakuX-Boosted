@@ -24,6 +24,7 @@
 #include "xenia/cpu/backend/a64/a64_seq_util.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/backend/a64/a64_tracers.h"
+#include "xenia/cpu/compiler/passes/memory_poll_park_pass.h"
 #include "xenia/cpu/hir/instr.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
@@ -42,6 +43,20 @@ DEFINE_bool(a64_native_reserved_ops, true,
             "CPU");
 
 DECLARE_bool(guest_scheduler);
+// hakuX-Boosted: defined in cpu/compiler/passes/memory_poll_park_pass.cc.
+DECLARE_bool(park_pause_poll_loops);
+
+// hakuX-Boosted: the scheduler's handler for a visit to a pause-and-poll
+// loop's site (kernel/guest_scheduler.cc sets it when it starts; null until
+// then). Defined here, beside its one caller, like the two handlers in
+// backend.cc.
+namespace xe {
+namespace cpu {
+namespace backend {
+void (*spin_poll_site_handler)(void* raw_context, uint64_t site) = nullptr;
+}  // namespace backend
+}  // namespace cpu
+}  // namespace xe
 
 DEFINE_bool(a64_park_spin_backoff, true,
             "For collapsed guest spin-backoff loops, spin cheaply for the first "
@@ -189,7 +204,7 @@ void RecordSpinEpisode(int64_t dur_ns, int64_t now_ns) {
 // cooperative scheduler - blocking a dispatch thread there can stall the
 // sibling fiber that releases the polled word (raw-jit-spin-path.md Blocker 2).
 // The sleep timeout guarantees forward progress, so no wake plumbing is needed.
-static void SpinBackoffParkThunk(void* /*ppc_context*/) {
+static void SpinBackoffParkThunk(void* ppc_context) {
   static constexpr uint32_t kSpinIters = 24;
   static constexpr int64_t kParkNs = 30000;  // 30us bounded park
   static constexpr int64_t kGapNs = 200000;  // >200us idle -> new episode
@@ -202,7 +217,9 @@ static void SpinBackoffParkThunk(void* /*ppc_context*/) {
     // which may be a fiber queued behind this one. Yield instead - ready-tail
     // requeue guarantees co-resident progress.
     if (auto* yield_handler = xe::cpu::backend::spin_backoff_yield_handler) {
-      yield_handler(nullptr);
+      // hakuX-Boosted: with the context, so the scheduler finds the guest
+      // thread from it instead of through a thread-local lookup.
+      yield_handler(ppc_context);
       return;
     }
     // Scheduler enabled but not started yet (early init), or a non-fiber
@@ -234,6 +251,22 @@ static void SpinBackoffParkThunk(void* /*ppc_context*/) {
   xe::threading::NanoSleep(kParkNs);
 }
 
+// hakuX-Boosted: a pause-and-poll loop's site (park_pause_poll_loops). Called
+// on every pass of the loop, not only with the preempt flag up: the
+// scheduler has to see the passes to tell a thread that is stuck in the loop
+// from one that goes through it once. The loop pauses on every pass by its
+// own choice, so the call is small beside what it already spends.
+static void SpinPollSiteThunk(void* ppc_context, uint64_t site) {
+  if (auto* handler = xe::cpu::backend::spin_poll_site_handler) {
+    handler(ppc_context, site);
+    return;
+  }
+  // No scheduler yet: what an ordinary backoff site does.
+  if (static_cast<ppc::PPCContext*>(ppc_context)->preempt_requested) {
+    SpinBackoffParkThunk(ppc_context);
+  }
+}
+
 // ============================================================================
 // OPCODE_SPIN_BACKOFF
 // ============================================================================
@@ -262,6 +295,15 @@ struct SPIN_BACKOFF
       // runnable, but the call is a full guest->host thunk (28 Q-regs, 464 B
       // frame) plus a thread_local lookup. Gate it on the scheduler's own
       // give-way flag so the common case is two instructions.
+      // hakuX-Boosted: a site MemoryPollParkPass placed in a loop it has
+      // shown to be nothing but pause and poll calls in on every pass, with
+      // the loop's guest address (SpinPollSiteThunk).
+      if (cvars::guest_scheduler && cvars::park_pause_poll_loops &&
+          (i.instr->flags & compiler::passes::kSpinBackoffPollSite)) {
+        e.mov(e.x1, static_cast<uint64_t>(i.src1.value) >> 32);
+        e.CallNativeSafe(reinterpret_cast<void*>(&SpinPollSiteThunk));
+        return;
+      }
       if (cvars::guest_scheduler) {
         static_assert(offsetof(ppc::PPCContext, preempt_requested) < 4096);
         auto& skip = e.NewCachedLabel();

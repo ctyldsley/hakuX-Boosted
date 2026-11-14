@@ -1374,6 +1374,15 @@ void KernelState::EmulateCPInterruptDPC(uint32_t interrupt_callback,
   xboxkrnl::xeKeSetCurrentProcessType(X_PROCTYPE_IDLE, current_context);
 
   EndDPCImpersonation(current_context, dpc_scope);
+
+  // hakuX-Boosted: guest_scheduler_park_waits. The title's interrupt routine
+  // has just run (a vertical blank, or an interrupt the GPU command thread
+  // reached in the command stream): the swap, fence and interrupt counters a
+  // title's Direct3D busy-waits on are written by it. One load when no
+  // thread is busy-waiting.
+  if (guest_scheduler_) {
+    guest_scheduler_->NoteWaitEvent();
+  }
 }
 
 void KernelState::InitializeProcess(X_KPROCESS* process, uint32_t type,

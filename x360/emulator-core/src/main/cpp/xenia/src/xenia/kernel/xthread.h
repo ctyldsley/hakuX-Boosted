@@ -390,6 +390,10 @@ class XThread : public XObject, public cpu::Thread {
   // decide whether a blocking call yields cooperatively or blocks the host
   // thread.
   static XThread* GetCurrentFiberThread();
+  // hakuX-Boosted: the guest thread that owns |context| (two loads, no
+  // thread-local lookup), or null. See the definition for when that is the
+  // thread that is executing.
+  static XThread* FromContext(const cpu::ppc::PPCContext* context);
   static uint32_t GetCurrentThreadHandle();
   static uint32_t GetCurrentThreadId();
 
@@ -630,6 +634,34 @@ class XThread : public XObject, public cpu::Thread {
     // A probe was answered where the thread may not be held (inside a kernel
     // call): the look at the other CPUs is owed at the next JIT safepoint.
     bool skew_eval_owed = false;
+
+    // hakuX-Boosted: guest_scheduler_park_waits (GuestScheduler::WaitPark).
+    // This entry of the blocked list is a parked spinner or poller: it is
+    // re-readied at wait_deadline_tick whatever happens, and no sooner than
+    // wait_min_tick when something asks for it earlier. Raw host ticks.
+    // Written under the scheduler lock.
+    bool wait_park = false;
+    uint64_t wait_deadline_tick = 0;
+    uint64_t wait_min_tick = 0;
+    uint64_t wait_park_start_tick = 0;
+    // The thread's own record of the burst of empty yields (or of visits to
+    // one spin-wait site) it is in. Written and read by the thread alone.
+    uint64_t spin_check_tick = 0;  // the last look at the clock, 0 = none
+    uint64_t spin_burst_tick = 0;  // when this burst began
+    uint32_t spin_calls = 0;
+    uint8_t spin_park_shift = 0;  // each park in a burst is twice the last
+    // The two-step park: armed at one look, parked at the next if nothing
+    // that could end the wait happened in between (wait_wake_seq_).
+    bool wait_armed = false;
+    uint64_t wait_arm_seq = 0;
+    uint64_t wait_arm_tick = 0;
+    // The spin-wait site in translated code the thread was last seen at
+    // (its guest address, 0 = none), a hash of its registers there and since
+    // when they have been the same on every visit.
+    uint32_t poll_site = 0;
+    uint64_t poll_hash = 0;
+    uint64_t poll_same_tick = 0;
+    uint32_t poll_visits = 0;
   };
   SchedulerLinks& scheduler_links() { return scheduler_links_; }
 

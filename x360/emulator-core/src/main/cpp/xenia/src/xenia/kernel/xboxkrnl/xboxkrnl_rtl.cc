@@ -765,6 +765,14 @@ void RtlLeaveCriticalSection_entry(pointer_t<X_RTL_CRITICAL_SECTION> cs,
   if (xe::atomic_dec(&cs->lock_count) != -1) {
     // There were waiters - wake one of them.
     xeKeSetEvent(reinterpret_cast<X_KEVENT*>(cs.host_address()), 1, 0);
+  } else if (GuestScheduler* scheduler =
+                 kernel_state()->guest_scheduler()) {
+    // hakuX-Boosted: guest_scheduler_park_waits. A section freed with nobody
+    // queued for it sets no event, but a thread that tries it and yields
+    // (try the lock, NtYieldExecution, again) is waiting for exactly this.
+    // After the release, so the next try sees it. One load when no thread
+    // is busy-waiting.
+    scheduler->NoteWaitEvent();
   }
 }
 DECLARE_XBOXKRNL_EXPORT2(RtlLeaveCriticalSection, kNone, kImplemented,
