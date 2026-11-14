@@ -15,6 +15,9 @@ SECTION_TITLES = [
     ("prim", "1. Host primitives",
      "One call of a function that is not inlined; `call_empty` is the call "
      "and return alone, to subtract. Nanoseconds, lowest of the samples."),
+    ("prim-bionic", "1 again, on bionic",
+     "The same program built for Android and run in a Termux container on "
+     "the same runner: Android's libc and dynamic linker, the runner's CPU."),
     ("fiber", "1b. Fiber switch through the core's own Fiber class",
      "`xe::threading::Fiber::SwitchTo` as the scheduler calls it, per switch."),
     ("sched", "2. The guest scheduler's paths",
@@ -88,6 +91,68 @@ def fmt(value):
     return f"{value:.3f}"
 
 
+def short(value):
+    if value == 0:
+        return "0"
+    magnitude = abs(value)
+    if magnitude >= 100:
+        return f"{value:.0f}"
+    if magnitude >= 10:
+        return f"{value:.1f}"
+    if magnitude >= 1:
+        return f"{value:.2f}"
+    return f"{value:.3f}"
+
+
+def digest(values, base_values, notes, order):
+    """One row a benchmark and metric, one column a setting, lowest values.
+    Then, with a baseline, every number that moved by more than 3%."""
+    keys = [k for k in order if not k[3].endswith(SPREAD_SUFFIX)]
+    sections = []
+    for k in keys:
+        if k[0] not in sections:
+            sections.append(k[0])
+    for section in sections:
+        configs = []
+        rows = []
+        for k in keys:
+            if k[0] != section:
+                continue
+            if k[2] not in configs:
+                configs.append(k[2])
+            if (k[1], k[3]) not in rows:
+                rows.append((k[1], k[3]))
+        print(f"== {section}: columns = " + " ; ".join(
+            f"{i}:{c or '-'}" for i, c in enumerate(configs)))
+        for name, metric in rows:
+            cells = []
+            for config in configs:
+                key = (section, name, config, metric)
+                cells.append(short(min(values[key])) if key in values else "-")
+            if all(c in ("0", "-") for c in cells):
+                continue
+            print(f"{name} {metric}: " + " ".join(cells))
+    if base_values:
+        print("== moved by more than 3% against the baseline "
+              "(value, baseline, change)")
+        for k in keys:
+            if k not in base_values:
+                print(f"{'/'.join(k)}: {short(min(values[k]))} not-in-baseline")
+                continue
+            best, base = min(values[k]), min(base_values[k])
+            if base > 0 and abs(best - base) / base > 0.03:
+                print(f"{'/'.join(k)}: {short(best)} {short(base)} "
+                      f"{(best - base) / base * 100:+.1f}%")
+        for k in base_values:
+            if k not in values and not k[3].endswith(SPREAD_SUFFIX):
+                print(f"{'/'.join(k)}: missing-here {short(min(base_values[k]))}")
+    print("== notes")
+    for (section, name), text in notes.items():
+        if name.startswith("thread-locals (") and "dynamic" in text:
+            continue
+        print(f"{section} {name}: {text}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
@@ -97,6 +162,10 @@ def main():
     parser.add_argument("--title", default="hakuX-Boosted bench")
     parser.add_argument("--out", help="write the report here as well")
     parser.add_argument("--json-out", help="write the reduced numbers here")
+    parser.add_argument("--digest", action="store_true",
+                        help="print a short pivoted digest instead of the "
+                             "report: one row a benchmark, one column a "
+                             "setting")
     parser.add_argument("--compact", action="store_true",
                         help="print one short line a number instead of the "
                              "report (for reading a job log)")
@@ -106,6 +175,10 @@ def main():
     base_values, base_notes = {}, {}
     if args.baseline:
         base_values, base_notes, _ = load(args.baseline)
+
+    if args.digest:
+        digest(values, base_values, notes, order)
+        return
 
     if args.compact:
         for key in order:

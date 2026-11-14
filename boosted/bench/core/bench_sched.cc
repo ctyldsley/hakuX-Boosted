@@ -450,8 +450,13 @@ int RunSchedSuite(const std::string& label, void* slot_address) {
   const uint32_t f_pong = BuildThreadFunction(*env, t, Body::kPong);
 
   int status = 0;
+  // BENCH_SCHED_ONLY=<name> runs one benchmark, for looking at it alone.
+  const char* only = std::getenv("BENCH_SCHED_ONLY");
   auto run = [&](const std::string& name, std::vector<ThreadPlan> plan,
                  bool with_events) {
+    if (only && name != only) {
+      return;
+    }
     if (!RunBenchmark(*env, name, label, plan, with_events)) {
       status = 1;
     }

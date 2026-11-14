@@ -70,6 +70,77 @@ jobs:
           echo "branches=$json" >> "$GITHUB_OUTPUT"
           echo "Measuring: $json"
 
+  # The host primitives once more against bionic, Android's own libc and
+  # dynamic linker: in a Termux container (github.com/termux/termux-docker,
+  # which carries Android's /system) on the same runner, with the glibc build
+  # of the same program run beside it. This is as near as a runner gets to
+  # the linker's tlsdesc_resolver_dynamic that the phone's profile shows; the
+  # CPU is still the runner's. Not needed for the rest: a failure here (the
+  # image, its package mirror) is reported and does not fail the run.
+  bionic:
+    name: Primitives on bionic
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'claude/bench-harness'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: The fcontext sources
+        run: git submodule update --init --depth 1 -- "$CORE/xenia/third_party/boost_context/context"
+
+      - name: Build and run on glibc
+        run: |
+          mkdir -p results
+          if command -v clang++ > /dev/null; then cc=clang; cxx=clang++; else cc=gcc; cxx=g++; fi
+          boosted/bench/prim/build-plain.sh "$RUNNER_TEMP/prim-glibc" "$cc" "$cxx"
+          cd "$RUNNER_TEMP/prim-glibc"
+          for round in 1 2; do
+            BENCH_OUT="$GITHUB_WORKSPACE/results/glibc.jsonl" LD_LIBRARY_PATH=. \
+              ./bench_prim ./libprim_tls_dyn.so
+          done
+
+      - name: Build and run on bionic
+        run: |
+          docker run --rm -v "$PWD:/src:ro" termux/termux-docker:aarch64 bash -c '
+            set -e
+            (pkg update -y && pkg install -y clang) > "$HOME/pkg.log" 2>&1 || { tail -40 "$HOME/pkg.log"; exit 1; }
+            clang --version | head -2
+            bash /src/boosted/bench/prim/build-plain.sh "$HOME/prim" clang clang++
+            cd "$HOME/prim"
+            export BENCH_PRIM_SECTION=prim-bionic BENCH_OUT="$HOME/prim/results.jsonl"
+            for round in 1 2; do LD_LIBRARY_PATH=. ./bench_prim ./libprim_tls_dyn.so; done
+            echo "=====RESULTS====="
+            cat "$BENCH_OUT"
+          ' 2>&1 | tee results/container.log
+          sed -n '/^=====RESULTS=====$/,$p' results/container.log | tail -n +2 > results/bionic.jsonl
+          test -s results/bionic.jsonl
+
+      - name: Report
+        if: always()
+        run: |
+          cat results/glibc.jsonl results/bionic.jsonl > results/both.jsonl 2> /dev/null || true
+          if [ -s results/both.jsonl ]; then
+            python3 boosted/bench/tools/report.py --target results/both.jsonl \
+              --target-name "this runner" \
+              --title "Host primitives: glibc and bionic on one runner" \
+              --out results/report.md >> "$GITHUB_STEP_SUMMARY"
+            cat results/report.md
+            python3 boosted/bench/tools/report.py --target results/both.jsonl --digest
+          fi
+          if [ ! -s results/bionic.jsonl ]; then
+            echo "> The bionic run did not produce numbers; see the job log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-primitives-bionic
+          path: results/
+          retention-days: 30
+
   bench:
     name: Bench ${{ matrix.branch }}
     needs: plan
@@ -83,6 +154,8 @@ jobs:
     steps:
       # The rig itself always comes from the commit the workflow runs on.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: The runner
         run: |
@@ -213,16 +286,6 @@ jobs:
           done
           cat results/summary.md
 
-      - name: Artifact name
-        run: echo "ARTIFACT=bench-$(echo "$TARGET" | tr '/' '-')" >> "$GITHUB_ENV"
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ${{ env.ARTIFACT }}
-          path: results/
-          retention-days: 30
-
       # The rig's own branch must build and run everything. Another branch
       # that breaks the rig's assumptions is reported above, not failed here:
       # the numbers that could be taken are still worth having.
@@ -240,11 +303,37 @@ jobs:
           fi
           test "$(grep -c '"metric"' results/target.jsonl)" -gt 50
 
-      # The numbers once more, one short line each: easier to read in the
-      # raw job log than the Markdown table above.
-      - name: Numbers
+      # What the kernel is asked for during one benchmark, for a result that
+      # needs explaining (an event handed between two threads on one guest
+      # CPU). Only on the rig's own branch; never fails the job.
+      - name: Diagnostics
+        if: always() && matrix.branch == 'claude/bench-harness'
+        run: |
+          command -v strace > /dev/null || sudo timeout 120 apt-get install -y --no-install-recommends strace > /dev/null 2>&1 || true
+          command -v strace > /dev/null || exit 0
+          for only in wait_wake_round_trip_one_cpu wait_wake_round_trip_two_cpus yield_other_ready; do
+            echo "-- $only"
+            BENCH_OUT=/dev/null BENCH_SCHED_ONLY=$only BENCH_SCHED_SAMPLES=2 \
+              strace -f -c -o "results/strace-$only.txt" \
+              "$RUNNER_TEMP/bin/target/core/bench_core" --suite=sched --label=diagnostic 2>&1 | grep ns_per_op | head -1 || true
+            head -12 "results/strace-$only.txt" || true
+          done
+
+      - name: Artifact name
+        run: echo "ARTIFACT=bench-$(echo "$TARGET" | tr '/' '-')" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: results/
+          retention-days: 30
+
+      # The numbers once more in a few lines, a row a benchmark and a column
+      # a setting: for reading from the raw job log.
+      - name: Digest
         if: always()
         run: |
-          args=(--target results/target.jsonl --compact)
+          args=(--target results/target.jsonl --digest)
           [ -f results/baseline.jsonl ] && args+=(--baseline results/baseline.jsonl)
           python3 boosted/bench/tools/report.py "${args[@]}" || true

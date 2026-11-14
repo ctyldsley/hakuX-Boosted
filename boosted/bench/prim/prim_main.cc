@@ -19,15 +19,23 @@
 #include <mutex>
 #include <string>
 
+#if defined(__GLIBC__)
 #include <gnu/libc-version.h>
+#elif defined(__BIONIC__)
+#include <android/api-level.h>
+#endif
 
 #include "bench.h"
 #include "insn_counter.h"
 
-// The executable's only thread-local, and so the first word of its static
-// TLS block: on AArch64 glibc that is the thread pointer plus 16, the same
-// place bionic keeps TLS_SLOT_APP. Checked at start-up.
+// The fixed slot. On bionic it is TLS_SLOT_APP itself, the word at the
+// thread pointer plus 16 that Android leaves to apps. glibc has no such
+// slot, but the same address is the first word of the executable's own
+// static TLS block, so the executable's only thread-local is put there.
+// Checked at start-up either way.
+#if !defined(__BIONIC__)
 __thread void* prim_slot_app;
+#endif
 
 extern "C" {
 // prim/tls_lib.c, loaded at start-up.
@@ -165,14 +173,23 @@ bool LooksStatic(void* (*address)()) {
 
 int main(int argc, char** argv) {
   const char* dyn_path = argc > 1 ? argv[1] : "./libprim_tls_dyn.so";
-  const std::string s = "prim";
+  // The same program is run against bionic in a container: another name
+  // for its section keeps the two sets of numbers apart.
+  const char* section = std::getenv("BENCH_PRIM_SECTION");
+  const std::string s = section ? section : "prim";
   bench::PinToCurrentCpu();
 
   utsname uts{};
   uname(&uts);
   bench::EmitNote(s, "cpu", ReadCpuModel());
   bench::EmitNote(s, "kernel", std::string(uts.release) + " " + uts.machine);
+#if defined(__GLIBC__)
   bench::EmitNote(s, "libc", std::string("glibc ") + gnu_get_libc_version());
+#elif defined(__BIONIC__)
+  bench::EmitNote(s, "libc",
+                  "bionic (Android's libc and linker), API level " +
+                      std::to_string(android_get_device_api_level()));
+#endif
   const bool has_lse = (getauxval(AT_HWCAP) & HWCAP_ATOMICS) != 0;
   bench::EmitNote(s, "lse_atomics", has_lse ? "yes" : "no");
   bench::EmitNote(s, "cores", std::to_string(sysconf(_SC_NPROCESSORS_ONLN)));
@@ -232,15 +249,27 @@ int main(int argc, char** argv) {
   bench::EmitTiming(s, "tls_read_pthread_key", "", bench::Measure([] {
     bench::Keep(ReadPthreadKey());
   }));
+#if defined(__BIONIC__)
+  bool slot_ok = ReadFixedSlot() == nullptr;  // nobody else may be using it
+  if (slot_ok) {
+    __asm__ __volatile__(
+        "mrs x16, tpidr_el0\n\t"
+        "str %0, [x16, #16]"
+        :
+        : "r"(marker)
+        : "x16", "memory");
+  }
+#else
   prim_slot_app = marker;
+#endif
   if (ReadFixedSlot() == marker) {
     bench::EmitTiming(s, "tls_read_fixed_slot", "", bench::Measure([] {
       bench::Keep(ReadFixedSlot());
     }));
   } else {
     bench::EmitNote(s, "tls_read_fixed_slot",
-                    "not measured: the executable's first thread-local is "
-                    "not at the thread pointer plus 16 on this loader");
+                    "not measured: the word at the thread pointer plus 16 "
+                    "is not free on this loader");
   }
   HeldState held{nullptr, marker};
   bench::EmitTiming(s, "tls_read_register_held", "", bench::Measure([&] {
