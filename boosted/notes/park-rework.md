@@ -691,7 +691,12 @@ None is needed for this branch to work. Two would help:
   https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43651784030.
 - **`9d9b8e0` (the final code, with the look after four yields): bench run
   18, green,**
-  https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43653241495. App
+  https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43653241495. **App
   run 139, https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43653241496:
-  result below when known. The commits after it change these notes only
-  and are marked `[skip ci]`.
+  "Xbox core" and "APK (both cores)" green**, so the APK to test is this
+  run's artifact `hakuX-Boosted-debug-apk` (check its sha256 against the
+  run's digest). Its "Translator tests" job takes about 100 minutes and was
+  still running when this was written: read its result on that page. This
+  branch changes one translator pass, behind `park_pause_poll_loops`, which
+  those tests do not switch on. The commits after `9d9b8e0` change these
+  notes only and are marked `[skip ci]`.
