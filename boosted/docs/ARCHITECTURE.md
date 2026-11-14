@@ -111,6 +111,7 @@ shows exactly these):
 | `android/app/.../data/AppPrefs.kt` | `theme` is dark until one is chosen (upstream: the phone's) |
 | `android/app/.../NativeCoreActivity.kt` | Two calls to `keepInSafeArea`: the frame rate counter and the hitch monitor clear of the cutout and rounded corner |
 | `android/app/src/main/res/values/themes.xml`, `colors.xml` | `Theme.HakuX`'s window background dark (upstream: white); the two greens of the framework's widgets are the shared look's accent |
+| `android/app/.../NativeCoreActivity.kt` | Three more marked lines, one after each readout is made (`wearReadoutLook`): the frame rate counter, the stutter monitor and the "building shaders" line wear the shared in-game look (`claude/defaults-config`, merged 2026-11-14) |
 
 XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 
@@ -139,6 +140,38 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `app/.../core/Embedded.kt`, `core/TitleDefaults.kt`, `core/BundledDriver.kt`, `core/HostApp.kt`, `ui/pause/InGameSettings.kt`, `ui/theme/HostTheme.kt`, `ui/settings/HostSettingsPane.kt`, `ui/SafeArea.kt` | New files |
 | `app/.../ui/theme/Theme.kt` | `xendroidTheme` hands over to `HostTheme` when embedded: the app's one look (`SharedLook`, defined in `HostTheme.kt` and worn by hakuX's screens too) and hakuX's light or dark setting |
 | `app/.../FpsOverlay.kt` | The frame rate counter's area is the window less the display cutout, the rounded corners and the system bars (`ui/SafeArea.kt`); a stored place outside it is brought back in |
+| `emulator-core/src/main/java/xendroid/emulator/Emulator.java` | `Config.close_config_file` writes through `ConfigFiles` (whole file, with a backup) (`claude/defaults-config`, merged 2026-11-14, as are the rows down to the default literal) |
+| `emulator-core/src/main/java/xendroid/compose/Application.java` | The cached copy of the bundled defaults is written whole |
+| `app/.../settings/ConfigStore.kt` | Opens go through `ConfigGuard`; the two silent fallbacks to the bundled defaults are gone |
+| `app/.../settings/GameSettingsRepository.kt` | The rebuild of a per-game config is built in memory and written whole |
+| `app/.../settings/SettingsSchema.kt`, `SettingDescriptions.kt`, `TouchOverlayDefault.kt` | Two fallbacks show what the core runs (`vulkan_in_pass_resolve`, `framerate_limit`), one row removed ("Readback memexport"), one renamed, one accessor |
+| `app/.../core/ProfileBootstrap.kt`, `TitleDefaults.kt`, `HostApp.kt` | The profile check, whole-file writes, the GPU driver row once on its tab |
+| `app/.../ui/profile/ProfileManagerViewModel.kt` | Tells the guard the player's choice of profile |
+| `app/.../EmulatorHostActivity.kt` | The guard before the core starts, and its toast |
+| `app/.../data/GameMetadataCache.kt` | Names by title ID (for the shader cache rows) |
+| `app/.../FpsOverlay.kt`, `ui/pause/PauseMenuPanel.kt`, `ui/disc/DiscSwapPanel.kt`, `ui/messagebox/GuestMessageBoxPanel.kt`, `ui/keyboard/GuestKeyboardPanel.kt`, `ui/panel/GuestPanelOption.kt` | The shared in-game look (`GameOverlayLook`): one dimming, one counter, a ring for the highlighted option |
+| `app/.../ui/keymap/KeymapScreen.kt`, `ui/profile/ProfilesScreen.kt`, `ui/content/ContentManagerScreen.kt`, `ui/settings/PerGameSettingsScreen.kt`, `ui/settings/SettingsScreen.kt` | Divider lines under rows removed |
+| `emulator-core/.../compose/ConfigFiles.java`, `app/.../settings/ConfigGuard.kt`, `app/.../core/ShaderCaches.kt`, `app/src/test/.../ConfigFilesTest.kt` | New files |
+| `xenia/gpu/vulkan/vulkan_pipeline_cache.cc` | The default literal of `vulkan_async_skip_draws` is `true`, as the bundled config ships it |
+| `xenia/base/host_thread_state.h` | `scheduler_cpu` in use; `HostThreadStateInUse()` (`claude/guest-waits`, merged 2026-11-14, as are the rows down to `a64_seq_memory.cc`) |
+| `xenia/base/host_perf.cc` | The GPU command thread is matched by the start of its name (the kernel keeps 15 characters) |
+| `xenia/cpu/thread_state.h` | `owner` |
+| `xenia/kernel/xthread.h`, `.cc` | `XThread::FromContext`; the owner set where a `ThreadState` is made; the new `SchedulerLinks` fields |
+| `xenia/kernel/guest_scheduler.h`, `.cc` | The lookups without the TLS resolver, `TryEmptyYield`, `guest_scheduler_park_waits` and its two times, `PollSiteVisit`, `guest_scheduler_skew_host_progress` |
+| `xenia/kernel/xboxkrnl/xboxkrnl_threading.cc` | `NtYieldExecution` takes its context |
+| `xenia/kernel/xboxkrnl/xboxkrnl_rtl.cc` | `RtlLeaveCriticalSection` reports a release with nobody queued |
+| `xenia/kernel/kernel_state.cc` | `EmulateCPInterruptDPC` reports the interrupt routine having run |
+| `xenia/cpu/compiler/passes/memory_poll_park_pass.h`, `.cc` | `park_pause_poll_loops`, `MarkPausePollLoops`, the site's flag |
+| `xenia/cpu/backend/a64/a64_seq_memory.cc` | The `SPIN_BACKOFF` sequence: the poll site's call and thunk, the handler pointer; the backoff thunk passes its context. `src1.offset` carries the loop's guest address in its upper half for flagged sites; the x64 backend (not built for the phone) reads the whole value and must not have `park_pause_poll_loops` on without the same mask |
+| `xenia/gpu/spirv_shader_translator_alu.cc` | `cube` written to `.x` or `.w` without `.y` produced a module with a missing id (`claude/shader-first-run`, merged 2026-11-14, as are the next four rows) |
+| `xenia/gpu/vulkan/vulkan_shader.h`, `.cc` | `GetUcodeProgram`: the prepared microcode of a shader for the guest shader interpreter, version 2 |
+| `xenia/gpu/vulkan/vulkan_pipeline_cache.h`, `.cc` | `vulkan_placeholder_interpreter` and `vulkan_placeholder_interpreter_tessellation`, their modules, the choice of module and of the stand-in's locations, the new skip reason; in `EnsurePipelineCreated` the tessellation evaluation stage takes the placeholder's module when there is one |
+| `xenia/gpu/vulkan/vulkan_command_processor.h`, `.cc` | Which draws the interpreter may stand in for (tessellated ones with the setting), the program and its per-draw word in the bool and loop buffer, the second `UpdateBindings` |
+| `xenia/gpu/shaders/ucode_program*.glsl*`, `gpu/ucode_program.h`, `.cc`, `gpu/first_run_rig/*` | New files: the interpreter's shaders, its program builder, and the rig that checks it against the translator off the device |
+| `xenia/memory.cc`, `memory.h` | The `memory_watch_*` settings; the log line (`LogWatchStatsIfDue`); registration of the views with userfaultfd; arming ahead and bridging in `PhysicalHeap::EnableAccessCallbacks` and `EnableAccessCallbacksInner`; `WatchHostProtect` and `WatchHostKernelUnprotect`; `TriggerCallbacks` (`from_fault`, counters, lifting by ioctl); `QueryRangeAccess` stops at the first unreadable page; `armed_ahead` and `ahead_spurious` in `SystemPageFlagsBlock` (`claude/memory-watches`, merged 2026-11-14, as are the next three rows) |
+| `xenia/base/memory.h`, `memory.cc`, `memory_posix.cc`, `memory_win.cc` | `WatchCounters` and its switch; the three `WriteWatch*` functions (the userfaultfd wrapper on POSIX, stubs on Windows); counting in `Protect` |
+| `xenia/base/exception_handler.h`, `_posix.cc`, `_win.cc` | `SetNoStackOverflowRange`; the timing wrapper around the signal handler (`ExceptionHandlerCallbackTimed`), which is what is now installed |
+| `xenia/base/memory_watch_test.cc` | New file, the test of the watches. The build skips `*_test.cc` and the file is empty without `XE_MEMORY_WATCH_HARNESS` |
 
 ## Taking a newer hakuX
 
