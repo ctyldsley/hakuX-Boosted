@@ -38,6 +38,7 @@
 #include "xenia/gpu/xenos.h"
 
 DECLARE_bool(precise_interpolation);
+DECLARE_bool(spirv_tfetch_vector_signs);
 
 namespace rig {
 
@@ -1382,11 +1383,16 @@ int main(int argc, char** argv) {
       options.filter = argv[++i];
     } else if (arg == "--verbose") {
       options.verbose = true;
+    } else if (arg == "--vector-signs") {
+      // The translator's other form of a texture fetch's sign step
+      // (spirv_tfetch_vector_signs): it must match the interpreter as well.
+      cvars::spirv_tfetch_vector_signs = true;
     } else if (arg == "--list") {
       options.list = true;
     } else {
       std::fprintf(stderr,
-                   "usage: %s --spv DIR [--filter TEXT] [--verbose] [--list]\n",
+                   "usage: %s --spv DIR [--filter TEXT] [--verbose] [--list] "
+                   "[--vector-signs]\n",
                    argv[0]);
       return 2;
     }
