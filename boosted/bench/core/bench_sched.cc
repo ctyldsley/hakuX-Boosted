@@ -112,6 +112,7 @@ enum class Body {
   // Busy waits (boosted/notes/park-rework.md). A waiter spins until the
   // shared flag is nonzero, tells the harness, and spins again.
   kSpinYield,      // ... calling NtYieldExecution on every pass
+  kSpinYieldWork,  // ... the same with a few microseconds of work a pass
   kSpinZeroDelay,  // ... calling KeDelayExecutionThread(0) on every pass
   kSpinZeroWait,   // ... polling an event with a zero timeout on every pass
   kSpinPollSled,   // ... a counted loop of no-op register moves, then the load
@@ -254,7 +255,17 @@ void HostProduce(PPCContext* context, xe::kernel::KernelState*) {
   while (flag->load() != 0 && !g_run_over.load()) {
     std::this_thread::sleep_for(std::chrono::microseconds(50));
   }
-  const uint64_t until = NowNs() + EnvUs("BENCH_PRODUCE_DELAY_US", 3000) * 1000;
+  // Two thirds to four thirds of the delay, by a small generator: with a
+  // fixed delay the flag's time falls into step with the waiter's parks
+  // (bench run 15: a 3 ms delay against 1 ms parks gave a median latency of
+  // 60 us and a 95th percentile of 1 ms, which described the step and not
+  // the park).
+  static uint32_t lcg = 0x2545F491u;
+  lcg = lcg * 1664525u + 1013904223u;
+  const uint64_t base_us = EnvUs("BENCH_PRODUCE_DELAY_US", 3000);
+  const uint64_t delay_us =
+      base_us * 2 / 3 + uint64_t(lcg >> 8) % (base_us * 2 / 3 + 1);
+  const uint64_t until = NowNs() + delay_us * 1000;
   while (NowNs() < until && !g_run_over.load()) {
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
@@ -273,6 +284,13 @@ void HostConsume(PPCContext* context, xe::kernel::KernelState*) {
     std::lock_guard<std::mutex> lock(g_latency_mutex);
     g_latency_us.push_back(double(now - produced) / 1000.0);
   }
+  // What the thread waited for has come: it goes and does something with
+  // it, here a sleep of its host thread, before it waits again. Without
+  // this every wait of a run was one unbroken burst of waiting to the
+  // scheduler, and the parks were the longest park from the second wait on
+  // (bench run 15), which is not how a title's waits come.
+  std::this_thread::sleep_for(
+      std::chrono::microseconds(EnvUs("BENCH_CONSUME_WORK_US", 800)));
   SharedFlag(context)->store(0);
 }
 
@@ -291,6 +309,7 @@ uint32_t BuildWaiter(Env& env, const Thunks& t, Body body) {
   a.Bind(loop);
   switch (body) {
     case Body::kSpinYield:
+    case Body::kSpinYieldWork:
     case Body::kSpinZeroDelay:
     case Body::kSpinZeroWait:
       a.lwz(9, kFlag, 30);
@@ -299,7 +318,21 @@ uint32_t BuildWaiter(Env& env, const Thunks& t, Body body) {
       a.lwz(9, kStop, 31);
       a.cmpwi(6, 9, 0);
       a.bne(6, out);
-      if (body == Body::kSpinYield) {
+      if (body == Body::kSpinYieldWork) {
+        // A little work on every pass, as a title's waiting thread does
+        // (it tries a lock, walks a list): a counted loop of additions,
+        // a few microseconds. It puts the scheduler's looks, which come
+        // every 32 yields, far enough apart for an unrelated event to fall
+        // between any two of them. That is what defeated the first gate on
+        // the phone and what a bare yield loop on a fast machine does not
+        // show.
+        a.li32(10, uint32_t(EnvUs("BENCH_YIELD_WORK_PASSES", 8000)));
+        a.mtctr(10);
+        a.Bind(pause);
+        a.addi(11, 11, 1);
+        a.bdnz(pause);
+      }
+      if (body == Body::kSpinYield || body == Body::kSpinYieldWork) {
         a.bl_abs(t.yield);
       } else if (body == Body::kSpinZeroDelay) {
         a.li(3, 0);
@@ -834,6 +867,7 @@ int RunSchedSuite(const std::string& label, void* slot_address) {
   };
   const WaiterKind kinds[] = {
       {"yield", Body::kSpinYield},
+      {"yield_with_work", Body::kSpinYieldWork},
       {"zero_delay", Body::kSpinZeroDelay},
       {"zero_timeout_wait", Body::kSpinZeroWait},
       {"poll_sled", Body::kSpinPollSled},
