@@ -28,8 +28,7 @@ Done (all behind settings that default to off, built by GitHub Actions):
   answer, less work; no setting, see "Upstream files changed").
 - A test of all of it (`base/memory_watch_test.cc`, not built into the app).
 
-In progress: nothing half-written. The second push's build result is at the
-bottom of this file.
+In progress: nothing. The code built green as GitHub Actions run 108.
 
 Next (not started, in the order I would do them):
 
@@ -471,8 +470,8 @@ All under `x360/emulator-core/src/main/cpp/xenia/src/xenia/`, all marked
 
 ## What was checked, and what was not
 
-Checked by the build: whether it compiles for the phone. See "Build results"
-at the bottom; until a green run is recorded there, it is not known to.
+Checked by the build: it compiles for the phone (run 108, green; see "Build
+results" at the bottom).
 
 Checked on an x86-64 Linux 6.18 container, with the real `memory.cc`,
 `mmio_handler.cc` and `base/` compiled by clang and driven by
@@ -534,5 +533,7 @@ Not checked, and the build cannot check:
   GitHub Actions run 104. hakuX's own core built; the APK job (the 360 core)
   was still compiling after 45 minutes when the second push replaced it, so
   it has no result of its own.
-- Second push (the lean fault path, the test, these notes): result recorded
-  in the next commit.
+- Second push (`31ec107`: all the code, the test, these notes): GitHub
+  Actions run 108, green, both jobs (hakuX's core and the APK with the 360
+  core). That is the build to install. The commit after it changes only this
+  file.
