@@ -23,6 +23,21 @@ about the code that puts the interpreter into a draw
 (`vulkan/vulkan_pipeline_cache.cc`, `vulkan/vulkan_command_processor.cc`),
 which only the app runs.
 
+As of 2026-11-14: 367 vertex test shaders and 121 pixel test shaders (plain
+arithmetic, kills, the alpha test, exponent bias and gamma, the generated
+parameter, and 36 texture fetch shaders over 2D and cube textures with mips,
+signed, biased and gamma data, offsets, explicit and register level of
+detail, register gradients). None differs. With `--vector-signs` the
+translator emits its other form of a fetch's sign step
+(`spirv_tfetch_vector_signs`), which must match too, and does.
+
+Not tested: the tessellation and point sprite forms of the vertex side (they
+share the core and differ in how registers 0 and 1 are loaded), loops and
+subroutine calls in pixel shaders (the core's, tested by the vertex tests),
+anisotropic filtering, and anything with two pixels of a 2 by 2 block taking
+different paths to a fetch that uses the screen's derivatives (undefined for
+both; they do differ there).
+
 ## Build and run
 
 Needs clang, cmake, ninja, python3, `glslang-tools`, `spirv-tools`,

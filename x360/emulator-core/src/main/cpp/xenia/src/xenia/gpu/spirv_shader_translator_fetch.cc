@@ -2326,7 +2326,70 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         // to gamma-correct.
         spv::Id const_float_2 = builder_->makeFloatConstant(2.0f);
         spv::Id const_float_minus_1 = builder_->makeFloatConstant(-1.0f);
-        {
+        if (cvars::spirv_tfetch_vector_signs &&
+            features_.image_view_format_swizzle) {
+          // hakuX-Boosted: the sign, bias and gamma step on the whole vector
+          // at once (boosted/notes/shader-first-run.md): each lane's value is
+          // computed by the operations the switch below would have run for
+          // it, in the same order, and selected by the lane's mode. A third
+          // of the words of a fetch that uses all four components, and no
+          // control flow for the driver to analyse.
+          id_vector_temp_.clear();
+          for (uint32_t i = 0; i < 4; ++i) {
+            id_vector_temp_.push_back(builder_->makeUintConstant(
+                swizzled_signs_word_offset + 2 * i));
+          }
+          spv::Id sign_shifts =
+              builder_->makeCompositeConstant(type_uint4_, id_vector_temp_);
+          spv::Id sign_modes = builder_->createBinOp(
+              spv::OpBitwiseAnd, type_uint4_,
+              builder_->createBinOp(
+                  spv::OpShiftRightLogical, type_uint4_,
+                  builder_->smearScalar(spv::NoPrecision, swizzled_signs_word,
+                                        type_uint4_),
+                  sign_shifts),
+              builder_->makeCompositeConstant(
+                  type_uint4_,
+                  std::vector<spv::Id>(4, builder_->makeUintConstant(3))));
+          auto mode_is = [&](xenos::TextureSign sign) {
+            return builder_->createBinOp(
+                spv::OpIEqual, type_bool4_, sign_modes,
+                builder_->makeCompositeConstant(
+                    type_uint4_,
+                    std::vector<spv::Id>(
+                        4, builder_->makeUintConstant(uint32_t(sign)))));
+          };
+          spv::Id biased = builder_->createNoContractionBinOp(
+              spv::OpFAdd, type_float4_,
+              builder_->createNoContractionBinOp(spv::OpVectorTimesScalar,
+                                                 type_float4_,
+                                                 sample_result_unsigned,
+                                                 const_float_2),
+              builder_->makeCompositeConstant(
+                  type_float4_, std::vector<spv::Id>(4, const_float_minus_1)));
+          spv::Id gamma = SpirvShaderTranslator::PWLGammaToLinear(
+              builder_.get(), sample_result_unsigned, false,
+              ext_inst_glsl_std_450_);
+          spv::Id signs_applied = builder_->createTriOp(
+              spv::OpSelect, type_float4_, mode_is(xenos::TextureSign::kSigned),
+              sample_result_signed, sample_result_unsigned);
+          signs_applied = builder_->createTriOp(
+              spv::OpSelect, type_float4_,
+              mode_is(xenos::TextureSign::kUnsignedBiased), biased,
+              signs_applied);
+          signs_applied = builder_->createTriOp(
+              spv::OpSelect, type_float4_, mode_is(xenos::TextureSign::kGamma),
+              gamma, signs_applied);
+          uint32_t result_remaining_components = used_result_nonzero_components;
+          uint32_t result_component_index;
+          while (xe::bit_scan_forward(result_remaining_components,
+                                      &result_component_index)) {
+            result_remaining_components &=
+                ~(UINT32_C(1) << result_component_index);
+            result[result_component_index] = builder_->createCompositeExtract(
+                signs_applied, type_float_, result_component_index);
+          }
+        } else {
           uint32_t result_remaining_components = used_result_nonzero_components;
           uint32_t result_component_index;
           while (xe::bit_scan_forward(result_remaining_components,
@@ -2440,6 +2503,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
         // load, the branch and the whole scaling body land in every texture
         // fetch whether or not any bound texture asks for it, and zeroing the
         // scale bits only stops the branch being taken. Off emits nothing.
+
         if (cvars::texture_integer_num_format) {
         id_vector_temp_.clear();
         id_vector_temp_.push_back(

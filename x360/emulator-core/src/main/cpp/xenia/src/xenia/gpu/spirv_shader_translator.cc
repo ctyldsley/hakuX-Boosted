@@ -4781,7 +4781,9 @@ spv::Id SpirvShaderTranslator::PWLGammaToLinear(
   bool is_vector = builder_->isVectorType(value_type);
   assert_true(is_vector || builder_->isFloatType(value_type));
   int num_components = builder_->getNumTypeComponents(value_type);
-  assert_true(num_components < 4);
+  // hakuX-Boosted: four components too (spirv_tfetch_vector_signs): nothing
+  // below depends on the count.
+  assert_true(num_components <= 4);
   spv::Id bool_type = is_vector ? builder_->makeVectorType(
                                       builder_->makeBoolType(), num_components)
                                 : builder_->makeBoolType();

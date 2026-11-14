@@ -108,10 +108,9 @@ class VulkanShader : public SpirvShader {
   // from the draw thread only (not synchronised), after AnalyzeUcode.
   const StandInInfo& GetStandInInfo();
 
-  // hakuX-Boosted: the microcode prepared for the guest shader interpreter,
-  // version 2 (gpu/ucode_program.h, vulkan_placeholder_interpreter = 2). Built
-  // from the microcode alone the first time, then the stored result. Call
-  // from the draw thread only (not synchronised).
+  // hakuX-Boosted: the shader's microcode prepared for the guest shader
+  // interpreter, version 2 (gpu/ucode_program.h), built at the first call.
+  // The GPU command thread only, as GetStandInInfo.
   const ucode_program::Program& GetUcodeProgram();
 
  protected:
@@ -127,8 +126,6 @@ class VulkanShader : public SpirvShader {
   // hakuX-Boosted: see GetStandInInfo.
   bool stand_in_info_valid_ = false;
   StandInInfo stand_in_info_;
-
-  // hakuX-Boosted: see GetUcodeProgram.
   bool ucode_program_valid_ = false;
   ucode_program::Program ucode_program_;
 };

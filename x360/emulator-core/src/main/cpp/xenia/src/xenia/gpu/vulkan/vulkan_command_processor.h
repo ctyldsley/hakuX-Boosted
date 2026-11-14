@@ -165,6 +165,16 @@ class VulkanCommandProcessor final : public CommandProcessor {
       const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
       std::function<void()> completion_callback = nullptr) override;
 
+  // hakuX-Boosted.
+  bool GetShaderPreparationProgress(uint32_t& done_out,
+                                    uint32_t& total_out) const override {
+    if (!pipeline_cache_) {
+      return CommandProcessor::GetShaderPreparationProgress(done_out,
+                                                            total_out);
+    }
+    return pipeline_cache_->GetStartupProgress(done_out, total_out);
+  }
+
   void RestoreEdramSnapshot(const void* snapshot) override;
 
   void PollCompletedSubmission() override;
@@ -571,6 +581,19 @@ class VulkanCommandProcessor final : public CommandProcessor {
       uint32_t used_texture_mask, reg::RB_DEPTHCONTROL normalized_depth_control,
       uint32_t normalized_color_mask,
       const draw_util::HostDepthPolygonOffset* host_depth_polygon_offset);
+  // hakuX-Boosted: a draw through the guest shader interpreter, version 2
+  // (vulkan_placeholder_interpreter = 2): the shaders' prepared microcode and
+  // the words in front of it (shaders/ucode_program.glsli), which are
+  // uploaded behind the bool and loop constants, in the same buffer.
+  struct InterpreterProgramDraw {
+    const ucode_program::Program* vertex = nullptr;
+    const ucode_program::Program* pixel = nullptr;
+    uint32_t head[ucode_program::kHeadElements * 4] = {};
+    // With a pixel program: the textures of its slots, in binding order
+    // (unsigned and signed for each); the samplers are in
+    // current_samplers_pixel_.
+    const std::vector<VulkanShader::TextureBinding>* pixel_textures = nullptr;
+  };
   // *_bindings_ready is IssueDraw's per-draw readiness snapshot, the same one
   // the sampler collection used - re-reading bindings_ready() here would race
   // translation finishing mid-draw.
@@ -581,14 +604,12 @@ class VulkanCommandProcessor final : public CommandProcessor {
                       bool placeholder_pixel_shader = false,
                       // hakuX-Boosted: the one texture of a stand-in pixel
                       // shader (its sampler is in current_samplers_pixel_).
-                      // Then the program of the guest shader interpreter,
-                      // version 2, that the draw's placeholder runs, and
-                      // the vertex stage's per-draw word.
                       const VulkanShader::TextureBinding* stand_in_texture =
                           nullptr,
-                      const ucode_program::Program* interpreter_program =
-                          nullptr,
-                      uint32_t interpreter_vertex_word = 0);
+                      // hakuX-Boosted: what the guest shader interpreter,
+                      // version 2, is given for this draw, if it draws it.
+                      const InterpreterProgramDraw* interpreter_program =
+                          nullptr);
   // Allocates a descriptor set and fills one or two VkWriteDescriptorSet
   // structure instances (for images and samplers).
   // The descriptor set layout must be the one for the given is_vertex,
@@ -1237,6 +1258,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // hakuX-Boosted: the pixel stage's texture list of a draw with a stand-in
   // pixel shader (see UpdateBindings).
   std::vector<VulkanShader::TextureBinding> stand_in_texture_bindings_;
+  // hakuX-Boosted: the same for the pixel side of the guest shader
+  // interpreter (vulkan_placeholder_ps_mode = 3), filled by IssueDraw.
+  std::vector<VulkanShader::TextureBinding> program_pixel_texture_bindings_;
   // Whether the descriptor sets currently bound to the command buffer - only
   // low bits for the descriptor set layouts that remained the same are kept
   // when changing the pipeline layout. May be out of sync with
@@ -1271,12 +1295,47 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // constants for the ucode interpreter rather than a shader's packed subset.
   // Used to invalidate the binding when switching interpreter <-> normal.
   bool float_constants_vertex_are_full_ = false;
-  // hakuX-Boosted: what follows the bool and loop constants in their buffer:
-  // nothing (nullptr), or the program of the guest shader interpreter,
-  // version 2, with the vertex stage's per-draw word. Used to write the buffer
-  // again when either changes.
-  const ucode_program::Program* bool_loop_program_ = nullptr;
-  uint32_t bool_loop_program_vertex_word_ = 0;
+  // hakuX-Boosted: where the GPU command thread's time goes, by what a draw
+  // was drawn with, for one line a second in the log (shader_profiling,
+  // boosted/notes/shader-first-run.md). GPU command thread only.
+  enum FirstRunDrawKind : uint32_t {
+    kFirstRunDrawReal,
+    kFirstRunDrawInterpreter,
+    kFirstRunDrawInterpreterProgram,
+    kFirstRunDrawTranslatedPlaceholder,
+    kFirstRunDrawSkipped,
+    // Draws that returned before a pipeline was chosen (copies, nothing to
+    // draw, failures).
+    kFirstRunDrawOther,
+    kFirstRunDrawKindCount,
+  };
+  struct FirstRunSplit {
+    uint64_t window_start_ns = 0;
+    uint64_t thread_cpu_start_ns = 0;
+    uint64_t draws[kFirstRunDrawKindCount] = {};
+    uint64_t draw_ns[kFirstRunDrawKindCount] = {};
+    uint64_t draw_vertices[kFirstRunDrawKindCount] = {};
+    // Within the draws: choosing or making the pipeline (placeholders made on
+    // this thread included), and the constants and descriptors.
+    uint64_t configure_pipeline_ns = 0;
+    uint64_t bindings_ns = 0;
+    uint64_t swaps = 0;
+    uint64_t swap_ns = 0;
+    uint64_t last_swap_ns = 0;
+    uint64_t longest_frame_ns = 0;
+  };
+  FirstRunSplit first_run_split_;
+  static uint64_t FirstRunNowNs();
+  static uint64_t FirstRunThreadCpuNs();
+  void FirstRunSplitLogIfDue(uint64_t now_ns);
+  // Host vertices drawn through an interpreter placeholder in the guest
+  // frame so far (vulkan_placeholder_interpreter_vertex_budget).
+  uint64_t frame_interpreter_vertices_ = 0;
+  // hakuX-Boosted: what is behind the bool and loop constants in the buffer
+  // they were last uploaded to: the interpreter's programs of a draw, or
+  // nothing.
+  bool interpreter_program_uploaded_ = false;
+  InterpreterProgramDraw interpreter_program_last_;
 
   // System shader constants, including user clip planes and tessellation
   // constants.

@@ -88,6 +88,7 @@ DECLARE_bool(texture_gradient_exp_bias);
 // hakuX-Boosted: slimming the translated SPIR-V, see the end of gpu_flags.cc.
 DECLARE_bool(spirv_debug_names);
 DECLARE_int32(spirv_optimize);
+DECLARE_bool(spirv_tfetch_vector_signs);
 
 // hakuX-Boosted: compiling ahead of the first draw, see the end of
 // gpu_flags.cc.

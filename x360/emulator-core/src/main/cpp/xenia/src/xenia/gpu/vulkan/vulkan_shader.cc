@@ -83,8 +83,8 @@ VulkanShader::VulkanShader(const ui::vulkan::VulkanDevice* const vulkan_device,
 const ucode_program::Program& VulkanShader::GetUcodeProgram() {
   if (!ucode_program_valid_) {
     ucode_program_valid_ = true;
-    ucode_program::Build(type(), ucode_dwords(),
-                         uint32_t(ucode_dword_count()), ucode_program_);
+    ucode_program::Build(type(), ucode_dwords(), uint32_t(ucode_dword_count()),
+                         ucode_program_);
   }
   return ucode_program_;
 }

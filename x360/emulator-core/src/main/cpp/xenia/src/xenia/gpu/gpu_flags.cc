@@ -319,6 +319,19 @@ DEFINE_bool(
     "reads the texture names back.",
     "GPU");
 
+// hakuX-Boosted: boosted/notes/shader-first-run.md.
+DEFINE_bool(
+    spirv_tfetch_vector_signs, false,
+    "Translate a texture fetch's sign, bias and gamma step as vector "
+    "arithmetic with selects, instead of a switch for each component. The "
+    "values are the same; the module is smaller (about a third of a fetch "
+    "that uses all four components) and has less control flow, so the driver "
+    "has less to compile. The GPU evaluates the gamma curve for every fetch "
+    "instead of branching around it. Changing this changes the bytes of "
+    "every module with a texture fetch, so the driver's stored pipeline "
+    "cache no longer matches them and they are compiled again once.",
+    "GPU");
+
 DEFINE_int32(
     spirv_optimize, 0,
     "Run the SPIRV-Tools optimiser over each SPIR-V module translated from a "

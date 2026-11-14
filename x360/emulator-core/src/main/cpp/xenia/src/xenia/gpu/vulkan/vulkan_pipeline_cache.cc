@@ -67,7 +67,10 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_color_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_interpreter_stand_in_vs.h"
-// hakuX-Boosted: the guest shader interpreter, version 2.
+// hakuX-Boosted: the guest shader interpreter, version 2
+// (vulkan_placeholder_interpreter = 2, shaders/ucode_program.glsli).
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_point_strip_vs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_quad_cp_ds.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_quad_patch_ds.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_triangle_cp_ds.h"
@@ -145,7 +148,11 @@ DEFINE_int32(
     "colour if the vertex shader passes one through, alpha 1; without a "
     "usable texture the vertex colour or a mid grey. 2: as 1, but alpha is "
     "the texture's times the vertex colour's and the guest alpha test is "
-    "applied, so blended and cut-out surfaces keep their shape. Depth test "
+    "applied, so blended and cut-out surfaces keep their shape. 3: with "
+    "vulkan_placeholder_interpreter = 2, the guest pixel shader's own "
+    "microcode run by the interpreter, so the pixels are the real shader's; "
+    "for a pixel shader the interpreter cannot run (the log says which and "
+    "why), as 2. Depth test "
     "and write are the real pipeline's; depth is never written from the "
     "stand-in. Host render target path only.",
     "Vulkan");
@@ -165,26 +172,6 @@ DEFINE_bool(
     "vertex shader is already translated (a known vertex shader with a new "
     "pixel shader or new state), instead of compiling a placeholder from the "
     "translated vertex shader on the GPU command thread.",
-    "Vulkan");
-
-DEFINE_int32(
-    vulkan_placeholder_interpreter, 1,
-    "With vulkan_placeholder_pipelines and async_shader_vs_interpreter: which "
-    "interpreter draws a placeholder's vertices. 1: XenDroid's, which reads "
-    "the microcode from guest memory (not a shader loaded inline, not one "
-    "with loops). 2: the guest shader interpreter, version 2, which is fed a "
-    "prepared copy of the microcode, follows the translated shader in "
-    "arithmetic, control flow, loops and addressing, and so also stands in "
-    "for inline shaders and shaders with loops. Read once at start-up.",
-    "Vulkan");
-
-DEFINE_bool(
-    vulkan_placeholder_interpreter_tessellation, false,
-    "With vulkan_placeholder_interpreter = 2: a tessellated draw (triangle or "
-    "quad patches, in any tessellation mode) can have an interpreter "
-    "placeholder too, with the interpreter as its tessellation evaluation "
-    "shader. Off: tessellated draws are refused by the interpreter, as with "
-    "version 1. Read once at start-up.",
     "Vulkan");
 
 DEFINE_bool(
@@ -252,6 +239,57 @@ DEFINE_int32(
     "trades that for one wait. 0: off, such draws are treated as any other.",
     "Vulkan");
 
+// hakuX-Boosted: boosted/notes/shader-first-run.md.
+DECLARE_bool(texture_integer_num_format);
+
+DEFINE_int32(
+    vulkan_placeholder_interpreter, 1,
+    "With vulkan_placeholder_pipelines and async_shader_vs_interpreter: "
+    "which interpreter is the vertex stage of an interpreter placeholder. 1: "
+    "XenDroid's, as before. 2: the guest shader interpreter, version 2. It "
+    "follows the shader translator instruction for instruction (checked "
+    "against it off the device, gpu/first_run_rig), is given a prepared copy "
+    "of the microcode instead of reading it from guest memory, and so also "
+    "stands in for shaders loaded inline (IM_LOAD_IMMEDIATE), shaders with "
+    "loops and subroutine calls, and point sprites drawn as strips.",
+    "Vulkan");
+DEFINE_bool(
+    vulkan_placeholder_interpreter_tessellation, false,
+    "With vulkan_placeholder_interpreter = 2: a tessellated draw (triangle "
+    "or quad patches) can have an interpreter placeholder, with the "
+    "interpreter as its tessellation evaluation shader. Off: such draws are "
+    "refused by the interpreter, as before.",
+    "Vulkan");
+
+DEFINE_bool(
+    vulkan_placeholder_interpreter_vertex_textures, false,
+    "With vulkan_placeholder_interpreter = 2: a vertex shader that fetches "
+    "textures can have an interpreter placeholder. The interpreter's vertex "
+    "stage does not sample: such a fetch reads 0, so geometry that is "
+    "displaced or placed by a texture is drawn in the wrong place until the "
+    "real pipeline is ready. Off: such draws are refused by the interpreter "
+    "(and dropped or compiled on the GPU command thread, as before).",
+    "Vulkan");
+DEFINE_bool(
+    vulkan_placeholder_depth_only_async, false,
+    "With vulkan_placeholder_pipelines: the pipeline of a draw without a "
+    "pixel shader (shadow maps, depth pre-passes) that the interpreter "
+    "cannot stand in for is compiled in the background like any other, and "
+    "the draw is dropped until it is ready. Off: it is translated and "
+    "compiled on the GPU command thread when first drawn, a hitch as long "
+    "as the compile.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_placeholder_interpreter_vertex_budget, 0,
+    "With vulkan_placeholder_pipelines: the most host vertices drawn "
+    "through an interpreter placeholder in one guest frame. A draw that "
+    "would go over is dropped for that frame (it is drawn once its real "
+    "pipeline is ready, or in a frame with room). The interpreter costs the "
+    "GPU many times what the translated vertex shader does, for every "
+    "vertex, so this bounds what placeholders can add to a frame. 0: no "
+    "limit.",
+    "Vulkan");
+
 // hakuX-Boosted: the bounds of shader_ahead_speculate (gpu_flags.cc).
 DEFINE_int32(
     shader_ahead_max_outstanding, 2,
@@ -289,6 +327,42 @@ DEFINE_int32(
     "cannot be interrupted, so each thread on one is a thread a real "
     "pipeline may have to wait for.",
     "GPU");
+
+// hakuX-Boosted: boosted/notes/shader-first-run.md, "The kept record".
+DEFINE_path(
+    shader_record_import_path, "",
+    "A folder to take a title's shader record from when a title starts: its "
+    "two files (TITLEID.xsh, the shaders' microcode, and TITLEID.fbo.vk.xpso "
+    "or .fsi.vk.xpso, the pipeline states they were drawn with), as "
+    "shader_record_export_path writes them. A file there replaces the app's "
+    "own when it is the larger of the two (the files only grow). The record "
+    "holds nothing of the device or the driver, so it can come from another "
+    "phone. Empty: nothing is imported.",
+    "GPU");
+DEFINE_path(
+    shader_record_export_path, "",
+    "A folder to copy a title's shader record to when the title's shader "
+    "storage is closed (see shader_record_import_path). Empty: nothing is "
+    "exported.",
+    "GPU");
+
+// hakuX-Boosted: boosted/notes/shader-first-run.md.
+DEFINE_bool(
+    vulkan_pipeline_creation_adaptive, false,
+    "The pipeline creation threads follow the frames. While no frame has "
+    "been shown for vulkan_pipeline_creation_adaptive_frame_ms, or the last "
+    "one took longer than that, and pipelines are waiting: one thread for "
+    "each logical core, at normal priority. While frames flow: as many "
+    "threads as without this setting (75% of the cores, or "
+    "vulkan_pipeline_creation_threads), at their usual priority. Off: the "
+    "threads are as they always were. Needs a restart.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_pipeline_creation_adaptive_frame_ms, 50,
+    "With vulkan_pipeline_creation_adaptive: how long a frame, or the time "
+    "since the last one, must be for the pipeline creation threads to take "
+    "every core. They step back when a frame takes under two thirds of it.",
+    "Vulkan");
 
 DEFINE_bool(
     vulkan_dynamic_pipeline_state, true,
@@ -377,6 +451,31 @@ bool MoveStandInPixelShaderInputs(std::vector<uint32_t>& words,
     i += word_count;
   }
   return true;
+}
+
+// hakuX-Boosted: the tessellation evaluation shaders of the interpreter's
+// version 2 are compiled with equal spacing; the continuous and adaptive
+// modes need the fractional even one (as SpirvShaderTranslator gives the
+// translated shader). The spacing is an execution mode of the module, so a
+// copy with that one word changed is the other shader. False if the module
+// has no such mode.
+bool SetTessellationSpacingFractionalEven(std::vector<uint32_t>& words) {
+  constexpr size_t kHeaderWords = 5;
+  bool changed = false;
+  for (size_t i = kHeaderWords; i < words.size();) {
+    uint32_t word_count = words[i] >> 16;
+    uint32_t opcode = words[i] & 0xFFFF;
+    if (!word_count || i + word_count > words.size()) {
+      return false;
+    }
+    if (opcode == uint32_t(spv::OpExecutionMode) && word_count >= 3 &&
+        words[i + 2] == uint32_t(spv::ExecutionModeSpacingEqual)) {
+      words[i + 2] = uint32_t(spv::ExecutionModeSpacingFractionalEven);
+      changed = true;
+    }
+    i += word_count;
+  }
+  return changed;
 }
 
 }  // namespace
@@ -595,94 +694,6 @@ bool VulkanPipelineCache::Initialize() {
       vulkan_device, shaders::placeholder_color_ps,
       sizeof(shaders::placeholder_color_ps));
 
-  // hakuX-Boosted: the guest shader interpreter, version 2, only when it is
-  // asked for. A failure leaves version 1 in use.
-  interpreter_program_ = false;
-  if (cvars::vulkan_placeholder_interpreter == 2) {
-    ucode_program_vs_ = ui::vulkan::util::CreateShaderModule(
-        vulkan_device, shaders::ucode_program_vs,
-        sizeof(shaders::ucode_program_vs));
-    if (ucode_program_vs_ != VK_NULL_HANDLE) {
-      interpreter_program_ = true;
-      XELOGI(
-          "VulkanPipelineCache: placeholders use the guest shader "
-          "interpreter, version 2 (vulkan_placeholder_interpreter = 2), {} "
-          "bytes of SPIR-V",
-          sizeof(shaders::ucode_program_vs));
-    } else {
-      XELOGW(
-          "VulkanPipelineCache: Failed to create the vertex shader of the "
-          "guest shader interpreter, version 2 - version 1 is used");
-    }
-  }
-  // hakuX-Boosted: its tessellation evaluation forms, only when asked for
-  // (vulkan_placeholder_interpreter_tessellation). A form that cannot be made
-  // only leaves the draws of its domain and spacing without a placeholder.
-  if (interpreter_program_ &&
-      cvars::vulkan_placeholder_interpreter_tessellation &&
-      vulkan_device->properties().tessellationShader) {
-    const std::pair<const uint32_t*, size_t> domain_shaders[] = {
-        {shaders::ucode_program_triangle_cp_ds,
-         sizeof(shaders::ucode_program_triangle_cp_ds)},
-        {shaders::ucode_program_triangle_patch_ds,
-         sizeof(shaders::ucode_program_triangle_patch_ds)},
-        {shaders::ucode_program_quad_cp_ds,
-         sizeof(shaders::ucode_program_quad_cp_ds)},
-        {shaders::ucode_program_quad_patch_ds,
-         sizeof(shaders::ucode_program_quad_patch_ds)},
-    };
-    static_assert(xe::countof(domain_shaders) == kInterpreterDomainCount);
-    uint32_t domain_shaders_made = 0;
-    std::vector<uint32_t> fractional_even;
-    for (uint32_t i = 0; i < kInterpreterDomainCount; ++i) {
-      const uint32_t* code = domain_shaders[i].first;
-      const size_t code_bytes = domain_shaders[i].second;
-      ucode_program_ds_[i][0] = ui::vulkan::util::CreateShaderModule(
-          vulkan_device, code, code_bytes);
-      // The spacing is an execution mode of the module (the translator sets
-      // it the same way for the translated shader): the fractional even copy
-      // is the module with that one word changed. Instructions start at word
-      // 5; an OpExecutionMode is (3 << 16) | 16, the entry point, the mode.
-      fractional_even.assign(code, code + code_bytes / sizeof(uint32_t));
-      bool spacing_found = false;
-      for (size_t word = 5; word < fractional_even.size();) {
-        const uint32_t instruction = fractional_even[word];
-        const uint32_t word_count = instruction >> 16;
-        if (!word_count || word + word_count > fractional_even.size()) {
-          break;
-        }
-        if ((instruction & 0xFFFF) == uint32_t(spv::OpExecutionMode) &&
-            word_count == 3 &&
-            fractional_even[word + 2] ==
-                uint32_t(spv::ExecutionModeSpacingEqual)) {
-          fractional_even[word + 2] =
-              uint32_t(spv::ExecutionModeSpacingFractionalEven);
-          spacing_found = true;
-          break;
-        }
-        word += word_count;
-      }
-      if (spacing_found) {
-        ucode_program_ds_[i][1] = ui::vulkan::util::CreateShaderModule(
-            vulkan_device, fractional_even.data(),
-            fractional_even.size() * sizeof(uint32_t));
-      }
-      domain_shaders_made += ucode_program_ds_[i][0] != VK_NULL_HANDLE;
-      domain_shaders_made += ucode_program_ds_[i][1] != VK_NULL_HANDLE;
-    }
-    XELOGI(
-        "VulkanPipelineCache: tessellated draws can have a placeholder of the "
-        "guest shader interpreter, version 2 "
-        "(vulkan_placeholder_interpreter_tessellation), {} of {} tessellation "
-        "evaluation modules made, {} to {} bytes of SPIR-V",
-        domain_shaders_made, kInterpreterDomainCount * 2,
-        std::min(std::min(domain_shaders[0].second, domain_shaders[1].second),
-                 std::min(domain_shaders[2].second, domain_shaders[3].second)),
-        std::max(std::max(domain_shaders[0].second, domain_shaders[1].second),
-                 std::max(domain_shaders[2].second,
-                          domain_shaders[3].second)));
-  }
-
   // hakuX-Boosted: the stand-in pixel shaders and their interpreter vertex
   // shader. Made whatever vulkan_placeholder_ps_mode says (it can be changed
   // while running); a failure only means no stand-in.
@@ -698,6 +709,53 @@ bool VulkanPipelineCache::Initialize() {
         XELOGW(
             "VulkanPipelineCache: Failed to create a stand-in pixel shader - "
             "placeholders that need it will draw nothing");
+      }
+    }
+  }
+
+  // hakuX-Boosted: the modules of the interpreter's version 2
+  // (vulkan_placeholder_interpreter = 2). Made whatever the setting says, as
+  // the stand-in's are: a module costs nothing until a pipeline uses it. A
+  // failure only means that kind of draw is not interpreted.
+  ucode_program_vs_ = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::ucode_program_vs,
+      sizeof(shaders::ucode_program_vs));
+  ucode_program_ps_ = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::ucode_program_ps,
+      sizeof(shaders::ucode_program_ps));
+  if (vulkan_device->properties().maxVertexOutputComponents >= 66 &&
+      vulkan_device->properties().maxFragmentInputComponents >= 66) {
+    // Sixteen interpolators and the point coordinates.
+    ucode_program_point_strip_vs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::ucode_program_point_strip_vs,
+        sizeof(shaders::ucode_program_point_strip_vs));
+  }
+  if (vulkan_device->properties().tessellationShader) {
+    const struct {
+      const uint32_t* words;
+      size_t size_bytes;
+    } kProgramDomainShaders[4] = {
+        {shaders::ucode_program_triangle_cp_ds,
+         sizeof(shaders::ucode_program_triangle_cp_ds)},
+        {shaders::ucode_program_triangle_patch_ds,
+         sizeof(shaders::ucode_program_triangle_patch_ds)},
+        {shaders::ucode_program_quad_cp_ds,
+         sizeof(shaders::ucode_program_quad_cp_ds)},
+        {shaders::ucode_program_quad_patch_ds,
+         sizeof(shaders::ucode_program_quad_patch_ds)},
+    };
+    for (uint32_t i = 0; i < 4; ++i) {
+      ucode_program_ds_[i][0] = ui::vulkan::util::CreateShaderModule(
+          vulkan_device, kProgramDomainShaders[i].words,
+          kProgramDomainShaders[i].size_bytes);
+      std::vector<uint32_t> fractional_words(
+          kProgramDomainShaders[i].words,
+          kProgramDomainShaders[i].words +
+              kProgramDomainShaders[i].size_bytes / sizeof(uint32_t));
+      if (SetTessellationSpacingFractionalEven(fractional_words)) {
+        ucode_program_ds_[i][1] = ui::vulkan::util::CreateShaderModule(
+            vulkan_device, fractional_words.data(),
+            fractional_words.size() * sizeof(uint32_t));
       }
     }
   }
@@ -730,6 +788,16 @@ bool VulkanPipelineCache::Initialize() {
       creation_thread_count =
           std::min(uint32_t(cvars::vulkan_pipeline_creation_threads),
                    logical_processor_count);
+    }
+    // hakuX-Boosted: with vulkan_pipeline_creation_adaptive there is a
+    // thread for each core, and only the usual number of them take jobs
+    // until the frames stop (UpdateCreationPolicy).
+    creation_threads_calm_ = creation_thread_count;
+    if (cvars::vulkan_pipeline_creation_adaptive) {
+      creation_thread_count =
+          std::max(creation_thread_count, size_t(logical_processor_count));
+      creation_thread_limit_.store(creation_threads_calm_,
+                                   std::memory_order_relaxed);
     }
     creation_threads_shutdown_ = false;
     for (size_t i = 0; i < creation_thread_count; ++i) {
@@ -824,15 +892,6 @@ void VulkanPipelineCache::Shutdown() {
   // hakuX-Boosted: the stand-in's modules.
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          ucode_interpreter_stand_in_vs_);
-  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
-                                         ucode_program_vs_);
-  for (uint32_t i = 0; i < kInterpreterDomainCount; ++i) {
-    for (uint32_t j = 0; j < 2; ++j) {
-      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
-                                             ucode_program_ds_[i][j]);
-    }
-  }
-  interpreter_program_ = false;
   for (uint32_t i = 0; i < 3; ++i) {
     for (uint32_t j = 0; j < 2; ++j) {
       ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
@@ -845,6 +904,17 @@ void VulkanPipelineCache::Shutdown() {
     }
   }
   stand_in_pixel_shaders_moved_.clear();
+  // hakuX-Boosted: the modules of the interpreter's version 2.
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         ucode_program_vs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         ucode_program_point_strip_vs_);
+  for (uint32_t i = 0; i < 4; ++i) {
+    for (uint32_t j = 0; j < 2; ++j) {
+      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                             ucode_program_ds_[i][j]);
+    }
+  }
   // Destroy tessellation shaders.
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          tessellation_indexed_vs_);
@@ -1003,11 +1073,16 @@ bool VulkanPipelineCache::CanCreatePipelineAsync(bool has_pixel_shader,
   // hakuX-Boosted: a draw without a pixel shader has nothing to stand in for
   // but its vertex shader, so with the interpreter its placeholder is exact
   // (vulkan_placeholder_depth_only_interpreter).
+  // hakuX-Boosted: and with vulkan_placeholder_depth_only_async such a draw
+  // is asynchronous whether or not the interpreter can stand in (without it
+  // there is no placeholder: it is dropped until its pipeline is ready).
   return cvars::async_shader_compilation && !creation_threads_.empty() &&
          (has_pixel_shader ||
+          (cvars::vulkan_placeholder_pipelines &&
+           cvars::vulkan_placeholder_depth_only_async) ||
           (use_interpreter && cvars::vulkan_placeholder_pipelines &&
            cvars::vulkan_placeholder_depth_only_interpreter &&
-           GetInterpreterVertexShader(false) != VK_NULL_HANDLE)) &&
+           ucode_interpreter_vs_ != VK_NULL_HANDLE)) &&
          placeholder_pixel_shader_ != VK_NULL_HANDLE;
 }
 
@@ -1253,12 +1328,8 @@ bool VulkanPipelineCache::ConfigurePipeline(
         CanCreatePipelineAsync(pixel_shader != nullptr, use_interpreter);
 
     // The interpreter can only stand in via the async placeholder path.
-    // hakuX-Boosted: of a tessellated draw, the interpreter's tessellation
-    // evaluation shader.
     use_interpreter =
-        use_interpreter && use_async &&
-        GetInterpreterShader(description.vertex_shader_modification, false) !=
-            VK_NULL_HANDLE;
+        use_interpreter && use_async && ucode_interpreter_vs_ != VK_NULL_HANDLE;
 
     if (use_async) {
       // The draw thread never translates for async pipelines (so it never
@@ -1279,10 +1350,15 @@ bool VulkanPipelineCache::ConfigurePipeline(
       // MakePlaceholder (below), so that a slot can also be given one late
       // or from a creation thread. A full-screen pass that waits for its
       // real pipeline (require_real) gets none.
+      // hakuX-Boosted: and never from the translated vertex shader for a draw
+      // without a pixel shader (vulkan_placeholder_depth_only_async lets one
+      // get here): that placeholder would be the real pipeline, compiled on
+      // this thread.
       bool make_placeholder =
           !require_real &&
-          (use_interpreter || (vertex_shader->is_translated() &&
-                               cvars::vulkan_placeholder_real_vs));
+          (use_interpreter ||
+           (vertex_shader->is_translated() && pixel_shader != nullptr &&
+            cvars::vulkan_placeholder_real_vs));
       if (make_placeholder) {
         MakePlaceholder(creation_arguments, use_interpreter, false);
       } else if (!require_real && cvars::vulkan_placeholder_translate_first &&
@@ -1340,7 +1416,19 @@ bool VulkanPipelineCache::ConfigurePipeline(
         pipeline_pair.second.pipeline_layout_stale.store(
             false, std::memory_order_release);
       }
-      if (!EnsurePipelineCreated(creation_arguments)) {
+      // hakuX-Boosted: timed, for the once-a-second line: this is a driver
+      // compile on the GPU command thread.
+      const auto sync_create_start = std::chrono::steady_clock::now();
+      bool sync_created = EnsurePipelineCreated(creation_arguments);
+      double sync_create_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() -
+                                  sync_create_start)
+                                  .count();
+      ++draw_thread_pipelines_;
+      draw_thread_pipeline_ms_ += sync_create_ms;
+      draw_thread_pipeline_worst_ms_ =
+          std::max(draw_thread_pipeline_worst_ms_, sync_create_ms);
+      if (!sync_created) {
         return false;
       }
     }
@@ -1499,6 +1587,158 @@ void VulkanPipelineCache::QueueStorageWrites(
   storage_writer_.QueuePipelineWrite(stored_description);
 }
 
+// hakuX-Boosted: the guest shader interpreter, version 2
+// (boosted/notes/shader-first-run.md).
+
+bool VulkanPipelineCache::IsProgramInterpreterActive() const {
+  return cvars::vulkan_placeholder_interpreter == 2 &&
+         ucode_program_vs_ != VK_NULL_HANDLE &&
+         render_target_cache_.GetPath() ==
+             RenderTargetCache::Path::kHostRenderTargets;
+}
+
+VkShaderModule VulkanPipelineCache::GetProgramVertexShader(
+    Shader::HostVertexShaderType host_vertex_shader_type,
+    bool fractional_spacing) const {
+  if (Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type) &&
+      !cvars::vulkan_placeholder_interpreter_tessellation) {
+    return VK_NULL_HANDLE;
+  }
+  switch (host_vertex_shader_type) {
+    case Shader::HostVertexShaderType::kVertex:
+      return ucode_program_vs_;
+    case Shader::HostVertexShaderType::kPointListAsTriangleStrip:
+      return ucode_program_point_strip_vs_;
+    case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
+      return ucode_program_ds_[0][fractional_spacing ? 1 : 0];
+    case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
+      return ucode_program_ds_[1][fractional_spacing ? 1 : 0];
+    case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
+      return ucode_program_ds_[2][fractional_spacing ? 1 : 0];
+    case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
+      return ucode_program_ds_[3][fractional_spacing ? 1 : 0];
+    default:
+      return VK_NULL_HANDLE;
+  }
+}
+
+uint32_t VulkanPipelineCache::GetProgramPixelRefusal(
+    VulkanShader& vertex_shader, VulkanShader& pixel_shader,
+    uint64_t pixel_shader_modification) {
+  uint32_t reasons = 0;
+  if (ucode_program_ps_ == VK_NULL_HANDLE ||
+      !command_processor_.GetVulkanDevice()
+           ->properties()
+           .imageViewFormatSwizzle) {
+    // Without view swizzles the translated shader swizzles what it sampled;
+    // the interpreter does not.
+    reasons |= kPixelRefusalNoModule;
+  }
+  if (cvars::texture_integer_num_format || cvars::texture_gradient_exp_bias) {
+    reasons |= kPixelRefusalSetting;
+  }
+  if (render_target_cache_.draw_resolution_scale_x() > 1 ||
+      render_target_cache_.draw_resolution_scale_y() > 1) {
+    reasons |= kPixelRefusalResolutionScale;
+  }
+  const ucode_program::Program& program = pixel_shader.GetUcodeProgram();
+  if (program.features & ucode_program::kFeatureMalformed) {
+    reasons |= kPixelRefusalMalformed;
+  }
+  // Both programs share the buffer.
+  if (vertex_shader.GetUcodeProgram().element_count() +
+          program.element_count() >
+      ucode_program::kCodeElements) {
+    reasons |= kPixelRefusalTooLarge;
+  }
+  if (program.features & ucode_program::kFeatureFetchQuery) {
+    reasons |= kPixelRefusalFetchQuery;
+  }
+  if (program.features & ucode_program::kFeatureMemoryExport) {
+    reasons |= kPixelRefusalMemoryExport;
+  }
+  if (program.features & ucode_program::kFeatureTooManyTextures) {
+    reasons |= kPixelRefusalTooManyTextures;
+  }
+  if (program.features &
+      (ucode_program::kFeatureTexture1D | ucode_program::kFeatureTexture3D)) {
+    reasons |= kPixelRefusalTextureKind;
+  }
+  if (program.features & ucode_program::kFeatureDepthOutput) {
+    reasons |= kPixelRefusalDepthOutput;
+  }
+  SpirvShaderTranslator::Modification modification(pixel_shader_modification);
+  if (modification.pixel.param_gen_enable &&
+      modification.pixel.param_gen_point) {
+    reasons |= kPixelRefusalPointSprite;
+  }
+  if (modification.pixel.depth_stencil_mode !=
+          SpirvShaderTranslator::Modification::DepthStencilMode::kNoModifiers &&
+      modification.pixel.depth_stencil_mode !=
+          SpirvShaderTranslator::Modification::DepthStencilMode::kEarlyHint) {
+    // The translated shader writes depth itself in these modes.
+    reasons |= kPixelRefusalDepthMode;
+  }
+  if (modification.pixel.rt0_blend_rgb_factor_for_premult !=
+          xenos::BlendFactor::kOne ||
+      modification.pixel.rt0_blend_a_factor_for_premult !=
+          xenos::BlendFactor::kOne) {
+    reasons |= kPixelRefusalBlendPremultiply;
+  }
+  return reasons;
+}
+
+uint32_t VulkanPipelineCache::GetProgramPixelWord(
+    uint64_t pixel_shader_modification) {
+  SpirvShaderTranslator::Modification modification(pixel_shader_modification);
+  return modification.pixel.param_gen_enable
+             ? 1 | (modification.pixel.param_gen_interpolator << 1)
+             : 0;
+}
+
+uint32_t VulkanPipelineCache::GetProgramInterpreterRefusal(
+    VulkanShader& vertex_shader,
+    Shader::HostVertexShaderType host_vertex_shader_type,
+    xenos::PrimitiveType host_primitive_type) {
+  uint32_t reasons = 0;
+  // Both spacings of a tessellation evaluation shader are made together.
+  if (GetProgramVertexShader(host_vertex_shader_type, false) ==
+          VK_NULL_HANDLE ||
+      GetProgramVertexShader(host_vertex_shader_type, true) == VK_NULL_HANDLE) {
+    reasons |= Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type)
+                   ? kSkipTessellated
+                   : kSkipHostVertexShaderType;
+  }
+  if (host_primitive_type == xenos::PrimitiveType::kPointList) {
+    // Expanded by a geometry shader that needs a point size at a location of
+    // its own: not written by the interpreter's vertex shader.
+    reasons |= kSkipPointList;
+  }
+  if (!cvars::vulkan_placeholder_interpreter_geometry &&
+      (host_primitive_type == xenos::PrimitiveType::kRectangleList ||
+       host_primitive_type == xenos::PrimitiveType::kQuadList)) {
+    reasons |= kSkipRectangleOrQuadList;
+  }
+  const ucode_program::Program& program = vertex_shader.GetUcodeProgram();
+  if (program.features & ucode_program::kFeatureMalformed) {
+    reasons |= kSkipProgramMalformed;
+  }
+  if (program.element_count() > ucode_program::kCodeElements) {
+    reasons |= kSkipProgramTooLarge;
+  }
+  if ((program.features & (ucode_program::kFeatureTextureFetch |
+                           ucode_program::kFeatureFetchQuery)) &&
+      !cvars::vulkan_placeholder_interpreter_vertex_textures) {
+    // Its result would be 0, and the shape of the draw may hang on it.
+    reasons |= kSkipVertexTextureFetch;
+  }
+  if (program.features & ucode_program::kFeatureMemoryExport) {
+    // What it would have written is read by later draws.
+    reasons |= kSkipMemoryExport;
+  }
+  return reasons;
+}
+
 void VulkanPipelineCache::MakePlaceholder(
     const PipelineCreationArguments& real_arguments, bool use_interpreter,
     bool late) {
@@ -1525,12 +1765,27 @@ void VulkanPipelineCache::MakePlaceholder(
   // hakuX-Boosted: a stand-in pixel shader instead of the no-op one, with
   // the layout that has room for its texture (and the variant of the
   // interpreter that outputs what it reads).
+  // hakuX-Boosted: with vulkan_placeholder_interpreter = 2 the interpreter is
+  // its version 2, in the form the draw's host vertex shader type asks for.
+  // The draw path only asks for the interpreter where there is such a module
+  // (GetProgramInterpreterRefusal).
+  VkShaderModule program_vertex_shader = VK_NULL_HANDLE;
+  if (use_interpreter && IsProgramInterpreterActive()) {
+    program_vertex_shader = GetProgramVertexShader(
+        SpirvShaderTranslator::Modification(description.vertex_shader_modification)
+            .vertex.host_vertex_shader_type,
+        description.tessellation_mode != PipelineTessellationMode::kNone &&
+            description.tessellation_mode != PipelineTessellationMode::kDiscrete);
+  }
+  const bool use_program = program_vertex_shader != VK_NULL_HANDLE;
+  pipeline_pair.second.placeholder_program.store(use_program,
+                                                 std::memory_order_release);
   StandIn stand_in;
   VkShaderModule stand_in_pixel_shader = VK_NULL_HANDLE;
   const PipelineLayoutProvider* stand_in_layout = nullptr;
   bool use_stand_in =
-      GetStandIn(vertex_shader, pixel_shader, use_interpreter, stand_in,
-                 stand_in_pixel_shader, stand_in_layout);
+      GetStandIn(vertex_shader, pixel_shader, use_interpreter, use_program,
+                 stand_in, stand_in_pixel_shader, stand_in_layout);
   pipeline_pair.second.placeholder_created_ms =
       xe::Clock::QueryHostUptimeMillis();
   // hakuX-Boosted: the geometry shader of a rectangle or quad list
@@ -1543,21 +1798,9 @@ void VulkanPipelineCache::MakePlaceholder(
       description.geometry_shader != PipelineGeometryShader::kNone) {
     GeometryShaderKey placeholder_geometry_shader_key;
     placeholder_geometry_shader_key.type = description.geometry_shader;
-    // Version 2 writes the interpolators at their own locations: those up
-    // to the last one the stand-in reads are passed on.
-    uint32_t placeholder_interpolator_count = use_stand_in ? 2 : 0;
-    if (use_stand_in && interpreter_program_) {
-      placeholder_interpolator_count = 0;
-      if (stand_in.shader != StandInPixelShader::kFlat) {
-        placeholder_interpolator_count = stand_in.texcoord_interpolator + 1;
-      }
-      if (stand_in.color_interpolator != StandIn::kNoInterpolator) {
-        placeholder_interpolator_count = std::max(
-            placeholder_interpolator_count, stand_in.color_interpolator + 1);
-      }
-    }
+    // hakuX-Boosted: version 2 writes all sixteen, whoever reads them.
     placeholder_geometry_shader_key.interpolator_count =
-        placeholder_interpolator_count;
+        use_program ? xenos::kMaxInterpolators : (use_stand_in ? 2 : 0);
     placeholder_args.geometry_shader =
         GetGeometryShader(placeholder_geometry_shader_key);
     placeholder_possible = placeholder_args.geometry_shader != VK_NULL_HANDLE;
@@ -1575,26 +1818,19 @@ void VulkanPipelineCache::MakePlaceholder(
           stand_in.Pack(), std::memory_order_release);
       fragment_shader_override = stand_in_pixel_shader;
       vertex_shader_override =
-          use_interpreter
-              ? GetInterpreterShader(description.vertex_shader_modification,
-                                     true)
-              : VK_NULL_HANDLE;
-      if (use_interpreter && vertex_shader_override == VK_NULL_HANDLE) {
-        // Without its module this would be created as a placeholder of the
-        // translated vertex shader, which may not be translated.
-        fragment_shader_override = VK_NULL_HANDLE;
-      }
+          use_interpreter ? ucode_interpreter_stand_in_vs_ : VK_NULL_HANDLE;
       layout_override = stand_in_layout;
     } else if (use_interpreter) {
       fragment_shader_override = GetInterpreterPlaceholderPixelShader(
           placeholder_args, pixel_shader == nullptr);
-      vertex_shader_override = GetInterpreterShader(
-          description.vertex_shader_modification, false);
-      if (vertex_shader_override == VK_NULL_HANDLE) {
-        fragment_shader_override = VK_NULL_HANDLE;
-      }
+      vertex_shader_override = ucode_interpreter_vs_;
     } else {
       fragment_shader_override = placeholder_pixel_shader_;
+    }
+    // hakuX-Boosted: whatever the pixel side, version 2's vertex stage.
+    if (use_program) {
+      vertex_shader_override = program_vertex_shader;
+      ++placeholders_program_;
     }
     placeholder_possible = fragment_shader_override != VK_NULL_HANDLE;
   }
@@ -1663,11 +1899,13 @@ void VulkanPipelineCache::MakePlaceholder(
           "vertex colour {}{}{}",
           vertex_shader->shader().ucode_data_hash(),
           pixel_shader->shader().ucode_data_hash(),
-          use_interpreter ? "interpreter" : "translated",
+          use_program ? "interpreter (version 2)"
+                      : (use_interpreter ? "interpreter" : "translated"),
           GetStandInPixelShaderName(stand_in.shader),
-          stand_in.shader == StandInPixelShader::kFlat
+          (stand_in.shader == StandInPixelShader::kFlat ||
+           stand_in.shader == StandInPixelShader::kProgram)
               ? "none"
-              : (use_interpreter && !interpreter_program_
+              : (use_interpreter && !use_program
                      ? "chosen per draw"
                      : fmt::format("interpolator {}",
                                    stand_in.texcoord_interpolator)),
@@ -1716,6 +1954,72 @@ bool VulkanPipelineCache::IsFullscreenRealPipelineWaited() const {
 void VulkanPipelineCache::NoteFrameBoundary() {
   placeholder_wait_left_ms_ =
       double(std::max(int32_t(0), cvars::vulkan_placeholder_async_wait_ms));
+  UpdateCreationPolicy(true);
+}
+
+// hakuX-Boosted: vulkan_pipeline_creation_adaptive. GPU command thread only.
+void VulkanPipelineCache::UpdateCreationPolicy(bool frame_boundary) {
+  if (!cvars::vulkan_pipeline_creation_adaptive ||
+      (creation_threads_.size() <= creation_threads_calm_ &&
+       !cvars::guest_threads_above_helpers)) {
+    // Nothing to change between the two states.
+    return;
+  }
+  const uint64_t now_ms = xe::Clock::QueryHostUptimeMillis();
+  if (frame_boundary) {
+    if (policy_frame_ms_last_) {
+      policy_frame_ms_ = now_ms - policy_frame_ms_last_;
+    }
+    policy_frame_ms_last_ = now_ms;
+  }
+  const uint64_t threshold_ms = uint64_t(
+      std::max(int32_t(1), cvars::vulkan_pipeline_creation_adaptive_frame_ms));
+  const uint64_t since_frame_ms =
+      policy_frame_ms_last_ ? now_ms - policy_frame_ms_last_ : threshold_ms + 1;
+  const uint64_t frame_ms = std::max(policy_frame_ms_, since_frame_ms);
+  const bool working =
+      creation_threads_busy_.load(std::memory_order_relaxed) != 0;
+  bool boosted = creation_boosted_;
+  if (startup_pipelines_left_.load(std::memory_order_relaxed) != 0) {
+    // The stored pipelines being made again at launch: nothing else to run.
+    boosted = true;
+  } else if (!boosted) {
+    boosted = working && frame_ms > threshold_ms;
+  } else {
+    // Back when the work is done, or the frames are well under the mark.
+    boosted = working && frame_ms * 3 > threshold_ms * 2;
+  }
+  if (boosted == creation_boosted_) {
+    return;
+  }
+  creation_boosted_ = boosted;
+  ++creation_policy_switches_;
+  creation_thread_limit_.store(
+      boosted ? creation_threads_.size() : creation_threads_calm_,
+      std::memory_order_relaxed);
+  for (const std::unique_ptr<xe::threading::Thread>& creation_thread :
+       creation_threads_) {
+    creation_thread->set_priority(
+        (boosted || !cvars::guest_threads_above_helpers)
+            ? xe::threading::ThreadPriority::kNormal
+            : xe::threading::ThreadPriority::kBelowNormal);
+  }
+  if (boosted) {
+    creation_request_cond_.notify_all();
+  }
+  if (cvars::shader_profiling && now_ms - creation_policy_logged_ms_ >= 1000) {
+    creation_policy_logged_ms_ = now_ms;
+    XELOGI(
+        "shader_profiling: pipeline creation threads: {} of {} at {} "
+        "priority (the last frame took or has been awaited {} ms, {} "
+        "compiling), {} switches so far",
+        boosted ? creation_threads_.size() : creation_threads_calm_,
+        creation_threads_.size(),
+        (boosted || !cvars::guest_threads_above_helpers) ? "normal"
+                                                         : "below normal",
+        frame_ms, creation_threads_busy_.load(std::memory_order_relaxed),
+        creation_policy_switches_);
+  }
 }
 
 void VulkanPipelineCache::WaitForRealPipeline(
@@ -1847,12 +2151,13 @@ void VulkanPipelineCache::OnPipelineReused(
       slot.creation_finished.load(std::memory_order_acquire)) {
     return;
   }
-  bool interpreter =
-      use_interpreter &&
-      GetInterpreterShader(pipeline_pair.first.vertex_shader_modification,
-                           false) != VK_NULL_HANDLE;
-  bool make_placeholder = interpreter || (vertex_shader->is_translated() &&
-                                          cvars::vulkan_placeholder_real_vs);
+  bool interpreter = use_interpreter && ucode_interpreter_vs_ != VK_NULL_HANDLE;
+  // hakuX-Boosted: as in ConfigurePipeline, none from the translated vertex
+  // shader for a draw without a pixel shader.
+  bool make_placeholder =
+      interpreter ||
+      (vertex_shader->is_translated() && pixel_shader != nullptr &&
+       cvars::vulkan_placeholder_real_vs);
   if (!make_placeholder) {
     return;
   }
@@ -1894,7 +2199,9 @@ void VulkanPipelineCache::NoteDrawSkipped(uint64_t vertex_shader_hash,
     }
   }
   ++skipped_draws_;
-  if (reasons & kSkipVertexShaderNotTranslated) {
+  if (reasons & kSkipInterpreterBudget) {
+    ++skipped_interpreter_budget_;
+  } else if (reasons & kSkipVertexShaderNotTranslated) {
     ++skipped_untranslated_vs_;
   } else if (reasons & kSkipPlaceholderCompiling) {
     ++skipped_placeholder_compiling_;
@@ -1943,6 +2250,9 @@ void VulkanPipelineCache::NoteDrawSkipped(uint64_t vertex_shader_hash,
        "bindings were not ready when this draw was set up"},
       {kSkipStandInNoSampler,
        "no sampler was left in this submission for the stand-in"},
+      {kSkipInterpreterBudget,
+       "the frame's allowance of vertices drawn through the interpreter was "
+       "spent (vulkan_placeholder_interpreter_vertex_budget)"},
       {kSkipInterpreterOff,
        "interpreter refused: async_shader_vs_interpreter is off"},
       {kSkipVertexShaderTranslated,
@@ -1973,9 +2283,12 @@ void VulkanPipelineCache::NoteDrawSkipped(uint64_t vertex_shader_hash,
       {kSkipMemoryExport,
        "interpreter refused: the vertex shader exports to memory"},
       {kSkipLoops, "interpreter refused: the vertex shader has loops"},
-      {kSkipInterpreterProgram,
-       "interpreter refused: the vertex shader's microcode is malformed or "
-       "longer than the interpreter's buffer"},
+      {kSkipProgramTooLarge,
+       "interpreter refused: the shaders' microcode is larger than the "
+       "interpreter's buffer"},
+      {kSkipProgramMalformed,
+       "interpreter refused: the microcode has no end or names instructions "
+       "outside itself"},
   };
   std::string text;
   for (const auto& reason_text : kReasonTexts) {
@@ -2444,7 +2757,7 @@ void VulkanPipelineCache::LogStatsIfDue() {
       draw_thread_translations_ * 19 + skipped_draws_ * 23 +
       placeholders_inline_ * 29 + placeholders_async_ * 31 +
       placeholders_late_ * 37 + fullscreen_waits_ * 41 +
-      speculative_refused_budget_ * 43;
+      speculative_refused_budget_ * 43 + draw_thread_pipelines_ * 47;
   if (signature == stats_logged_signature_) {
     return;
   }
@@ -2484,20 +2797,57 @@ void VulkanPipelineCache::LogStatsIfDue() {
         speculative_refused_budget_);
   }
   if (cover) {
+    uint64_t by_seen_count[3];
+    double by_seen_ms[3];
+    {
+      std::lock_guard<std::mutex> seen_lock(compiled_shaders_lock_);
+      std::memcpy(by_seen_count, compiled_by_seen_count_,
+                  sizeof(by_seen_count));
+      std::memcpy(by_seen_ms, compiled_by_seen_ms_, sizeof(by_seen_ms));
+    }
+    XELOGI(
+        "pipeline compiles by shaders the driver had compiled before: "
+        "neither {} ({:.0f} ms, mean {:.1f}), one of the two {} ({:.0f} ms, "
+        "mean {:.1f}), both {} ({:.0f} ms, mean {:.1f})",
+        by_seen_count[0], by_seen_ms[0],
+        by_seen_count[0] ? by_seen_ms[0] / double(by_seen_count[0]) : 0.0,
+        by_seen_count[1], by_seen_ms[1],
+        by_seen_count[1] ? by_seen_ms[1] / double(by_seen_count[1]) : 0.0,
+        by_seen_count[2], by_seen_ms[2],
+        by_seen_count[2] ? by_seen_ms[2] / double(by_seen_count[2]) : 0.0);
     XELOGI(
         "placeholder cover: draws skipped {} (vertex shader not translated "
-        "{}, no placeholder {}, placeholder compiling {}, other {}); "
+        "{}, no placeholder {}, placeholder compiling {}, over the "
+        "interpreter's vertex budget {}, other {}); "
         "placeholders made on the GPU command thread {} (slowest {:.1f} ms), "
-        "handed to creation threads {}, of all those late {}; waits for a "
+        "handed to creation threads {}, of all those late {}, with the "
+        "interpreter's version 2 {}; waits for a "
         "creation thread's placeholder {} ({:.1f} ms), for a full-screen "
         "pass's real pipeline {} ({:.1f} ms); translations done on the GPU "
-        "command thread {} ({:.1f} ms)",
+        "command thread {} ({:.1f} ms); real pipelines compiled on the GPU "
+        "command thread {} ({:.1f} ms, slowest {:.1f} ms); placeholders "
+        "whose pixels the interpreter draws {}, refused {} (malformed {}, "
+        "too large {}, fetch query {}, memory export {}, too many textures "
+        "{}, 1D or 3D texture {}, depth output {}, point sprite {}, depth "
+        "mode {}, blend premultiply {}, resolution scale {}, a setting {}, "
+        "no module {})",
         skipped_draws_, skipped_untranslated_vs_, skipped_no_placeholder_,
-        skipped_placeholder_compiling_, skipped_other_, placeholders_inline_,
+        skipped_placeholder_compiling_, skipped_interpreter_budget_,
+        skipped_other_, placeholders_inline_,
         placeholder_inline_worst_ms_, placeholders_async_, placeholders_late_,
-        placeholder_waits_, placeholder_wait_ms_, fullscreen_waits_,
+        placeholders_program_, placeholder_waits_, placeholder_wait_ms_,
+        fullscreen_waits_,
         fullscreen_wait_ms_, draw_thread_translations_,
-        draw_thread_translation_ms_);
+        draw_thread_translation_ms_, draw_thread_pipelines_,
+        draw_thread_pipeline_ms_, draw_thread_pipeline_worst_ms_,
+        placeholders_program_pixel_, placeholders_program_pixel_refused_,
+        program_pixel_refusals_[0], program_pixel_refusals_[1],
+        program_pixel_refusals_[2], program_pixel_refusals_[3],
+        program_pixel_refusals_[4], program_pixel_refusals_[5],
+        program_pixel_refusals_[6], program_pixel_refusals_[7],
+        program_pixel_refusals_[8], program_pixel_refusals_[9],
+        program_pixel_refusals_[10], program_pixel_refusals_[11],
+        program_pixel_refusals_[12]);
   }
 }
 
@@ -2522,6 +2872,10 @@ void VulkanPipelineCache::MaybeSaveVkPipelineCache() {
 
 void VulkanPipelineCache::EndSubmission() {
   MaybeSaveVkPipelineCache();
+  // hakuX-Boosted: between frames too, so that a load with no frame at all
+  // is noticed.
+  UpdateCreationPolicy(false);
+  LogStartupProgressIfDue();
   // hakuX-Boosted: the once-a-second lines of boosted/notes/shader-ahead.md.
   LogStatsIfDue();
 
@@ -2678,14 +3032,21 @@ void VulkanPipelineCache::CreationThread() {
       const size_t speculative_thread_limit =
           size_t(std::max(int32_t(1), cvars::shader_ahead_threads));
       creation_request_cond_.wait(lock, [this, speculative_thread_limit]() {
-        return !creation_queue_.empty() || creation_threads_shutdown_ ||
+        // hakuX-Boosted: creation_thread_limit_ is above any count unless
+        // vulkan_pipeline_creation_adaptive holds some threads back.
+        return (!creation_queue_.empty() &&
+                creation_threads_busy_.load(std::memory_order_relaxed) <
+                    creation_thread_limit_.load(std::memory_order_relaxed)) ||
+               creation_threads_shutdown_ ||
                (!speculative_queue_.empty() &&
                 speculative_busy_ < speculative_thread_limit);
       });
       if (creation_threads_shutdown_) {
         break;
       }
-      if (!creation_queue_.empty()) {
+      if (!creation_queue_.empty() &&
+          creation_threads_busy_.load(std::memory_order_relaxed) <
+              creation_thread_limit_.load(std::memory_order_relaxed)) {
         creation_arguments = creation_queue_.top();
         creation_queue_.pop();
         ++creation_threads_busy_;
@@ -2819,6 +3180,9 @@ void VulkanPipelineCache::CreationThread() {
             true, std::memory_order_release);
       }
       creation_progress_cond_.notify_all();
+      if (creation_arguments.startup) {
+        startup_pipelines_left_.fetch_sub(1, std::memory_order_relaxed);
+      }
       if (creation_threads_busy_ == 0 && creation_queue_.empty()) {
         // All pipelines created.
         if (creation_completion_set_event_.load(std::memory_order_acquire)) {
@@ -3869,6 +4233,8 @@ const char* VulkanPipelineCache::GetStandInPixelShaderName(
       return "2D texture";
     case StandInPixelShader::kCube:
       return "cube texture";
+    case StandInPixelShader::kProgram:
+      return "interpreter";
     default:
       return "no-op";
   }
@@ -3878,8 +4244,15 @@ const char* VulkanPipelineCache::GetStandInPixelShaderName(
 bool VulkanPipelineCache::GetStandIn(
     VulkanShader::VulkanTranslation* vertex_shader,
     VulkanShader::VulkanTranslation* pixel_shader, bool use_interpreter,
-    StandIn& stand_in_out, VkShaderModule& pixel_shader_module_out,
+    bool use_program, StandIn& stand_in_out,
+    VkShaderModule& pixel_shader_module_out,
     const PipelineLayoutProvider*& pipeline_layout_out) {
+  // hakuX-Boosted: the interpreter's version 2 writes every interpolator at
+  // the location of its index, so for the stand-in it is a translated vertex
+  // shader whose interpolators are not packed: the texture coordinate's and
+  // the colour's interpolators are baked into the pixel shader module, and
+  // the stand-in is not told per draw which to output.
+  const bool per_draw_choice = use_interpreter && !use_program;
   if (cvars::vulkan_placeholder_ps_mode <= 0 || !pixel_shader ||
       render_target_cache_.GetPath() ==
           RenderTargetCache::Path::kPixelShaderInterlock) {
@@ -3893,16 +4266,45 @@ bool VulkanPipelineCache::GetStandIn(
     // Depth only: the no-op pixel shader already draws all there is.
     return false;
   }
-  if (use_interpreter &&
-      GetInterpreterShader(vertex_shader->modification(), true) ==
-          VK_NULL_HANDLE) {
+  if (per_draw_choice && ucode_interpreter_stand_in_vs_ == VK_NULL_HANDLE) {
     return false;
   }
-  // Version 1 of the interpreter routes the interpolators the stand-in reads
-  // to two fixed outputs, chosen for each draw. Version 2 writes every
-  // interpolator at its own location, so for it, as for a translated vertex
-  // shader, the two are baked into (a copy of) the pixel shader module.
-  const bool per_draw_interpolators = use_interpreter && !interpreter_program_;
+
+  // hakuX-Boosted: the pixel shader's own microcode, where the interpreter
+  // can run it and its vertex stage is there to feed it all sixteen
+  // interpolators.
+  if (cvars::vulkan_placeholder_ps_mode >= 3 && use_program) {
+    uint32_t refusal = GetProgramPixelRefusal(
+        guest_vertex_shader, guest_pixel_shader, pixel_shader->modification());
+    if (!refusal) {
+      const PipelineLayoutProvider* program_layout =
+          command_processor_.GetPipelineLayout(
+              ucode_program::kMaxTextures * 2, ucode_program::kMaxTextures, 0,
+              0);
+      if (program_layout) {
+        ++placeholders_program_pixel_;
+        stand_in_out = StandIn();
+        stand_in_out.shader = StandInPixelShader::kProgram;
+        pixel_shader_module_out = ucode_program_ps_;
+        pipeline_layout_out = program_layout;
+        return true;
+      }
+      refusal = kPixelRefusalNoModule;
+    }
+    ++placeholders_program_pixel_refused_;
+    for (uint32_t i = 0; i < kPixelRefusalCount; ++i) {
+      if (refusal & (uint32_t(1) << i)) {
+        ++program_pixel_refusals_[i];
+      }
+    }
+    if (cvars::shader_profiling) {
+      XELOGI(
+          "shader_profiling: pixel interpreter refused PS {:016X} (reasons "
+          "{:04X}, program features {:05X}): the stand-in is used",
+          guest_pixel_shader.ucode_data_hash(), refusal,
+          guest_pixel_shader.GetUcodeProgram().features);
+    }
+  }
 
   // The interpolators that reach the pixel shader: written by the vertex
   // shader, read by the pixel shader, and not replaced by PsParamGen.
@@ -3932,12 +4334,12 @@ bool VulkanPipelineCache::GetStandIn(
             : StandInPixelShader::k2D;
     if (stand_in.shader == StandInPixelShader::kFlat) {
       stand_in.shader = texture_shader;
-      if (!per_draw_interpolators) {
+      if (!per_draw_choice) {
         stand_in.texcoord_interpolator = texture.interpolator;
       }
     }
     if (texture_shader == stand_in.shader &&
-        (per_draw_interpolators ||
+        (per_draw_choice ||
          texture.interpolator == stand_in.texcoord_interpolator)) {
       texcoord_interpolators |= uint32_t(1) << texture.interpolator;
     }
@@ -3952,31 +4354,30 @@ bool VulkanPipelineCache::GetStandIn(
 
   VkShaderModule pixel_shader_module;
   size_t texture_count_vertex = 0, sampler_count_vertex = 0;
-  if (per_draw_interpolators) {
+  if (per_draw_choice) {
     // Always the variant with a colour input: the interpreter outputs 1 when
     // there is no colour, and every interpreter placeholder of a kind then
     // shares one pair of modules, which the driver's cache can answer.
     pixel_shader_module =
         stand_in_pixel_shaders_[uint32_t(stand_in.shader) - 1][1];
-  } else if (use_interpreter) {
-    // Version 2: an interpolator's location is its index.
-    pixel_shader_module = GetStandInPixelShader(
-        stand_in.shader, has_color,
-        has_texture ? stand_in.texcoord_interpolator : 0,
-        has_color ? stand_in.color_interpolator : 1);
   } else {
-    if (!guest_vertex_shader.bindings_ready()) {
-      return false;
+    if (!use_program) {
+      if (!guest_vertex_shader.bindings_ready()) {
+        return false;
+      }
+      texture_count_vertex =
+          guest_vertex_shader.GetTextureBindingsAfterTranslation().size();
+      sampler_count_vertex =
+          guest_vertex_shader.GetSamplerBindingsAfterTranslation().size();
     }
-    texture_count_vertex =
-        guest_vertex_shader.GetTextureBindingsAfterTranslation().size();
-    sampler_count_vertex =
-        guest_vertex_shader.GetSamplerBindingsAfterTranslation().size();
     // The translated vertex shader writes its interpolators to consecutive
-    // locations, in the order of their indices.
-    auto location = [interpolator_mask](uint32_t interpolator) {
-      return xe::bit_count(interpolator_mask &
-                           ((uint32_t(1) << interpolator) - 1));
+    // locations, in the order of their indices; the interpreter's version 2
+    // writes each at its own index.
+    auto location = [interpolator_mask, use_program](uint32_t interpolator) {
+      return use_program
+                 ? interpolator
+                 : xe::bit_count(interpolator_mask &
+                                 ((uint32_t(1) << interpolator) - 1));
     };
     pixel_shader_module = GetStandInPixelShader(
         stand_in.shader, has_color,
@@ -4047,73 +4448,7 @@ bool VulkanPipelineCache::EnsurePipelineCreatedWithInterpreterPlaceholder(
   return EnsurePipelineCreated(
       creation_arguments,
       GetInterpreterPlaceholderPixelShader(creation_arguments, depth_only),
-      GetInterpreterShader(
-          creation_arguments.pipeline->first.vertex_shader_modification,
-          false));
-}
-
-// hakuX-Boosted: see the declarations.
-VkShaderModule VulkanPipelineCache::GetInterpreterDomainShader(
-    uint64_t vertex_shader_modification) const {
-  const SpirvShaderTranslator::Modification modification(
-      vertex_shader_modification);
-  uint32_t domain;
-  switch (modification.vertex.host_vertex_shader_type) {
-    case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
-      domain = 0;
-      break;
-    case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
-      domain = 1;
-      break;
-    case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
-      domain = 2;
-      break;
-    case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
-      domain = 3;
-      break;
-    default:
-      return VK_NULL_HANDLE;
-  }
-  return ucode_program_ds_[domain][modification.vertex.tessellation_mode ==
-                                           xenos::TessellationMode::kDiscrete
-                                       ? 0
-                                       : 1];
-}
-
-VkShaderModule VulkanPipelineCache::GetInterpreterShader(
-    uint64_t vertex_shader_modification, bool stand_in) const {
-  if (Shader::IsHostVertexShaderTypeDomain(
-          SpirvShaderTranslator::Modification(vertex_shader_modification)
-              .vertex.host_vertex_shader_type)) {
-    return GetInterpreterDomainShader(vertex_shader_modification);
-  }
-  return GetInterpreterVertexShader(stand_in);
-}
-
-bool VulkanPipelineCache::IsInterpreterProgramModule(
-    VkShaderModule shader_module, size_t& spirv_bytes_out) const {
-  spirv_bytes_out = 0;
-  if (shader_module == VK_NULL_HANDLE) {
-    return false;
-  }
-  if (shader_module == ucode_program_vs_) {
-    spirv_bytes_out = sizeof(shaders::ucode_program_vs);
-    return true;
-  }
-  const size_t domain_shader_bytes[kInterpreterDomainCount] = {
-      sizeof(shaders::ucode_program_triangle_cp_ds),
-      sizeof(shaders::ucode_program_triangle_patch_ds),
-      sizeof(shaders::ucode_program_quad_cp_ds),
-      sizeof(shaders::ucode_program_quad_patch_ds),
-  };
-  for (uint32_t i = 0; i < kInterpreterDomainCount; ++i) {
-    if (shader_module == ucode_program_ds_[i][0] ||
-        shader_module == ucode_program_ds_[i][1]) {
-      spirv_bytes_out = domain_shader_bytes[i];
-      return true;
-    }
-  }
-  return false;
+      ucode_interpreter_vs_);
 }
 
 VkShaderModule VulkanPipelineCache::GetInterpreterPlaceholderPixelShader(
@@ -4273,9 +4608,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
     // lazily after is_translated() is set, and another thread may have
     // translated the VS without creating the module yet, so shader_module()
     // could still be null.
-    // hakuX-Boosted: or, in an interpreter placeholder, the guest shader
-    // interpreter's tessellation evaluation shader (only version 2 has one;
-    // GetInterpreterShader gives nothing else for a tessellated pipeline).
+    // hakuX-Boosted: or the interpreter's version 2 in its place, for a
+    // tessellated draw's placeholder.
     shader_stage_tes.module =
         vertex_shader_override != VK_NULL_HANDLE
             ? vertex_shader_override
@@ -4848,18 +5182,44 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
           std::chrono::duration<double, std::milli>(
               std::chrono::steady_clock::now() - pso_create_start)
               .count());
+      // hakuX-Boosted: a real pipeline's time by how many of its two guest
+      // shaders the driver had compiled before in another pipeline. If
+      // pipelines whose shaders were both seen are cheap, the driver keeps
+      // compiled shaders by stage, and warming a pair of shaders with any
+      // state at all is as good as guessing its state right
+      // (boosted/notes/shader-first-run.md, "Speculation").
+      if (!creating_placeholder) {
+        double compile_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() -
+                                pso_create_start)
+                                .count();
+        std::lock_guard<std::mutex> seen_lock(compiled_shaders_lock_);
+        uint32_t seen = 0;
+        if (!compiled_shaders_.insert(creation_arguments.vertex_shader)
+                 .second) {
+          ++seen;
+        }
+        // A draw without a pixel shader has the one stage.
+        if (!creation_arguments.pixel_shader ||
+            !compiled_shaders_.insert(creation_arguments.pixel_shader).second) {
+          ++seen;
+        }
+        ++compiled_by_seen_count_[seen];
+        compiled_by_seen_ms_[seen] += compile_ms;
+      }
       // hakuX-Boosted: what the placeholder was made of and where, so that a
       // slow one can be put down to the interpreter's module or to a guest
       // vertex shader's (boosted/notes/shader-ahead.md).
       if (creating_placeholder) {
         const bool interpreter_vs = vertex_shader_override != VK_NULL_HANDLE;
-        size_t interpreter_program_bytes = 0;
-        const bool interpreter_program_module = IsInterpreterProgramModule(
-            vertex_shader_override, interpreter_program_bytes);
+        const bool program_vs =
+            interpreter_vs &&
+            vertex_shader_override != ucode_interpreter_stand_in_vs_ &&
+            vertex_shader_override != ucode_interpreter_vs_;
         size_t vertex_spirv_bytes =
             interpreter_vs
-                ? (interpreter_program_module
-                       ? interpreter_program_bytes
+                ? (program_vs
+                       ? sizeof(shaders::ucode_program_vs)
                        : (vertex_shader_override ==
                                   ucode_interpreter_stand_in_vs_
                               ? sizeof(shaders::ucode_interpreter_stand_in_vs)
@@ -4869,13 +5229,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
             "shader_profiling: placeholder detail: VS {:016X}: {} vertex "
             "shader, {} bytes of SPIR-V, {}{}{}",
             creation_arguments.vertex_shader->shader().ucode_data_hash(),
-            interpreter_vs
-                ? (interpreter_program_module
-                       ? (is_tessellated
-                              ? "interpreter 2 tessellation evaluation, as the"
-                              : "interpreter 2")
-                       : "interpreter")
-                : "translated guest",
+            program_vs ? "interpreter (version 2)"
+                       : (interpreter_vs ? "interpreter" : "translated guest"),
             vertex_spirv_bytes,
             layout_override ? "stand-in pixel shader" : "no-op pixel shader",
             creation_arguments.geometry_shader != VK_NULL_HANDLE
@@ -5065,6 +5420,18 @@ void VulkanPipelineCache::InitializeShaderStorage(
       std::max(PipelineDescription::kVersion,
                SpirvShaderTranslator::Modification::kVersion);
 
+  // hakuX-Boosted: the record's two files, for import now and export when
+  // the storage is closed.
+  shader_record_files_[0] = GetShaderStorageFilePath(cache_root, title_id);
+  shader_record_files_[1] =
+      GetShaderStorageShareableRoot(cache_root) /
+      fmt::format("{:08X}{}", title_id, pipeline_config.file_suffix);
+  ImportShaderRecord();
+  startup_pipelines_total_.store(0, std::memory_order_relaxed);
+  startup_pipelines_left_.store(0, std::memory_order_relaxed);
+  startup_started_ms_ = xe::Clock::QueryHostUptimeMillis();
+  startup_progress_logged_ms_ = 0;
+
   uint32_t storage_index = storage_writer_.storage_index() + 1;
 
   std::vector<PipelineStoredDescription> pipeline_stored_descriptions;
@@ -5129,6 +5496,40 @@ void VulkanPipelineCache::InitializeShaderStorage(
     XELOGI("Loaded {} bytes of VkPipelineCache data",
            pipeline_cache_data.size());
   }
+
+  // hakuX-Boosted: whether the driver will take that data. A driver reads
+  // only a cache whose header is its own (vendor, device and the driver
+  // build's UUID) and silently starts empty otherwise, which after a driver
+  // update or on another phone means every stored pipeline is compiled from
+  // scratch at this launch. An empty cache's data is this driver's header.
+  driver_cache_state_ = pipeline_cache_data.empty() ? DriverCacheState::kNone
+                                                    : DriverCacheState::kUnknown;
+  if (!pipeline_cache_data.empty() && vk_pipeline_cache_ != VK_NULL_HANDLE) {
+    // vk_pipeline_cache_ is still the empty one made at start-up.
+    uint8_t own_header[32];
+    size_t own_header_size = sizeof(own_header);
+    VkResult header_result = dfn.vkGetPipelineCacheData(
+        device, vk_pipeline_cache_, &own_header_size, own_header);
+    if ((header_result == VK_SUCCESS || header_result == VK_INCOMPLETE) &&
+        own_header_size == sizeof(own_header) &&
+        pipeline_cache_data.size() >= sizeof(own_header)) {
+      driver_cache_state_ =
+          std::memcmp(own_header, pipeline_cache_data.data(),
+                      sizeof(own_header))
+              ? DriverCacheState::kMismatch
+              : DriverCacheState::kMatch;
+    }
+  }
+  XELOGI(
+      "shader record: the driver's stored pipeline cache {}",
+      driver_cache_state_ == DriverCacheState::kNone
+          ? "is absent: the stored pipelines are compiled from scratch"
+          : (driver_cache_state_ == DriverCacheState::kMatch
+                 ? "is this driver's: the stored pipelines come from it"
+                 : (driver_cache_state_ == DriverCacheState::kMismatch
+                        ? "is another driver's or device's: the stored "
+                          "pipelines are compiled from scratch"
+                        : "could not be checked against this driver")));
 
   // Recreate the VkPipelineCache with the loaded data.
   if (vk_pipeline_cache_ != VK_NULL_HANDLE) {
@@ -5332,6 +5733,10 @@ void VulkanPipelineCache::InitializeShaderStorage(
         creation_arguments.render_pass_key =
             pipeline_description.render_pass_key;
         creation_arguments.priority = priority;
+        // hakuX-Boosted: counted for the progress value.
+        creation_arguments.startup = true;
+        startup_pipelines_total_.fetch_add(1, std::memory_order_relaxed);
+        startup_pipelines_left_.fetch_add(1, std::memory_order_relaxed);
         creation_queue_.push(creation_arguments);
         creation_request_cond_.notify_one();
       } else {
@@ -5354,6 +5759,9 @@ void VulkanPipelineCache::InitializeShaderStorage(
       ++pipelines_created;
     }
 
+    // hakuX-Boosted: every core for the launch's pipelines
+    // (vulkan_pipeline_creation_adaptive).
+    UpdateCreationPolicy(false);
     if (!creation_threads_.empty()) {
       if (blocking) {
         // Blocking mode: wait for all pipelines to be created.
@@ -5443,6 +5851,89 @@ void VulkanPipelineCache::SaveVkPipelineCache() {
   }
 }
 
+// hakuX-Boosted: the kept record (boosted/notes/shader-first-run.md).
+
+bool VulkanPipelineCache::GetStartupProgress(uint32_t& done_out,
+                                             uint32_t& total_out) const {
+  uint32_t total = startup_pipelines_total_.load(std::memory_order_relaxed);
+  uint32_t left = std::min(
+      total, startup_pipelines_left_.load(std::memory_order_relaxed));
+  done_out = total - left;
+  total_out = total;
+  return left != 0;
+}
+
+void VulkanPipelineCache::LogStartupProgressIfDue() {
+  uint32_t done, total;
+  bool preparing = GetStartupProgress(done, total);
+  if (!total || startup_progress_logged_ms_ == UINT64_MAX) {
+    return;
+  }
+  uint64_t now_ms = xe::Clock::QueryHostUptimeMillis();
+  if (preparing && now_ms - startup_progress_logged_ms_ < 1000) {
+    return;
+  }
+  XELOGI(
+      "shader record: {} of {} stored pipelines ready, {:.1f} s after the "
+      "title's storage was opened{}",
+      done, total, double(now_ms - startup_started_ms_) / 1000.0,
+      preparing ? "" : " (all of them)");
+  // The line that says all are ready is the last.
+  startup_progress_logged_ms_ = preparing ? now_ms : UINT64_MAX;
+}
+
+void VulkanPipelineCache::ImportShaderRecord() {
+  if (cvars::shader_record_import_path.empty()) {
+    return;
+  }
+  for (const std::filesystem::path& local_file : shader_record_files_) {
+    std::filesystem::path import_file =
+        cvars::shader_record_import_path / local_file.filename();
+    std::error_code ec;
+    uintmax_t import_size = std::filesystem::file_size(import_file, ec);
+    if (ec) {
+      continue;
+    }
+    uintmax_t local_size = std::filesystem::file_size(local_file, ec);
+    if (ec) {
+      local_size = 0;
+    }
+    if (import_size <= local_size) {
+      XELOGI(
+          "shader record: {} not imported: {} bytes there, {} bytes here",
+          xe::path_to_utf8(import_file.filename()), import_size, local_size);
+      continue;
+    }
+    std::filesystem::create_directories(local_file.parent_path(), ec);
+    std::filesystem::copy_file(
+        import_file, local_file,
+        std::filesystem::copy_options::overwrite_existing, ec);
+    XELOGI("shader record: {} {} ({} bytes, {} bytes were here)",
+           xe::path_to_utf8(import_file.filename()),
+           ec ? "could not be imported" : "imported", import_size, local_size);
+  }
+}
+
+void VulkanPipelineCache::ExportShaderRecord() {
+  if (cvars::shader_record_export_path.empty()) {
+    return;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(cvars::shader_record_export_path, ec);
+  for (const std::filesystem::path& local_file : shader_record_files_) {
+    if (local_file.empty() || !std::filesystem::exists(local_file, ec)) {
+      continue;
+    }
+    std::filesystem::path export_file =
+        cvars::shader_record_export_path / local_file.filename();
+    std::filesystem::copy_file(
+        local_file, export_file,
+        std::filesystem::copy_options::overwrite_existing, ec);
+    XELOGI("shader record: {} {}", xe::path_to_utf8(local_file.filename()),
+           ec ? "could not be exported" : "exported");
+  }
+}
+
 void VulkanPipelineCache::ShutdownShaderStorage() {
   // Save VkPipelineCache to disk before shutting down storage.
   SaveVkPipelineCache();
@@ -5450,6 +5941,10 @@ void VulkanPipelineCache::ShutdownShaderStorage() {
 
   // Shut down the storage writer (closes files, stops write thread).
   storage_writer_.ShutdownShaderStorage();
+  // hakuX-Boosted: the files are closed and complete now.
+  ExportShaderRecord();
+  shader_record_files_[0].clear();
+  shader_record_files_[1].clear();
   shader_storage_file_flush_needed_ = false;
   pipeline_storage_file_flush_needed_ = false;
   shader_storage_title_id_ = 0;
