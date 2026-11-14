@@ -123,3 +123,10 @@ Deliberately not done, to keep to what a build can vouch for: loading the
 point sprite and tessellation modules, vertex texture fetches, and every
 item under "Next". The glslang tools could not be installed in this session,
 so the rig was not rerun; the shaders it tests were not touched.
+
+Build: run 105, commit `354899d`, success
+(https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43547462886). It
+proves the code compiles, that the Actions shader tools compiled
+`ucode_program.vs.glsl` (the header it makes is now included, so a failure
+there would have failed the build) and that the APK packs. Nothing about
+behaviour. The commit that adds this paragraph changes this file only.
