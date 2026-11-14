@@ -1,0 +1,241 @@
+# hakuX-Boosted: the benchmark rig (boosted/bench). Builds the Xbox 360
+# core's CPU, scheduler and kernel-object sources for ARM64 Linux, runs the
+# rig's benchmarks on GitHub's ARM64 runner and prints the numbers, next to
+# those of claude/integration-1113 built and run in the same job.
+#
+# What it says and does not say about a phone: boosted/notes/bench-harness.md.
+name: hakuX-Boosted bench
+
+on:
+  push:
+    branches:
+      - 'claude/**'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to measure (empty = the branch this is run from)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: boosted-bench-${{ github.ref }}-${{ inputs.branch }}
+  cancel-in-progress: true
+
+env:
+  BASELINE: claude/integration-1113
+  CORE: x360/emulator-core/src/main/cpp
+  CCACHE_COMPILERCHECK: content
+  CCACHE_NOHASHDIR: 'true'
+  CCACHE_MAXSIZE: 600M
+
+jobs:
+  # Which branches this run measures. A dispatch measures the branch it
+  # names. A push measures the branch pushed to; a push to the rig's own
+  # branch also measures the branches listed in boosted/bench/branches.txt
+  # (branches that do not carry this workflow yet), each in a job of its own.
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      branches: ${{ steps.plan.outputs.branches }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          INPUT_BRANCH: ${{ inputs.branch }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          list=()
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            list+=("${INPUT_BRANCH:-$REF_NAME}")
+          else
+            list+=("$REF_NAME")
+            if [ "$REF_NAME" = "claude/bench-harness" ] && [ -f boosted/bench/branches.txt ]; then
+              while read -r branch; do
+                case "$branch" in ''|\#*) continue ;; esac
+                if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+                  list+=("$branch")
+                else
+                  echo "::notice::branch $branch (boosted/bench/branches.txt) does not exist, skipped"
+                fi
+              done < boosted/bench/branches.txt
+            fi
+          fi
+          json=$(printf '%s\n' "${list[@]}" | awk '!seen[$0]++' | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
+          echo "branches=$json" >> "$GITHUB_OUTPUT"
+          echo "Measuring: $json"
+
+  bench:
+    name: Bench ${{ matrix.branch }}
+    needs: plan
+    # GitHub's hosted ARM64 Linux runner (free for public repositories).
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(needs.plan.outputs.branches) }}
+    steps:
+      # The rig itself always comes from the commit the workflow runs on.
+      - uses: actions/checkout@v4
+
+      - name: The runner
+        run: |
+          uname -a
+          lscpu | head -20
+          nproc
+          free -g | head -2
+
+      - name: Sources to measure
+        env:
+          TARGET: ${{ matrix.branch }}
+        run: |
+          set -e
+          git fetch --no-tags --depth 1 origin \
+            "+refs/heads/$TARGET:refs/remotes/origin/$TARGET" \
+            "+refs/heads/$BASELINE:refs/remotes/origin/$BASELINE"
+          # only the submodules the bench builds against
+          paths=()
+          while read -r sub; do
+            case "$sub" in ''|\#*) continue ;; esac
+            paths+=("$CORE/xenia/third_party/$sub")
+          done < boosted/bench/tools/submodules.txt
+          git submodule update --init --depth 1 --jobs 8 -- "${paths[@]}"
+          boosted/bench/tools/prepare-tree.sh "origin/$TARGET" "$RUNNER_TEMP/trees/target"
+          boosted/bench/tools/prepare-tree.sh "origin/$BASELINE" "$RUNNER_TEMP/trees/baseline"
+          target_tree=$(git rev-parse "origin/$TARGET:$CORE")
+          baseline_tree=$(git rev-parse "origin/$BASELINE:$CORE")
+          echo "TARGET=$TARGET" >> "$GITHUB_ENV"
+          echo "TARGET_SHA=$(git rev-parse --short "origin/$TARGET")" >> "$GITHUB_ENV"
+          echo "BASELINE_SHA=$(git rev-parse --short "origin/$BASELINE")" >> "$GITHUB_ENV"
+          if [ "$target_tree" = "$baseline_tree" ]; then
+            echo "SAME_SOURCES=true" >> "$GITHUB_ENV"
+          else
+            echo "SAME_SOURCES=false" >> "$GITHUB_ENV"
+            git diff --stat "origin/$BASELINE" "origin/$TARGET" -- "$CORE" | tail -30 || true
+          fi
+
+      - name: Tools
+        run: |
+          missing=()
+          for tool in clang:clang ninja:ninja-build ccache:ccache cmake:cmake; do
+            command -v "${tool%%:*}" > /dev/null || missing+=("${tool##*:}")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            sudo timeout 240 apt-get -o Acquire::Retries=2 update || true
+            sudo timeout 240 apt-get install -y --no-install-recommends "${missing[@]}"
+          fi
+          clang --version | head -1
+          cmake --version | head -1
+          # lets the benchmarks count instructions where the CPU allows it
+          sudo sysctl -w kernel.perf_event_paranoid=1 || true
+
+      - name: Compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: boosted-bench-ccache-${{ matrix.branch }}-${{ github.run_id }}
+          restore-keys: |
+            boosted-bench-ccache-${{ matrix.branch }}-
+            boosted-bench-ccache-
+
+      # Both builds use the same build directory and reach their sources
+      # through the same link, so the compiler cache serves the second build
+      # every file the two branches share.
+      - name: Build against the measured branch
+        run: |
+          export CCACHE_BASEDIR="$RUNNER_TEMP" CCACHE_DIR="$HOME/.cache/ccache"
+          ccache -z > /dev/null || true
+          ln -sfn "$RUNNER_TEMP/trees/target" "$RUNNER_TEMP/tree"
+          boosted/bench/tools/ci-build.sh "$PWD/boosted/bench" "$RUNNER_TEMP/tree" \
+            "$RUNNER_TEMP/build" "$RUNNER_TEMP/bin/target"
+          ccache -s | head -12 || true
+
+      - name: Build against the baseline
+        if: env.TARGET != env.BASELINE && env.SAME_SOURCES != 'true'
+        run: |
+          export CCACHE_BASEDIR="$RUNNER_TEMP" CCACHE_DIR="$HOME/.cache/ccache"
+          ccache -z > /dev/null || true
+          ln -sfn "$RUNNER_TEMP/trees/baseline" "$RUNNER_TEMP/tree"
+          boosted/bench/tools/ci-build.sh "$PWD/boosted/bench" "$RUNNER_TEMP/tree" \
+            "$RUNNER_TEMP/build" "$RUNNER_TEMP/bin/baseline"
+          ccache -s | head -12 || true
+
+      - name: Run
+        run: |
+          mkdir -p results
+          rounds=2
+          if [ "$TARGET" = "$BASELINE" ]; then
+            boosted/bench/run.sh "$RUNNER_TEMP/bin/target" results/target.jsonl $rounds || true
+          else
+            # The same sources as the baseline: the same programs run twice,
+            # which shows how much two runs differ on this machine.
+            [ "$SAME_SOURCES" = "true" ] && ln -sfn "$RUNNER_TEMP/bin/target" "$RUNNER_TEMP/bin/baseline"
+            # Turn about, so drift on the machine falls on both alike.
+            for round in $(seq 1 $rounds); do
+              boosted/bench/run.sh "$RUNNER_TEMP/bin/target" results/target.jsonl 1 || true
+              boosted/bench/run.sh "$RUNNER_TEMP/bin/baseline" results/baseline.jsonl 1 || true
+            done
+          fi
+
+      - name: Report
+        run: |
+          args=(--target results/target.jsonl --target-name "$TARGET"
+                --title "Bench: $TARGET at $TARGET_SHA"
+                --out results/report.md --json-out results/target.json)
+          if [ -f results/baseline.jsonl ]; then
+            args+=(--baseline results/baseline.jsonl --baseline-name "$BASELINE")
+          fi
+          {
+            python3 boosted/bench/tools/report.py "${args[@]}"
+            if [ "$TARGET" != "$BASELINE" ] && [ "$SAME_SOURCES" = "true" ]; then
+              echo "> The core sources of \`$TARGET\` are the same as \`$BASELINE\`'s: both columns are the same programs, run turn about. The \"change\" column is this runner's noise."
+              echo
+            fi
+            for side in target baseline; do
+              if [ -f "$RUNNER_TEMP/bin/$side/FAILED" ] && [ ! -L "$RUNNER_TEMP/bin/$side" ]; then
+                echo "> **Build failure ($side):** $(tr '\n' ' ' < "$RUNNER_TEMP/bin/$side/FAILED"). The build log is in the artifact."
+                echo
+              fi
+            done
+          } | tee -a results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p results/logs
+          for side in target baseline; do
+            [ -L "$RUNNER_TEMP/bin/$side" ] && continue
+            for log in "$RUNNER_TEMP/bin/$side"/*.log; do
+              [ -f "$log" ] && cp "$log" "results/logs/$side-$(basename "$log")"
+            done
+          done
+          cat results/summary.md
+
+      - name: Artifact name
+        run: echo "ARTIFACT=bench-$(echo "$TARGET" | tr '/' '-')" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: results/
+          retention-days: 30
+
+      # The rig's own branch must build and run everything. Another branch
+      # that breaks the rig's assumptions is reported above, not failed here:
+      # the numbers that could be taken are still worth having.
+      - name: Check the rig
+        if: matrix.branch == 'claude/bench-harness'
+        run: |
+          if [ -f "$RUNNER_TEMP/bin/target/FAILED" ]; then
+            echo "::error::the rig did not build: $(tr '\n' ' ' < "$RUNNER_TEMP/bin/target/FAILED")"
+            exit 1
+          fi
+          if grep -q "NOT MEASURED\|WRONG" results/target.jsonl; then
+            echo "::error::a benchmark did not run or produced a wrong result"
+            grep "NOT MEASURED\|WRONG" results/target.jsonl
+            exit 1
+          fi
+          test "$(grep -c '"metric"' results/target.jsonl)" -gt 50

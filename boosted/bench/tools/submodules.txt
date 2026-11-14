@@ -1,0 +1,15 @@
+# The submodules of the Xbox 360 core that the bench builds against, as paths
+# under x360/emulator-core/src/main/cpp/xenia/third_party. The app needs many
+# more; these are the ones the CPU, base and kernel sources include.
+boost_context/context
+capstone
+cxxopts
+date
+disruptorplus
+fmt
+pugixml
+tomlplusplus
+utfcpp
+xbyak_aarch64
+xxhash
+zlib-ng

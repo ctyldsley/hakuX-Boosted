@@ -1,0 +1,7 @@
+# Branches measured, besides claude/bench-harness itself, whenever the rig's
+# own branch is pushed. For branches that do not carry
+# .github/workflows/boosted-bench.yml (anything cut before the rig was
+# merged): once a branch has the workflow, its own pushes measure it.
+# One branch a line. A branch that does not exist is skipped.
+claude/guest-waits
+claude/translator-wide
