@@ -703,8 +703,11 @@ All marked `hakuX-Boosted:` at each change.
   The other two jobs green. Every line of the matrix passed, "16k,
   defaults" included, except the last, "everything, 16k", where the two
   processes that each held one 15,600-test file aborted in the same way.
-- The commit after it packs the 16 KiB lines by test count and slices the
-  large files. See the branch tip's run.
+- `44aac04` (the 16 KiB lines packed by test count, the large files in
+  slices): Actions run 131, **green, all three jobs**
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43625789049),
+  1 hour 39 minutes for the whole run. This is the commit that holds all
+  the code; the commit after it changes only this section.
 
 Local checks before each push, in the cloud session's container (x86-64,
 tests cross-compiled for ARM64 and run under qemu-aarch64 8.2): every line
