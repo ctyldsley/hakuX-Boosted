@@ -14,11 +14,9 @@
 # Markers at the end of the flags:
 #   #ignore=flags   leave the full flags hash out of the comparison
 #   #16k            run under qemu with 16 KiB pages (the phone's page size)
-#   #16k-mmap       the same, with glibc keeping allocations of 8 KiB and
-#                   more off the brk heap (see the notes: with every setting
-#                   on, a 16 KiB run aborts in glibc's allocator under qemu
-#                   without this, and the same run with 4 KiB pages does
-#                   not)
+#                   in 96 short processes: a long-lived process under
+#                   qemu at that page size aborts in glibc's allocator,
+#                   with every setting off as well (see the notes)
 #
 # Settings that already existed on claude/integration-1113:
 short backward branches     ; ^(seq_|instr_(add|cmp|b|l|st|m|f)) ; --a64_short_backward_branches=true
@@ -86,4 +84,4 @@ translate ahead             ; ^(seq_|instr_(add|cmp|b|l|st|m)) ; --translate_ahe
 
 # Everything a device run would turn on, together.
 everything                  ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --eliminate_dead_context_stores=2 --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_linked_calls=true --a64_stack_access_no_fixup=true --simplification_skip_unchanged_blocks=true --a64_compact_stackpoint_push=true --a64_thunk_fpcr_compare=true --ppc_mcrf_copies_field=true --propagate_context_constants=true --translate_ahead=true --translate_ahead_any_module=true
-everything, 16k             ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --eliminate_dead_context_stores=2 --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_linked_calls=true --a64_stack_access_no_fixup=true --simplification_skip_unchanged_blocks=true --a64_compact_stackpoint_push=true --a64_thunk_fpcr_compare=true --ppc_mcrf_copies_field=true --propagate_context_constants=true #16k-mmap
+everything, 16k             ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --eliminate_dead_context_stores=2 --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_linked_calls=true --a64_stack_access_no_fixup=true --simplification_skip_unchanged_blocks=true --a64_compact_stackpoint_push=true --a64_thunk_fpcr_compare=true --ppc_mcrf_copies_field=true --propagate_context_constants=true #16k

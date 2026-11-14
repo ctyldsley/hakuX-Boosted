@@ -41,9 +41,6 @@ describes:
 
 Not done (section 6 says why and how to go on):
 - More than three integer pins.
-- One open question from the tests: with every setting on at once and
-  16 KiB pages, the test run aborts inside glibc's allocator under qemu
-  (section 1, "Open").
 
 Next, in order:
 1. The device runs of section 5, one setting at a time, each with its
@@ -131,38 +128,40 @@ qemu can give the program 16 KiB pages (`qemu-aarch64 -p 16384`), the
 phone's page size. The translator then emits the address fix-up for guest
 addresses from 0xE0000000 at every computed load and store, as it does on
 the phone and does not on a 4 KiB host. Lines of the matrix that end in
-`#16k` run that way. With every setting at its default, all 141,886 tests
+`#16k` run that way, as many short processes (see the next heading). With every setting at its default, all 141,886 tests
 pass at 16 KiB and leave the same state as at 4 KiB.
 
-### Open: one abort at 16 KiB with everything on
+### The allocator abort at 16 KiB, and why it is qemu's
 
-With every setting on together and 16 KiB pages, one of the four shards
-aborts part-way through, always at the same place, inside glibc's allocator
-(`sysmalloc: assertion failed`, the check on the heap top's page alignment).
-What is known:
-- the same settings at 4 KiB pages: all 141,886 pass;
-- at 16 KiB, the defaults, and each of four groups of the settings on its
-  own (pinning; dead stores with fusion and short branches; linked calls;
-  the rest): all pass on that shard;
-- at 16 KiB with everything on and glibc told to keep allocations of 8 KiB
-  and more off the `brk` heap (`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=8192`):
-  all 141,886 pass with equal states. That is how the matrix line
-  "everything, 16k" runs (`#16k-mmap`).
-
-- with glibc's heap checker loaded
+A long test process under qemu with 16 KiB pages can abort inside glibc's
+allocator (`sysmalloc: assertion failed`, the check on the heap top's page
+alignment). It first showed in the cloud session with every setting on,
+always in the same shard at the same place, and looked like it might be a
+heap overrun in this branch's code. It is not:
+- On GitHub's runner (Actions run 129) the line "16k, defaults" aborted the
+  same way, with **every translator setting off**. That line had passed in
+  the cloud session; the two machines differ only in how much heap the
+  process had been through by then.
+- With glibc's heap checker loaded
   (`LD_PRELOAD=libc_malloc_debug.so.0 MALLOC_CHECK_=3`, which aborts when a
   block is freed whose end was written past, and which was seen to catch a
-  one-byte overrun under this qemu): everything on passes all 141,886 at
-  4 KiB and at 16 KiB, with no report.
+  one-byte overrun under this qemu), everything on passes all the tests at
+  4 KiB and at 16 KiB with no report.
+- The same settings at 4 KiB pages pass in one process per shard.
+- The configuration that aborted every time in the cloud session (16 KiB,
+  everything on, four processes) passes all 141,899 tests when the same
+  work is split over 48 processes, with no allocator setting.
 
-So it follows the amount of heap the run uses at a page size that is not
-the host's, which is what a fault in qemu's emulation of `brk` looks like;
-it does not follow any one setting; and the heap checker finds no overrun
-with the same settings. It was not proved to be qemu's. The remaining
-check is a run of the tests built with AddressSanitizer on real ARM64
-hardware (it does not start under this qemu). Until then, "everything on"
-has been checked at 4 KiB without reservation and at 16 KiB with either of
-those allocator settings.
+So the abort follows how much heap one emulated process has been through
+at a page size that is not the host's. The `#16k` lines of the matrix
+therefore run as 96 short processes (`SHARDS`, `run-tests.sh`). Telling
+glibc to keep large allocations off the `brk` heap, which the first version
+of the matrix did for the everything-on line, hid it in the cloud session
+and not on GitHub's runner, and is gone.
+
+An AddressSanitizer run on real ARM64 hardware is still worth having as a
+general check of the translator (it does not start under this qemu), but
+nothing now points at a fault for it to find.
 
 ### What the tests do not cover
 
@@ -609,8 +608,8 @@ paths).
 - **The scheduler's yield through the lean thunk, scalar NaN handling as a
   setting, a translation cache on disc**: the study's R4.3, R8 and R6,
   untouched.
-- **The abort at 16 KiB with everything on** (section 1, "Open"): an
-  AddressSanitizer build of the test runner would settle it.
+- **An AddressSanitizer run of the tests.** It does not start under qemu
+  here; it needs real ARM64 hardware (next item).
 - **A native ARM64 runner.** The job runs under qemu on the x86 runner
   because whether this repository can use GitHub's `ubuntu-24.04-arm`
   runners was not known, and a job waiting for a runner that never comes
@@ -682,12 +681,16 @@ All marked `hakuX-Boosted:` at each change.
 - `5db5308` (steps 1 and 2): Actions run 127, green, all three jobs
   (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43579735396).
   The translator tests took 85 minutes there with that commit's matrix.
-- `0b682e8` (steps 3 and 4 without the constant pass): Actions run 128
-  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43592153452).
-- The commit after it adds the constant pass, its tests, the code size in
-  the state dump and this file's last sections. See the branch tip's run;
-  if it is not green, the last green commit above holds everything before
-  it.
+- `0b682e8` (steps 3 and 4 without the constant pass): run 128, cancelled
+  by the next push before it finished.
+- `0e22ed5` (everything): Actions run 129
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43596642477).
+  The other two jobs green. In the translator tests every line at 4 KiB
+  pages passed, "everything" among them; the two lines over all tests at
+  16 KiB aborted in glibc's allocator under qemu, one of them with every
+  setting off (section 1 has what that showed).
+- The commit after it runs the 16 KiB lines as short processes. See the
+  branch tip's run.
 
 Local checks before each push, in the cloud session's container (x86-64,
 tests cross-compiled for ARM64 and run under qemu-aarch64 8.2): every line

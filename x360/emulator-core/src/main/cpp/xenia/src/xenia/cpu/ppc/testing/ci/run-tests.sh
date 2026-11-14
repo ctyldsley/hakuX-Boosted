@@ -6,6 +6,9 @@
 #
 # Environment:
 #   JOBS     shards to run at once (default: the number of cores)
+#   SHARDS   how many shards (processes) to split the suites over (default:
+#            JOBS). More shards than jobs means shorter-lived processes, run
+#            JOBS at a time.
 #   WRAPPER  a command to run the binary under, for example
 #            "qemu-aarch64 -L /usr/aarch64-linux-gnu" on a host that is not ARM64
 #   SUITES   a regular expression over suite names (instr_add, seq_branch_carry):
@@ -37,9 +40,10 @@ trap 'rm -rf "$work"' EXIT
 ls -S "$bins"/*.bin | xargs -n1 basename | sed 's/\.bin$//' \
   | grep -E "${SUITES:-.}" > "$work/all"
 if [ ! -s "$work/all" ]; then echo "no test suite matches"; exit 1; fi
+shards=${SHARDS:-$jobs}
 i=0
 while read -r suite; do
-  echo "$suite" >> "$work/shard.$((i % jobs))"
+  echo "$suite" >> "$work/shard.$((i % shards))"
   i=$((i + 1))
 done < "$work/all"
 
@@ -78,8 +82,10 @@ for shard in "$work"/shard.*; do
     echo $? > "$shard.status"
   ) &
   pids+=($!)
+  # At most $jobs at a time.
+  while [ "$(jobs -rp | wc -l)" -ge "$jobs" ]; do wait -n || true; done
 done
-wait "${pids[@]}"
+wait "${pids[@]}" 2>/dev/null || true
 
 total=0; passed=0; failed=0; bad=0
 for shard in "$work"/shard.[0-9]*; do
