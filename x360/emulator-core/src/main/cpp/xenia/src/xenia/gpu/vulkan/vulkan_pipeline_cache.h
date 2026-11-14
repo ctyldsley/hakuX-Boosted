@@ -453,6 +453,16 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // its stand-in pixel shader reads the interpolators at their own locations.
   bool IsInterpreterProgram() const { return interpreter_program_; }
 
+  // hakuX-Boosted: whether a tessellated draw whose guest vertex shader has
+  // this modification (its host vertex shader type is a triangle or quad
+  // domain) can have a placeholder of the guest shader interpreter, version
+  // 2: vulkan_placeholder_interpreter_tessellation was on at start-up and the
+  // tessellation evaluation module of that domain and spacing was made.
+  bool CanInterpretDomain(uint64_t vertex_shader_modification) const {
+    return GetInterpreterDomainShader(vertex_shader_modification) !=
+           VK_NULL_HANDLE;
+  }
+
   // Whether ConfigurePipeline will create the pipeline asynchronously (so the
   // draw thread must not translate shaders itself). Matches the use_async
   // condition inside ConfigurePipeline. has_pixel_shader because the async
@@ -956,6 +966,31 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
                : (stand_in ? ucode_interpreter_stand_in_vs_
                            : ucode_interpreter_vs_);
   }
+  // hakuX-Boosted: the guest shader interpreter, version 2, as the
+  // tessellation evaluation shader of a tessellated draw
+  // (shaders/ucode_program_*.ds.glsl), made only with
+  // vulkan_placeholder_interpreter_tessellation. By domain (triangles with
+  // indexed control points, triangles indexed by patch, quads with indexed
+  // control points, quads indexed by patch), then by spacing: [0] equal, as
+  // compiled, for the discrete mode; [1] a copy with the execution mode
+  // changed to fractional even spacing, for the continuous and adaptive
+  // modes. As SpirvShaderTranslator chooses them for the translated shader.
+  static constexpr uint32_t kInterpreterDomainCount = 4;
+  VkShaderModule ucode_program_ds_[kInterpreterDomainCount][2] = {};
+  // The module for a guest vertex shader modification, or VK_NULL_HANDLE if
+  // its host vertex shader type is not one of those domains or the module
+  // does not exist.
+  VkShaderModule GetInterpreterDomainShader(
+      uint64_t vertex_shader_modification) const;
+  // The interpreter's module that runs the guest vertex shader in a
+  // placeholder of a pipeline with this vertex shader modification: the
+  // tessellation evaluation shader of a tessellated draw, otherwise the
+  // vertex shader. VK_NULL_HANDLE if there is none.
+  VkShaderModule GetInterpreterShader(uint64_t vertex_shader_modification,
+                                      bool stand_in) const;
+  // For the log: whether a module is one of version 2's, and its size.
+  bool IsInterpreterProgramModule(VkShaderModule shader_module,
+                                  size_t& spirv_bytes_out) const;
   VkShaderModule stand_in_pixel_shaders_[3][2] = {};
   std::unordered_map<uint32_t, VkShaderModule> stand_in_pixel_shaders_moved_;
 

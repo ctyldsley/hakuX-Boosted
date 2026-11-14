@@ -3896,6 +3896,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // use it, and whether it can hold this draw's vertex shader.
   const bool interpreter_program = pipeline_cache_->IsInterpreterProgram();
   bool interpreter_program_fits = false;
+  // hakuX-Boosted: a tessellated draw whose tessellation evaluation shader
+  // that interpreter can be (vulkan_placeholder_interpreter_tessellation).
+  bool interpreter_domain = false;
   bool drop_until_ready = false;
   // hakuX-Boosted: a full-screen pass that waits for its real pipeline instead
   // of being drawn with a placeholder (vulkan_placeholder_wait_fullscreen_ms).
@@ -4045,6 +4048,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           !(program.features & ucode_program::kFeatureMalformed) &&
           program.element_count() != 0 &&
           program.element_count() <= ucode_program::kCodeElements;
+      interpreter_domain =
+          pipeline_cache_->CanInterpretDomain(vertex_shader_modification.value);
     }
     use_interpreter =
         cvars::vulkan_placeholder_pipelines &&
@@ -4066,13 +4071,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         device_properties.fullDrawIndexUint32 &&
         SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
             device_properties.maxStorageBufferRange) == 0 &&
-        primitive_processing_result.host_vertex_shader_type ==
-            Shader::HostVertexShaderType::kVertex &&
+        // hakuX-Boosted: or a triangle or quad domain, with version 2 as
+        // the tessellation evaluation shader.
+        (primitive_processing_result.host_vertex_shader_type ==
+             Shader::HostVertexShaderType::kVertex ||
+         interpreter_domain) &&
         primitive_processing_result.host_primitive_type !=
             xenos::PrimitiveType::kPointList &&
         // hakuX-Boosted: rectangle and quad lists can have the interpreter
-        // too, with a geometry shader made for it (ConfigurePipeline).
-        (cvars::vulkan_placeholder_interpreter_geometry ||
+        // too, with a geometry shader made for it (ConfigurePipeline). (A
+        // tessellated quad list is patches and has no geometry shader.)
+        (cvars::vulkan_placeholder_interpreter_geometry || interpreter_domain ||
          (primitive_processing_result.host_primitive_type !=
               xenos::PrimitiveType::kRectangleList &&
           primitive_processing_result.host_primitive_type !=
@@ -4346,7 +4355,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     if (Shader::IsHostVertexShaderTypeDomain(
             primitive_processing_result.host_vertex_shader_type)) {
-      reasons |= VulkanPipelineCache::kSkipTessellated;
+      if (!interpreter_domain) {
+        reasons |= VulkanPipelineCache::kSkipTessellated;
+      }
     } else if (primitive_processing_result.host_vertex_shader_type !=
                Shader::HostVertexShaderType::kVertex) {
       reasons |= VulkanPipelineCache::kSkipHostVertexShaderType;
@@ -4356,6 +4367,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       reasons |= VulkanPipelineCache::kSkipPointList;
     }
     if (!cvars::vulkan_placeholder_interpreter_geometry &&
+        !interpreter_domain &&
         (primitive_processing_result.host_primitive_type ==
              xenos::PrimitiveType::kRectangleList ||
          primitive_processing_result.host_primitive_type ==
