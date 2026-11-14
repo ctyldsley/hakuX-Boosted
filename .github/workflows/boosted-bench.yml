@@ -1,0 +1,371 @@
+# hakuX-Boosted: the benchmark rig (boosted/bench). Builds the Xbox 360
+# core's CPU, scheduler and kernel-object sources for ARM64 Linux, runs the
+# rig's benchmarks on GitHub's ARM64 runner and prints the numbers, next to
+# those of claude/integration-1113 built and run in the same job.
+#
+# What it says and does not say about a phone: boosted/notes/bench-harness.md.
+name: hakuX-Boosted bench
+
+on:
+  push:
+    branches:
+      - 'claude/**'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to measure (empty = the branch this is run from)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: boosted-bench-${{ github.ref }}-${{ inputs.branch }}
+  cancel-in-progress: true
+
+env:
+  BASELINE: claude/integration-1113
+  CORE: x360/emulator-core/src/main/cpp
+  CCACHE_COMPILERCHECK: content
+  CCACHE_NOHASHDIR: 'true'
+  CCACHE_MAXSIZE: 600M
+
+jobs:
+  # Which branches this run measures. A dispatch measures the branch it
+  # names. A push measures the branch pushed to; a push to the rig's own
+  # branch also measures the branches listed in boosted/bench/branches.txt
+  # (branches that do not carry this workflow yet), each in a job of its own.
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      branches: ${{ steps.plan.outputs.branches }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          INPUT_BRANCH: ${{ inputs.branch }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          list=()
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            list+=("${INPUT_BRANCH:-$REF_NAME}")
+          else
+            list+=("$REF_NAME")
+            if [ "$REF_NAME" = "claude/bench-harness" ] && [ -f boosted/bench/branches.txt ]; then
+              while read -r branch; do
+                case "$branch" in ''|\#*) continue ;; esac
+                if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+                  list+=("$branch")
+                else
+                  echo "::notice::branch $branch (boosted/bench/branches.txt) does not exist, skipped"
+                fi
+              done < boosted/bench/branches.txt
+            fi
+          fi
+          json=$(printf '%s\n' "${list[@]}" | awk '!seen[$0]++' | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
+          echo "branches=$json" >> "$GITHUB_OUTPUT"
+          echo "Measuring: $json"
+
+  # The host primitives once more against bionic, Android's own libc and
+  # dynamic linker: in a Termux container (github.com/termux/termux-docker,
+  # which carries Android's /system) on the same runner, with the glibc build
+  # of the same program run beside it. This is as near as a runner gets to
+  # the linker's tlsdesc_resolver_dynamic that the phone's profile shows; the
+  # CPU is still the runner's. Not needed for the rest: a failure here (the
+  # image, its package mirror) is reported and does not fail the run.
+  bionic:
+    name: Primitives on bionic
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'claude/bench-harness'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: The fcontext sources
+        run: git submodule update --init --depth 1 -- "$CORE/xenia/third_party/boost_context/context"
+
+      - name: Build and run on glibc
+        run: |
+          mkdir -p results
+          if command -v clang++ > /dev/null; then cc=clang; cxx=clang++; else cc=gcc; cxx=g++; fi
+          if [ "$cxx" = clang++ ] && ! echo 'int main(){}' | clang++ -x c++ -stdlib=libc++ - -o /tmp/libcxx-probe 2> /dev/null; then
+            sudo timeout 240 apt-get -o Acquire::Retries=2 update > /dev/null 2>&1 || true
+            sudo timeout 240 apt-get install -y --no-install-recommends libc++-dev libc++abi-dev > /dev/null 2>&1 || true
+          fi
+          boosted/bench/prim/build-plain.sh "$RUNNER_TEMP/prim-glibc" "$cc" "$cxx"
+          cd "$RUNNER_TEMP/prim-glibc"
+          for round in 1 2; do
+            BENCH_OUT="$GITHUB_WORKSPACE/results/glibc.jsonl" LD_LIBRARY_PATH=. \
+              ./bench_prim ./libprim_tls_dyn.so
+          done
+
+      - name: Build and run on bionic
+        run: |
+          docker run --rm -v "$PWD:/src:ro" termux/termux-docker:aarch64 bash -c '
+            set -e
+            (pkg update -y && pkg install -y clang) > "$HOME/pkg.log" 2>&1 || { tail -40 "$HOME/pkg.log"; exit 1; }
+            clang --version | head -2
+            export BENCH_OUT="$HOME/results.jsonl"
+            # Termux targets an API level at which clang emulates
+            # thread-locals with pthread keys. The app is built for a level
+            # with real ELF TLS (the profile shows the TLS descriptor
+            # resolver), so that is tried first; whether this container'"'"'s
+            # linker is new enough for it is found out by running it.
+            if PRIM_EXTRA_FLAGS=-fno-emulated-tls bash /src/boosted/bench/prim/build-plain.sh "$HOME/prim-elf" clang clang++ \
+               && cd "$HOME/prim-elf" \
+               && BENCH_PRIM_SECTION=prim-bionic LD_LIBRARY_PATH=. ./bench_prim ./libprim_tls_dyn.so; then
+              BENCH_PRIM_SECTION=prim-bionic LD_LIBRARY_PATH=. ./bench_prim ./libprim_tls_dyn.so
+            else
+              echo "{\"section\":\"prim-bionic\",\"name\":\"elf_tls\",\"note\":\"NOT MEASURED: a program built with real ELF thread-locals does not build or run against this container bionic\"}" >> "$BENCH_OUT"
+            fi
+            bash /src/boosted/bench/prim/build-plain.sh "$HOME/prim-emu" clang clang++
+            cd "$HOME/prim-emu"
+            for round in 1 2; do
+              BENCH_PRIM_SECTION=prim-bionic-emutls LD_LIBRARY_PATH=. ./bench_prim ./libprim_tls_dyn.so
+            done
+            echo "=====RESULTS====="
+            cat "$BENCH_OUT"
+          ' 2>&1 | tee results/container.log | grep -v "ns_per_op" || true
+          sed -n '/^=====RESULTS=====$/,$p' results/container.log | tail -n +2 > results/bionic.jsonl
+          test -s results/bionic.jsonl
+
+      - name: Report
+        if: always()
+        run: |
+          cat results/glibc.jsonl results/bionic.jsonl > results/both.jsonl 2> /dev/null || true
+          if [ -s results/both.jsonl ]; then
+            python3 boosted/bench/tools/report.py --target results/both.jsonl \
+              --target-name "this runner" \
+              --title "Host primitives: glibc and bionic on one runner" \
+              --out results/report.md >> "$GITHUB_STEP_SUMMARY"
+            python3 boosted/bench/tools/report.py --target results/both.jsonl --digest
+          fi
+          if [ ! -s results/bionic.jsonl ]; then
+            echo "> The bionic run did not produce numbers; see the job log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-primitives-bionic
+          path: results/
+          retention-days: 30
+
+  bench:
+    name: Bench ${{ matrix.branch }}
+    needs: plan
+    # GitHub's hosted ARM64 Linux runner (free for public repositories).
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(needs.plan.outputs.branches) }}
+    steps:
+      # The rig itself always comes from the commit the workflow runs on.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: The runner
+        run: |
+          uname -a
+          lscpu | head -20
+          nproc
+          free -g | head -2
+
+      - name: Sources to measure
+        env:
+          TARGET: ${{ matrix.branch }}
+        run: |
+          set -e
+          git fetch --no-tags --depth 1 origin \
+            "+refs/heads/$TARGET:refs/remotes/origin/$TARGET" \
+            "+refs/heads/$BASELINE:refs/remotes/origin/$BASELINE"
+          # only the submodules the bench builds against
+          paths=()
+          while read -r sub; do
+            case "$sub" in ''|\#*) continue ;; esac
+            paths+=("$CORE/xenia/third_party/$sub")
+          done < boosted/bench/tools/submodules.txt
+          git submodule update --init --depth 1 --jobs 8 -- "${paths[@]}"
+          boosted/bench/tools/prepare-tree.sh "origin/$TARGET" "$RUNNER_TEMP/trees/target"
+          boosted/bench/tools/prepare-tree.sh "origin/$BASELINE" "$RUNNER_TEMP/trees/baseline"
+          target_tree=$(git rev-parse "origin/$TARGET:$CORE")
+          baseline_tree=$(git rev-parse "origin/$BASELINE:$CORE")
+          echo "TARGET=$TARGET" >> "$GITHUB_ENV"
+          echo "TARGET_SHA=$(git rev-parse --short "origin/$TARGET")" >> "$GITHUB_ENV"
+          echo "BASELINE_SHA=$(git rev-parse --short "origin/$BASELINE")" >> "$GITHUB_ENV"
+          if [ "$target_tree" = "$baseline_tree" ]; then
+            echo "SAME_SOURCES=true" >> "$GITHUB_ENV"
+          else
+            echo "SAME_SOURCES=false" >> "$GITHUB_ENV"
+            git diff --stat "origin/$BASELINE" "origin/$TARGET" -- "$CORE" | tail -30 || true
+          fi
+
+      - name: Tools
+        run: |
+          missing=()
+          for tool in clang:clang ninja:ninja-build ccache:ccache cmake:cmake; do
+            command -v "${tool%%:*}" > /dev/null || missing+=("${tool##*:}")
+          done
+          # libc++, the C++ library the app is built against
+          if ! echo 'int main(){}' | clang++ -x c++ -stdlib=libc++ - -o /tmp/libcxx-probe 2> /dev/null; then
+            missing+=(libc++-dev libc++abi-dev)
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            sudo timeout 240 apt-get -o Acquire::Retries=2 update || true
+            sudo timeout 240 apt-get install -y --no-install-recommends "${missing[@]}"
+          fi
+          clang --version | head -1
+          cmake --version | head -1
+          # lets the benchmarks count instructions where the CPU allows it
+          sudo sysctl -w kernel.perf_event_paranoid=1 || true
+
+      - name: Compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: boosted-bench-ccache-${{ matrix.branch }}-${{ github.run_id }}
+          restore-keys: |
+            boosted-bench-ccache-${{ matrix.branch }}-
+            boosted-bench-ccache-
+
+      # Both builds use the same build directory and reach their sources
+      # through the same link, so the compiler cache serves the second build
+      # every file the two branches share.
+      - name: Build against the measured branch
+        run: |
+          export CCACHE_BASEDIR="$RUNNER_TEMP" CCACHE_DIR="$HOME/.cache/ccache"
+          ccache -z > /dev/null || true
+          ln -sfn "$RUNNER_TEMP/trees/target" "$RUNNER_TEMP/tree"
+          boosted/bench/tools/ci-build.sh "$PWD/boosted/bench" "$RUNNER_TEMP/tree" \
+            "$RUNNER_TEMP/build" "$RUNNER_TEMP/bin/target"
+          ccache -s | head -12 || true
+
+      - name: Build against the baseline
+        if: env.TARGET != env.BASELINE && env.SAME_SOURCES != 'true'
+        run: |
+          export CCACHE_BASEDIR="$RUNNER_TEMP" CCACHE_DIR="$HOME/.cache/ccache"
+          ccache -z > /dev/null || true
+          ln -sfn "$RUNNER_TEMP/trees/baseline" "$RUNNER_TEMP/tree"
+          boosted/bench/tools/ci-build.sh "$PWD/boosted/bench" "$RUNNER_TEMP/tree" \
+            "$RUNNER_TEMP/build" "$RUNNER_TEMP/bin/baseline"
+          ccache -s | head -12 || true
+
+      - name: Run
+        run: |
+          mkdir -p results
+          rounds=3
+          if [ "$TARGET" = "$BASELINE" ]; then
+            boosted/bench/run.sh "$RUNNER_TEMP/bin/target" results/target.jsonl $rounds || true
+          else
+            # The same sources as the baseline: the same programs run twice,
+            # which shows how much two runs differ on this machine.
+            [ "$SAME_SOURCES" = "true" ] && ln -sfn "$RUNNER_TEMP/bin/target" "$RUNNER_TEMP/bin/baseline"
+            # Turn about, so drift on the machine falls on both alike.
+            for round in $(seq 1 $rounds); do
+              boosted/bench/run.sh "$RUNNER_TEMP/bin/target" results/target.jsonl 1 || true
+              boosted/bench/run.sh "$RUNNER_TEMP/bin/baseline" results/baseline.jsonl 1 || true
+            done
+          fi
+
+      - name: Report
+        run: |
+          args=(--target results/target.jsonl --target-name "$TARGET"
+                --title "Bench: $TARGET at $TARGET_SHA"
+                --out results/report.md --json-out results/target.json)
+          if [ -f results/baseline.jsonl ]; then
+            args+=(--baseline results/baseline.jsonl --baseline-name "$BASELINE")
+          fi
+          {
+            python3 boosted/bench/tools/report.py "${args[@]}"
+            if [ "$TARGET" != "$BASELINE" ] && [ "$SAME_SOURCES" = "true" ]; then
+              echo "> The core sources of \`$TARGET\` are the same as \`$BASELINE\`'s: both columns are the same programs, run turn about. The \"change\" column is this runner's noise."
+              echo
+            fi
+            for side in target baseline; do
+              if [ -f "$RUNNER_TEMP/bin/$side/FAILED" ] && [ ! -L "$RUNNER_TEMP/bin/$side" ]; then
+                echo "> **Build failure ($side):** $(tr '\n' ' ' < "$RUNNER_TEMP/bin/$side/FAILED"). The build log is in the artifact."
+                echo
+              fi
+            done
+          } | tee -a results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p results/logs
+          for side in target baseline; do
+            [ -L "$RUNNER_TEMP/bin/$side" ] && continue
+            for log in "$RUNNER_TEMP/bin/$side"/*.log; do
+              [ -f "$log" ] && cp "$log" "results/logs/$side-$(basename "$log")"
+            done
+          done
+          cat results/summary.md
+
+      # The rig's own branch must build and run everything. Another branch
+      # that breaks the rig's assumptions is reported above, not failed here:
+      # the numbers that could be taken are still worth having.
+      - name: Check the rig
+        if: matrix.branch == 'claude/bench-harness'
+        run: |
+          if [ -f "$RUNNER_TEMP/bin/target/FAILED" ]; then
+            echo "::error::the rig did not build: $(tr '\n' ' ' < "$RUNNER_TEMP/bin/target/FAILED")"
+            exit 1
+          fi
+          if grep -q "NOT libc++" results/target.jsonl; then
+            echo "::error::the rig was not built against libc++"
+            exit 1
+          fi
+          if grep -q "NOT MEASURED\|WRONG" results/target.jsonl; then
+            echo "::error::a benchmark did not run or produced a wrong result"
+            grep "NOT MEASURED\|WRONG" results/target.jsonl
+            exit 1
+          fi
+          test "$(grep -c '"metric"' results/target.jsonl)" -gt 50
+
+      # What the kernel is asked for during one benchmark, for a result that
+      # needs explaining (an event handed between two threads on one guest
+      # CPU). Only on the rig's own branch; never fails the job.
+      - name: Diagnostics
+        if: always() && matrix.branch == 'claude/bench-harness'
+        run: |
+          command -v strace > /dev/null || sudo timeout 120 apt-get install -y --no-install-recommends strace > /dev/null 2>&1 || true
+          command -v strace > /dev/null || exit 0
+          for only in wait_wake_round_trip_one_cpu wait_wake_round_trip_two_cpus yield_other_ready; do
+            BENCH_OUT="results/strace-$only.jsonl" BENCH_SCHED_ONLY=$only BENCH_SCHED_SAMPLES=2 \
+              strace -f -c -o "results/strace-$only.txt" \
+              "$RUNNER_TEMP/bin/target/core/bench_core" --suite=sched --label=diagnostic > /dev/null 2>&1 || true
+          done
+
+      - name: Artifact name
+        run: echo "ARTIFACT=bench-$(echo "$TARGET" | tr '/' '-')" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: results/
+          retention-days: 30
+
+      # The numbers once more in a few lines, a row a benchmark and a column
+      # a setting: for reading from the raw job log.
+      - name: Digest
+        if: always()
+        run: |
+          # fewer lines after this in the log: nothing for the checkout's
+          # clean-up to walk through
+          git submodule deinit -f --all > /dev/null 2>&1 || true
+          for file in results/strace-*.txt; do
+            [ -f "$file" ] || continue
+            passes=$(grep -o '"ns_per_op","value":[0-9.e+]*' "${file%.txt}.jsonl" 2> /dev/null | head -1 | cut -d: -f2)
+            echo "== system calls, $(basename "$file" .txt | sed 's/strace-//'), ns per pass under strace: ${passes:-?} (seconds, calls, name)"
+            awk 'NR > 2 && $1 ~ /^[0-9.]+$/ && n < 6 { print $2, $4, $NF; n++ }' "$file"
+          done
+          args=(--target results/target.jsonl --digest)
+          [ -f results/baseline.jsonl ] && args+=(--baseline results/baseline.jsonl)
+          python3 boosted/bench/tools/report.py "${args[@]}" || true
