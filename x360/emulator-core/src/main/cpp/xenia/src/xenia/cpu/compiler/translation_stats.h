@@ -11,6 +11,7 @@
 #define XENIA_CPU_COMPILER_TRANSLATION_STATS_H_
 
 #include <atomic>
+#include <string>
 #include <cstdint>
 
 namespace xe {
@@ -41,8 +42,26 @@ struct TranslationStats {
   std::atomic<uint64_t> pin_resume_entries{0};
   // Run time: mismatches reported by a64_pin_verify.
   std::atomic<uint64_t> pin_verify_mismatches{0};
-  // Which guest register each pinned integer slot was (r0..r31, 32 = ctr).
-  std::atomic<uint64_t> pin_by_gpr[33];
+  // Which guest register each pinned integer slot was (r0..r31, 32 = ctr,
+  // 33 = lr).
+  std::atomic<uint64_t> pin_by_gpr[34];
+  // pin_guest_registers_wide.
+  std::atomic<uint64_t> pin_functions_pinned_no_loop{0};
+  std::atomic<uint64_t> pin_flag_slots{0};
+  // Static: the loads and stores emitted to keep pinned registers and the
+  // context in step (at entry, round calls, at exits), to set against
+  // pin_loads and pin_stores.
+  std::atomic<uint64_t> pin_sync_loads{0};
+  std::atomic<uint64_t> pin_sync_stores{0};
+  // Static: blocks translated in functions with and without pinned
+  // registers.
+  std::atomic<uint64_t> blocks_pinned{0};
+  std::atomic<uint64_t> blocks_unpinned{0};
+  // Run time, only counted in code translated with log_translation_stats
+  // on: blocks executed in functions with and without pinned registers.
+  // Plain memory the translated code increments without a lock.
+  uint64_t blocks_run_pinned = 0;
+  uint64_t blocks_run_unpinned = 0;
 
   // simplification_skip_unchanged_blocks.
   std::atomic<uint64_t> simplify_block_walks{0};
@@ -53,6 +72,11 @@ struct TranslationStats {
 };
 
 extern TranslationStats translation_stats;
+
+// The TranslationStats lines as text, now (log_translation_stats logs them
+// every 2048 functions; a short run, a test run among them, ends before
+// that).
+std::string FormatTranslationStats();
 
 }  // namespace compiler
 }  // namespace cpu

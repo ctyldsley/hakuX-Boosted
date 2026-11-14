@@ -19,3 +19,11 @@ pinning, 3 integer          ; ^(seq_|instr_(add|sub|mul|div|rl|sl|sr|cmp|and|or|
 preempt checks              ; ^(seq_|instr_(b|add|cmp|l|st)) ; --guest_scheduler=true
 preempt checks, pinning     ; ^(seq_|instr_(b|add|cmp|l|st)) ; --guest_scheduler=true --pin_guest_registers=true
 mcrf, exact                 ; ^(seq_|instr_m) ; --ppc_mcrf_copies_field=true
+
+# Wide pinning (this branch). The verify lines keep the context
+# authoritative and compare every pinned register with it at each read.
+wide pinning (verify)       ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --a64_pin_verify=true
+wide pinning                ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true
+wide pinning, all (verify)  ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --pin_guest_registers_max_vec=16 --a64_pin_verify=true
+wide pinning, all           ; . ; --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true --pin_guest_registers_max_int=3 --pin_guest_registers_max_vec=16
+wide pinning, preempt       ; ^(seq_|instr_(b|add|cmp|l|st)) ; --guest_scheduler=true --pin_guest_registers=true --pin_guest_registers_wide=true --pin_guest_registers_flags=true

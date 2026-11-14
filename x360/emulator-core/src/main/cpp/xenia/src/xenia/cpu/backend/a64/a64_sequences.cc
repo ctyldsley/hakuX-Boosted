@@ -217,6 +217,15 @@ struct LOAD_CONTEXT_I8
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // ldrb wD, [x20, #offset]
     auto offset = static_cast<uint32_t>(i.src1.value);
+    // hakuX-Boosted: a pinned flag byte is read from its host register,
+    // which holds it zero-extended as ldrb would deliver it.
+    if (auto pin = e.FindPinnedGuestRegister(offset, hir::INT8_TYPE)) {
+      if (e.pin_verify()) {
+        e.EmitPinnedVerify(*pin);
+      }
+      e.mov(i.dest, WReg(pin->host_reg));
+      return;
+    }
     e.ldrb(i.dest, ptr(e.GetContextReg(), offset));
   }
 };
@@ -300,6 +309,20 @@ struct STORE_CONTEXT_I8
                I<OPCODE_STORE_CONTEXT, VoidOp, OffsetOp, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto offset = static_cast<uint32_t>(i.src1.value);
+    // hakuX-Boosted: as STORE_CONTEXT_I64. The upper bits of an 8-bit value
+    // in a register are not defined, so the byte is zero-extended into the
+    // pin: every later read sees what a load from the context would give.
+    if (auto pin = e.FindPinnedGuestRegister(offset, hir::INT8_TYPE)) {
+      if (i.src2.is_constant) {
+        e.mov(WReg(pin->host_reg),
+              static_cast<uint64_t>(i.src2.constant() & 0xFF));
+      } else {
+        e.uxtb(WReg(pin->host_reg), i.src2);
+      }
+      if (!e.pin_verify()) {
+        return;
+      }
+    }
     if (i.src2.is_constant) {
       e.mov(e.w0, static_cast<uint64_t>(i.src2.constant() & 0xFF));
       e.strb(e.w0, ptr(e.GetContextReg(), offset));

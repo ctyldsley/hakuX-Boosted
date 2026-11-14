@@ -194,9 +194,10 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // above A64Emitter::EmitPinnedFlush in a64_emitter.cc for the rules.
   struct PinnedGuestRegister {
     uint32_t offset;    // offset in PPCContext
-    hir::TypeName type;  // INT64_TYPE, FLOAT64_TYPE or VEC128_TYPE
+    hir::TypeName type;  // INT64_TYPE, INT8_TYPE, FLOAT64_TYPE or VEC128_TYPE
     uint32_t host_reg;  // x or v register number
     bool written;       // the function stores to it
+    uint32_t bit;       // its bit in the masks below
   };
   // The pinned register for a context access of exactly this offset and
   // type, or null. Always null when nothing is pinned.
@@ -212,20 +213,25 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // a64_pin_verify: stores to pinned registers also go to the context, and
   // loads compare the two.
   bool pin_verify() const { return pin_verify_; }
-  // Context <- pinned registers (those the function writes).
-  void EmitPinnedFlush();
-  // Pinned registers <- context.
-  void EmitPinnedReload();
+  // Context <- the pinned registers named by the mask.
+  void EmitPinnedFlush(uint32_t mask);
+  // The pinned registers named by the mask <- context.
+  void EmitPinnedReload(uint32_t mask);
+  // What a write-back and a reload at the instruction being emitted cover:
+  // without pin_guest_registers_wide every register the function writes and
+  // every register; with it, what the pass worked out for this instruction.
+  uint32_t pin_flush_mask() const { return pin_cur_dirty_; }
+  uint32_t pin_reload_mask() const { return pin_cur_live_after_; }
   // Round a host function called with a bare blr instead of through the
   // guest-to-host thunk (which is where CallNativeSafe does this itself).
   void EmitPinnedSyncBeforeBareHostCall() {
     if (pins_live_) {
-      EmitPinnedFlush();
+      EmitPinnedFlush(pin_cur_dirty_);
     }
   }
   void EmitPinnedSyncAfterBareHostCall() {
     if (pins_live_) {
-      EmitPinnedReload();
+      EmitPinnedReload(pin_cur_live_after_);
     }
   }
   // a64_pin_verify: compare the pinned register with the context copy and
@@ -291,10 +297,20 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // from the end of the prologue to the last body instruction.
   bool pins_live_ = false;
   bool pin_verify_ = false;
+  // hakuX-Boosted: the masks for the instruction being emitted (see
+  // pin_flush_mask), and the reload mask of the last instruction that was a
+  // way out and back in, for the resume stub of its return site.
+  uint32_t pin_cur_dirty_ = 0;
+  uint32_t pin_cur_live_after_ = 0;
+  uint32_t pin_last_sync_reload_ = 0;
+  // log_translation_stats: count executed blocks (see EmitBlockCounter).
+  bool count_blocks_ = false;
+  void EmitBlockCounter();
   struct PinnedResumeStub {
     uint32_t guest_address;
     Xbyak_aarch64::Label* target;
     uint32_t code_offset;
+    uint32_t reload_mask;
   };
   std::vector<PinnedResumeStub> pinned_resume_stubs_;
 

@@ -35,6 +35,9 @@ class GuestRegisterPinningPass : public CompilerPass {
   bool Run(hir::HIRBuilder* builder) override;
 
  private:
+  // pin_guest_registers_wide: see the comment above its definition.
+  bool RunWide(hir::HIRBuilder* builder);
+
   uint32_t int_register_count_ = 0;
   uint32_t vec_register_count_ = 0;
 };

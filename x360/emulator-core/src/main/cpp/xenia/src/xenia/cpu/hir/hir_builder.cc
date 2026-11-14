@@ -75,6 +75,7 @@ void HIRBuilder::Reset() {
   locals_.clear();
   // hakuX-Boosted
   pinned_context_slots_.clear();
+  pin_sync_.Clear();
   pass_stamp_ = 0;
   pass_stamp_floor_ = UINT32_MAX;
   block_head_ = block_tail_ = NULL;
@@ -1251,8 +1252,8 @@ void HIRBuilder::StoreContext(size_t offset, Value* value) {
   i->src3.value = NULL;
 }
 
-void HIRBuilder::ContextBarrier() {
-  AppendInstr(OPCODE_CONTEXT_BARRIER_info, 0);
+void HIRBuilder::ContextBarrier(uint16_t flags) {
+  AppendInstr(OPCODE_CONTEXT_BARRIER_info, flags);
 }
 
 Value* HIRBuilder::LoadMmio(cpu::MMIORange* mmio_range, uint32_t address,

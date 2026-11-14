@@ -15,6 +15,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/string_buffer.h"
+#include "xenia/cpu/compiler/translation_stats.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
@@ -33,6 +34,8 @@
 #if XE_COMPILER_MSVC
 #include "xenia/base/platform_win.h"
 #endif  // XE_COMPILER_MSVC
+
+DECLARE_bool(log_translation_stats);  // hakuX-Boosted
 
 DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
 DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
@@ -766,6 +769,12 @@ bool RunTests(const std::vector<std::string>& test_names) {
           .count();
   int minutes = static_cast<int>(elapsed_sec / 60);
   int seconds = static_cast<int>(elapsed_sec % 60);
+
+  // hakuX-Boosted: the translator's own counters for this run.
+  if (cvars::log_translation_stats) {
+    fprintf(stderr, "%s",
+            xe::cpu::compiler::FormatTranslationStats().c_str());
+  }
 
   fprintf(stderr, "\nTotal tests: %d\n", failed_count + passed_count);
   fprintf(stderr, "Passed: %d\n", passed_count);

@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_HIR_HIR_BUILDER_H_
 #define XENIA_CPU_HIR_HIR_BUILDER_H_
 
+#include <unordered_map>
 #include <vector>
 
 #include "third_party/fmt/include/fmt/format.h"
@@ -73,7 +74,7 @@ class HIRBuilder {
   // the function's own code). Empty means today's behaviour.
   struct PinnedContextSlot {
     uint32_t offset;    // offset in PPCContext
-    TypeName type;      // INT64_TYPE, FLOAT64_TYPE or VEC128_TYPE
+    TypeName type;      // INT64_TYPE, INT8_TYPE, FLOAT64_TYPE or VEC128_TYPE
     uint8_t reg_set;    // 0: the integer register set, 1: float/vector set
     uint8_t reg_index;  // index within that register set
     bool written;       // the function stores to the slot
@@ -81,6 +82,37 @@ class HIRBuilder {
   std::vector<PinnedContextSlot>& pinned_context_slots() {
     return pinned_context_slots_;
   }
+
+  // hakuX-Boosted: with pin_guest_registers_wide, where each pinned register
+  // has to be written back to the context and read again is decided per
+  // instruction by a data-flow analysis (GuestRegisterPinningPass) instead of
+  // "all of them at every way out". Bit n of each mask is entry n of
+  // pinned_context_slots().
+  //   dirty_before  the registers that may differ from their context copy
+  //                 when the instruction starts: what a write-back here
+  //                 stores.
+  //   live_after    the registers whose value may still be read (by a load
+  //                 or by a later write-back) after the instruction: what a
+  //                 reload here loads.
+  struct PinSyncInfo {
+    uint32_t dirty_before;
+    uint32_t live_after;
+  };
+  struct PinSyncState {
+    bool by_liveness = false;
+    // The registers to load in the prologue.
+    uint32_t entry_live = 0;
+    // The registers to write back when the last block falls into the epilog.
+    uint32_t exit_dirty = 0;
+    std::unordered_map<const Instr*, PinSyncInfo> per_instr;
+    void Clear() {
+      by_liveness = false;
+      entry_live = 0;
+      exit_dirty = 0;
+      per_instr.clear();
+    }
+  };
+  PinSyncState& pin_sync() { return pin_sync_; }
 
   // hakuX-Boosted: a counter the simplification passes stamp blocks with
   // (simplification_skip_unchanged_blocks). Stamps are only compared while
@@ -213,7 +245,7 @@ class HIRBuilder {
 
   Value* LoadContext(size_t offset, TypeName type);
   void StoreContext(size_t offset, Value* value);
-  void ContextBarrier();
+  void ContextBarrier(uint16_t flags = 0);  // hakuX-Boosted: flags
 
   Value* LoadMmio(cpu::MMIORange* mmio_range, uint32_t address, TypeName type);
   void StoreMmio(cpu::MMIORange* mmio_range, uint32_t address, Value* value);
@@ -361,6 +393,7 @@ class HIRBuilder {
   std::vector<Value*> locals_;
   // hakuX-Boosted
   std::vector<PinnedContextSlot> pinned_context_slots_;
+  PinSyncState pin_sync_;
   uint32_t pass_stamp_ = 0;
   uint32_t pass_stamp_floor_ = UINT32_MAX;
 
