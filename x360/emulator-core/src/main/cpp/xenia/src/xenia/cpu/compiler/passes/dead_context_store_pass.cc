@@ -27,8 +27,12 @@ DEFINE_int32(
     "0: off. 1: condition register bits and XER bits (a compare stores three "
     "bits and the branch after it reads one). 2: the general registers and "
     "CTR as well. Calls, returns, traps and the scheduler's check count as "
-    "reading everything. Takes effect for functions translated after it is "
-    "set.",
+    "reading everything. 3: as 2, and the condition register fields the "
+    "PowerPC ABI leaves undefined over a call (cr0, cr1, cr5, cr6, cr7) "
+    "count as not read by a call or a return: right for compiled code, "
+    "wrong for a hand-written routine that hands a result back in one of "
+    "them; run a title once with dead_context_store_verify before trusting "
+    "3 on it. Takes effect for functions translated after it is set.",
     "CPU");
 
 DEFINE_bool(
@@ -93,7 +97,22 @@ enum class Kind : uint8_t {
   kStore,      // writes slot `slot` whole
   kReadsAll,   // code outside the function may read anything here
   kEnd,        // reads everything and control does not continue
+  kCall,       // a guest or kernel call that comes back: reads what a
+               // callee may read, and what is live after it stays live
+  kCallEnd,    // a return or tail call: reads what a caller or callee may
 };
+
+// The condition register fields the ABI leaves undefined across a call:
+// a callee does not take them as input and a caller does not read them
+// after the call returns.
+bool IsAbiVolatileFlag(uint32_t offset, uint32_t size) {
+  const uint32_t cr_base = static_cast<uint32_t>(offsetof(PPCContext, cr0));
+  if (size != 1 || offset < cr_base || offset >= cr_base + 32) {
+    return false;
+  }
+  const uint32_t field = (offset - cr_base) / 4;
+  return field == 0 || field == 1 || field >= 5;
+}
 
 struct Item {
   Instr* instr;
@@ -125,8 +144,9 @@ bool DeadContextStorePass::Run(HIRBuilder* builder) {
     blocks.push_back(block);
   }
   const uint32_t block_count = static_cast<uint32_t>(blocks.size());
-  if (block_count < 2) {
-    // Within one block ContextPromotionPass has done this already.
+  if (block_count < 2 && level < 3) {
+    // Within one block ContextPromotionPass has done this already. (At
+    // level 3 a store can be dead at the block's return.)
     return true;
   }
 
@@ -171,10 +191,41 @@ bool DeadContextStorePass::Run(HIRBuilder* builder) {
         item.unconditional = true;
       } else if (num == OPCODE_BRANCH_TRUE || num == OPCODE_BRANCH_FALSE) {
         // A branch within the function: followed below.
-      } else if (num == OPCODE_RETURN ||
-                 ((num == OPCODE_CALL || num == OPCODE_CALL_INDIRECT) &&
-                  (i->flags & CALL_TAIL))) {
-        item.kind = Kind::kEnd;
+      } else if (num == OPCODE_RETURN || num == OPCODE_CALL ||
+                 num == OPCODE_CALL_INDIRECT || num == OPCODE_RETURN_TRUE ||
+                 num == OPCODE_CALL_TRUE ||
+                 num == OPCODE_CALL_INDIRECT_TRUE ||
+                 num == OPCODE_CALL_EXTERN) {
+        // Ways out of the function. Which of them are a call or a return in
+        // the guest's own sense matters at level 3 only, and it is not what
+        // the opcode says: the scanner ends a function at an unconditional
+        // branch and the front end turns that branch, and any branch to an
+        // address outside the function's range, into a tail call. Such a
+        // "call" is a jump inside one guest function, and the code it goes
+        // to reads flags set before it like any other code after a branch.
+        // So:
+        //   a call that sets LR (no CALL_TAIL) and a kernel call are calls;
+        //   a jump to LR (CALL_POSSIBLE_RETURN) and RETURN are returns;
+        //   every other tail call reads everything.
+        const bool conditional = num == OPCODE_RETURN_TRUE ||
+                                 num == OPCODE_CALL_TRUE ||
+                                 num == OPCODE_CALL_INDIRECT_TRUE;
+        const bool is_return =
+            num == OPCODE_RETURN || num == OPCODE_RETURN_TRUE ||
+            ((num == OPCODE_CALL_INDIRECT ||
+              num == OPCODE_CALL_INDIRECT_TRUE) &&
+             (i->flags & CALL_POSSIBLE_RETURN));
+        const bool is_tail =
+            is_return || ((num == OPCODE_CALL || num == OPCODE_CALL_TRUE ||
+                           num == OPCODE_CALL_INDIRECT ||
+                           num == OPCODE_CALL_INDIRECT_TRUE) &&
+                          (i->flags & CALL_TAIL));
+        const bool abi_point = level >= 3 && (is_return || !is_tail);
+        if (is_tail && !conditional) {
+          item.kind = abi_point ? Kind::kCallEnd : Kind::kEnd;
+        } else {
+          item.kind = abi_point ? Kind::kCall : Kind::kReadsAll;
+        }
       } else if (num == OPCODE_CONTEXT_BARRIER) {
         // The barrier before a branch instruction is there for the per-block
         // passes (ContextBarrierFlags); any other says the context is
@@ -220,12 +271,22 @@ bool DeadContextStorePass::Run(HIRBuilder* builder) {
     return read;
   };
 
+  // What a call or return reads at level 3: everything but the fields the
+  // ABI leaves undefined there.
+  SlotSet read_by_call = all;
+  for (size_t n = 0; n < slots.size(); ++n) {
+    if (IsAbiVolatileFlag(slots[n].offset, slots[n].size)) {
+      read_by_call.reset(n);
+    }
+  }
+
   const auto falls_through = [&](uint32_t b) {
     if (code[b].empty()) {
       return true;
     }
     const auto& last = code[b].back();
-    return !(last.unconditional || last.kind == Kind::kEnd);
+    return !(last.unconditional || last.kind == Kind::kEnd ||
+             last.kind == Kind::kCallEnd);
   };
 
   // Backward to a fixed point: live(slot) = some path from here reads the
@@ -234,6 +295,8 @@ bool DeadContextStorePass::Run(HIRBuilder* builder) {
   const auto walk = [&](uint32_t b, bool act) {
     SlotSet state;
     if (falls_through(b)) {
+      // Falling off the last block: into whatever follows, which reads
+      // anything.
       state = b + 1 < block_count ? live_in[b + 1] : all;
     }
     for (size_t n = code[b].size(); n-- > 0;) {
@@ -269,6 +332,12 @@ bool DeadContextStorePass::Run(HIRBuilder* builder) {
           break;
         case Kind::kEnd:
           state = all;
+          break;
+        case Kind::kCall:
+          state |= read_by_call;
+          break;
+        case Kind::kCallEnd:
+          state = read_by_call;
           break;
         default:
           break;

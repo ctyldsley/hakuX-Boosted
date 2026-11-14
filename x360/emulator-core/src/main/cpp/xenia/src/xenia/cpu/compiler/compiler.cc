@@ -184,9 +184,11 @@ std::string FormatExtraStats() {
       get(t.simplify_block_walks), get(t.simplify_block_skips),
       get(t.simplify_skip_mismatches));
   line += fmt::format(
-      "; dead context stores: {} of {} candidate stores removed; "
-      "self-check mismatches (TranslatorVerify) {}",
+      "; dead context stores: {} of {} candidate stores removed; compares "
+      "fused with their branch {}; functions emitted twice for short "
+      "forward branches {}; self-check mismatches (TranslatorVerify) {}",
       get(t.dead_context_stores_removed), get(t.dead_context_stores_seen),
+      get(t.compares_fused), get(t.short_forward_retries),
       get(t.verify_mismatches));
   return line;
 }

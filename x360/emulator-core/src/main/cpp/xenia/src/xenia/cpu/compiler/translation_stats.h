@@ -53,6 +53,11 @@ struct TranslationStats {
   // dead_context_store_verify, replaced by the marker).
   std::atomic<uint64_t> dead_context_stores_seen{0};
   std::atomic<uint64_t> dead_context_stores_removed{0};
+  // a64_fuse_compare_branch: compares emitted as cmp + b.cond.
+  std::atomic<uint64_t> compares_fused{0};
+  // a64_short_forward_branches: functions emitted a second time because
+  // they were too large for it.
+  std::atomic<uint64_t> short_forward_retries{0};
   // pin_guest_registers_wide.
   std::atomic<uint64_t> pin_functions_pinned_no_loop{0};
   std::atomic<uint64_t> pin_flag_slots{0};

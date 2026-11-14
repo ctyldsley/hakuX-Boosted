@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "xenia/base/arena.h"
@@ -210,6 +211,30 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
     }
     return nullptr;
   }
+  // hakuX-Boosted: a64_fuse_compare_branch. An integer compare whose only
+  // use is the conditional branch that follows it (with nothing between
+  // that could change the flags) leaves its answer in the flags instead of
+  // a register: the compare's sequence calls EmitCompareResult, the
+  // branch's asks TakeFusedCompare.
+  void EmitCompareResult(const Xbyak_aarch64::WReg& dest,
+                         Xbyak_aarch64::Cond cond) {
+    if (fuse_compare_pending_) {
+      fuse_compare_pending_ = false;
+      fused_cond_ = cond;
+      fused_cond_valid_ = true;
+      return;
+    }
+    cset(dest, cond);
+  }
+  bool TakeFusedCompare(const hir::Instr* branch, Xbyak_aarch64::Cond* cond) {
+    if (!fused_cond_valid_ || fused_branch_ != branch) {
+      return false;
+    }
+    fused_cond_valid_ = false;
+    *cond = fused_cond_;
+    return true;
+  }
+
   // a64_pin_verify: stores to pinned registers also go to the context, and
   // loads compare the two.
   bool pin_verify() const { return pin_verify_; }
@@ -292,6 +317,19 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   static constexpr size_t kNearBranch14 = (size_t(1) << 15) - 16;
   bool IsNearBoundLabel(const Xbyak_aarch64::Label& label,
                         size_t max_distance) const;
+  // hakuX-Boosted: a64_short_forward_branches. True if a conditional branch
+  // to this label may take the one-instruction form: it is near and placed
+  // (as above), or it is a block label of this function not yet placed and
+  // this attempt at the function allows that (see Emit: a function too
+  // large for it is emitted a second time without).
+  bool UseShortBranch(const Xbyak_aarch64::Label& label, size_t max_distance);
+  std::unordered_set<const Xbyak_aarch64::Label*> block_labels_;
+  bool short_forward_ok_ = false;
+  // The locals' stack offsets are assigned once per function (see Emit).
+  bool locals_laid_out_ = false;
+  size_t locals_stack_size_ = 0;
+  bool used_short_forward19_ = false;
+  bool used_short_forward14_ = false;
 
   // hakuX-Boosted: what Emit's loop does round an instruction when guest
   // registers are pinned.
@@ -319,6 +357,14 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
     uint32_t reload_mask;
   };
   std::vector<PinnedResumeStub> pinned_resume_stubs_;
+
+  // hakuX-Boosted: see EmitCompareResult.
+  bool fuse_compare_pending_ = false;
+  bool fused_cond_valid_ = false;
+  Xbyak_aarch64::Cond fused_cond_ = Xbyak_aarch64::EQ;
+  const hir::Instr* fused_branch_ = nullptr;
+  // The branch a compare may be fused with, or null.
+  const hir::Instr* FindFusableBranch(const hir::Instr* compare) const;
 
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;
   bool synchronize_stack_on_next_instruction_ = false;

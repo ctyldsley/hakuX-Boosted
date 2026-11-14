@@ -49,6 +49,35 @@ DEFINE_bool(
     "translated after it is set.",
     "a64");
 
+// hakuX-Boosted: see A64Emitter::UseShortBranch.
+DEFINE_bool(
+    a64_short_forward_branches, false,
+    "A conditional branch to a block of the same function that comes later "
+    "is emitted as one instruction too (a64_short_backward_branches does "
+    "this for earlier blocks). The distance is not known when the branch is "
+    "emitted, so a function whose code turns out too large for the short "
+    "form to be certain to reach (32 KiB where a bit test was used, 1 MiB "
+    "otherwise) is emitted a second time with the long form. Takes effect "
+    "for functions translated after it is set.",
+    "a64");
+DEFINE_bool(
+    a64_short_forward_branches_test_retry, false,
+    "For the translator's tests: with a64_short_forward_branches, emit "
+    "every function that used a short forward branch a second time with the "
+    "long form, as if it had been too large.",
+    "a64");
+
+// hakuX-Boosted: see A64Emitter::EmitCompareResult.
+DEFINE_bool(
+    a64_fuse_compare_branch, false,
+    "An integer compare whose result is used only by the conditional branch "
+    "directly after it is emitted as cmp and b.cond, without first turning "
+    "the answer into 0 or 1 in a register and testing that. Most useful "
+    "with eliminate_dead_context_stores, which removes the store that "
+    "otherwise also uses the result. Takes effect for functions translated "
+    "after it is set.",
+    "a64");
+
 // hakuX-Boosted: see A64Emitter::PushStackpoint.
 DEFINE_bool(
     a64_compact_stackpoint_push, false,
@@ -155,13 +184,47 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
   // an unencodable operand needs catching here too.
   EmitFunctionInfo func_info = {};
   bool emitted = false;
-  try {
-    emitted = Emit(builder, func_info);
-  } catch (const Xbyak_aarch64::Error& e) {
-    XELOGE("A64: assembler error while emitting guest function {:08X}: {}",
-           current_guest_function_, e.what());
+  // hakuX-Boosted: a64_short_forward_branches. The first attempt may use
+  // one-instruction branches to blocks not yet placed. If the function then
+  // proves larger than such a branch is certain to span (any two points of
+  // a function are closer than its length), or the assembler refuses one,
+  // the function is emitted again from the same HIR with the long form.
+  short_forward_ok_ = cvars::a64_short_forward_branches;
+  locals_laid_out_ = false;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    used_short_forward19_ = false;
+    used_short_forward14_ = false;
+    func_info = {};
+    try {
+      emitted = Emit(builder, func_info);
+    } catch (const Xbyak_aarch64::Error& e) {
+      if (!(used_short_forward19_ || used_short_forward14_)) {
+        XELOGE("A64: assembler error while emitting guest function {:08X}: {}",
+               current_guest_function_, e.what());
+      }
+      emitted = false;
+    }
+    const bool used_short = used_short_forward19_ || used_short_forward14_;
+    if (!used_short) {
+      break;
+    }
+    const size_t size = getSize();
+    const bool too_large =
+        (used_short_forward14_ && size > kNearBranch14) ||
+        size > kNearBranch19;
+    if (emitted && !too_large &&
+        !cvars::a64_short_forward_branches_test_retry) {
+      break;
+    }
+    // Again, long form.
+    compiler::translation_stats.short_forward_retries.fetch_add(
+        1, std::memory_order_relaxed);
+    ResetPerFunctionState();
+    source_map_arena_.Reset();
+    short_forward_ok_ = false;
     emitted = false;
   }
+  short_forward_ok_ = false;
   if (!emitted) {
     // Emplace only runs on success, so a failed compile has to reset too.
     ResetPerFunctionState();
@@ -244,20 +307,28 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   pin_last_sync_reload_ = pin_all_mask;
 
   // Calculate local variable stack offsets.
-  auto locals = builder->locals();
-  size_t stack_offset = StackLayout::GUEST_STACK_SIZE;
-  for (auto it = locals.begin(); it != locals.end(); ++it) {
-    auto slot = *it;
-    size_t type_size = hir::GetTypeSize(slot->type);
-    // Align to natural size (at least 4 bytes for ARM64 alignment).
-    size_t align_size = xe::round_up(type_size, static_cast<size_t>(4));
-    stack_offset = xe::align(stack_offset, align_size);
-    slot->set_constant(static_cast<uint32_t>(stack_offset));
-    stack_offset += type_size;
+  // hakuX-Boosted: once per function, not once per attempt. Laying a local
+  // out turns it into a constant holding its offset, which loses its type,
+  // so a second pass over the locals would size them all as 32-bit and
+  // overlap them (found by a64_short_forward_branches_test_retry).
+  if (!locals_laid_out_) {
+    auto locals = builder->locals();
+    size_t stack_offset = StackLayout::GUEST_STACK_SIZE;
+    for (auto it = locals.begin(); it != locals.end(); ++it) {
+      auto slot = *it;
+      size_t type_size = hir::GetTypeSize(slot->type);
+      // Align to natural size (at least 4 bytes for ARM64 alignment).
+      size_t align_size = xe::round_up(type_size, static_cast<size_t>(4));
+      stack_offset = xe::align(stack_offset, align_size);
+      slot->set_constant(static_cast<uint32_t>(stack_offset));
+      stack_offset += type_size;
+    }
+    // Align total stack offset to 16 bytes (ARM64 ABI requirement).
+    stack_offset -= StackLayout::GUEST_STACK_SIZE;
+    locals_stack_size_ = xe::align(stack_offset, static_cast<size_t>(16));
+    locals_laid_out_ = true;
   }
-  // Align total stack offset to 16 bytes (ARM64 ABI requirement).
-  stack_offset -= StackLayout::GUEST_STACK_SIZE;
-  stack_offset = xe::align(stack_offset, static_cast<size_t>(16));
+  const size_t stack_offset = locals_stack_size_;
 
   const size_t stack_size = StackLayout::GUEST_STACK_SIZE + stack_offset;
   // ARM64 ABI: SP must always be 16-byte aligned.
@@ -406,11 +477,25 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
             1, std::memory_order_relaxed);
         pin_last_sync_reload_ = pin_cur_live_after_;
       }
+      // hakuX-Boosted: a compare that only feeds the branch after it leaves
+      // its answer in the flags (see EmitCompareResult).
+      if (cvars::a64_fuse_compare_branch) {
+        if (const hir::Instr* branch = FindFusableBranch(instr)) {
+          fuse_compare_pending_ = true;
+          fused_cond_valid_ = false;
+          fused_branch_ = branch;
+          compiler::translation_stats.compares_fused.fetch_add(
+              1, std::memory_order_relaxed);
+        }
+      }
       last_opcode = instr->GetOpcodeNum();
       const hir::Instr* new_tail = instr;
       bool selected = false;
       try {
         selected = SelectSequence(this, instr, &new_tail);
+        // hakuX-Boosted: a compare sequence that did not take the offer to
+        // fuse has put its answer in the register as usual.
+        fuse_compare_pending_ = false;
         if (selected && pin_sync_kind == PinSync::kFlushAndReload) {
           EmitPinnedReload(pin_cur_live_after_);
         }
@@ -566,6 +651,10 @@ void A64Emitter::ResetPerFunctionState() {
 
   // hakuX-Boosted: keyed by the labels deleted below.
   bound_label_offsets_.clear();
+  block_labels_.clear();
+  fuse_compare_pending_ = false;
+  fused_cond_valid_ = false;
+  fused_branch_ = nullptr;
 
   // Clean up HIR->xbyak label map. HIR label ids restart at each function, so
   // stale entries would hand the next function this one's labels.
@@ -605,9 +694,74 @@ bool A64Emitter::IsNearBoundLabel(const Xbyak_aarch64::Label& label,
   return here >= it->second && here - it->second <= max_distance;
 }
 
+bool A64Emitter::UseShortBranch(const Xbyak_aarch64::Label& label,
+                                size_t max_distance) {
+  if (IsNearBoundLabel(label, max_distance)) {
+    return true;
+  }
+  if (!short_forward_ok_ || bound_label_offsets_.count(&label) ||
+      !block_labels_.count(&label)) {
+    return false;
+  }
+  (max_distance == kNearBranch14 ? used_short_forward14_
+                                 : used_short_forward19_) = true;
+  return true;
+}
+
+// hakuX-Boosted: a64_fuse_compare_branch. The instructions allowed between
+// the compare and its branch are ones whose sequences emit nothing that
+// writes the flags in any mode: source offsets, comments, context stores
+// (str, or a register move for a pinned slot), spills to locals and the
+// barrier the front end puts before the branch (nothing, or a pinned
+// write-back and reload, which are stores and loads).
+const hir::Instr* A64Emitter::FindFusableBranch(
+    const hir::Instr* compare) const {
+  switch (compare->GetOpcodeNum()) {
+    case hir::OPCODE_COMPARE_EQ:
+    case hir::OPCODE_COMPARE_NE:
+    case hir::OPCODE_COMPARE_SLT:
+    case hir::OPCODE_COMPARE_SLE:
+    case hir::OPCODE_COMPARE_SGT:
+    case hir::OPCODE_COMPARE_SGE:
+    case hir::OPCODE_COMPARE_ULT:
+    case hir::OPCODE_COMPARE_ULE:
+    case hir::OPCODE_COMPARE_UGT:
+    case hir::OPCODE_COMPARE_UGE:
+      break;
+    default:
+      return nullptr;
+  }
+  const hir::Value* result = compare->dest;
+  if (!result || !compare->src1.value ||
+      compare->src1.value->type > hir::INT64_TYPE) {
+    return nullptr;  // float and vector compares are not handled
+  }
+  if (!result->use_head || result->use_head->next) {
+    return nullptr;  // not exactly one use
+  }
+  for (const hir::Instr* i = compare->next; i; i = i->next) {
+    switch (i->GetOpcodeNum()) {
+      case hir::OPCODE_SOURCE_OFFSET:
+      case hir::OPCODE_COMMENT:
+      case hir::OPCODE_NOP:
+      case hir::OPCODE_STORE_CONTEXT:
+      case hir::OPCODE_STORE_LOCAL:
+      case hir::OPCODE_LOAD_LOCAL:
+      case hir::OPCODE_CONTEXT_BARRIER:
+        continue;
+      case hir::OPCODE_BRANCH_TRUE:
+      case hir::OPCODE_BRANCH_FALSE:
+        return i->src1.value == result ? i : nullptr;
+      default:
+        return nullptr;
+    }
+  }
+  return nullptr;
+}
+
 void A64Emitter::b(const Xbyak_aarch64::Cond cond,
                    const Xbyak_aarch64::Label& label) {
-  if (IsNearBoundLabel(label, kNearBranch19)) {
+  if (UseShortBranch(label, kNearBranch19)) {
     CodeGenerator::b(cond, label);
     return;
   }
@@ -619,7 +773,7 @@ void A64Emitter::b(const Xbyak_aarch64::Cond cond,
 
 void A64Emitter::cbz(const Xbyak_aarch64::WReg& rt,
                      const Xbyak_aarch64::Label& label) {
-  if (IsNearBoundLabel(label, kNearBranch19)) {
+  if (UseShortBranch(label, kNearBranch19)) {
     CodeGenerator::cbz(rt, label);
     return;
   }
@@ -631,7 +785,7 @@ void A64Emitter::cbz(const Xbyak_aarch64::WReg& rt,
 
 void A64Emitter::cbz(const Xbyak_aarch64::XReg& rt,
                      const Xbyak_aarch64::Label& label) {
-  if (IsNearBoundLabel(label, kNearBranch19)) {
+  if (UseShortBranch(label, kNearBranch19)) {
     CodeGenerator::cbz(rt, label);
     return;
   }
@@ -643,7 +797,7 @@ void A64Emitter::cbz(const Xbyak_aarch64::XReg& rt,
 
 void A64Emitter::cbnz(const Xbyak_aarch64::WReg& rt,
                       const Xbyak_aarch64::Label& label) {
-  if (IsNearBoundLabel(label, kNearBranch19)) {
+  if (UseShortBranch(label, kNearBranch19)) {
     CodeGenerator::cbnz(rt, label);
     return;
   }
@@ -655,7 +809,7 @@ void A64Emitter::cbnz(const Xbyak_aarch64::WReg& rt,
 
 void A64Emitter::cbnz(const Xbyak_aarch64::XReg& rt,
                       const Xbyak_aarch64::Label& label) {
-  if (IsNearBoundLabel(label, kNearBranch19)) {
+  if (UseShortBranch(label, kNearBranch19)) {
     CodeGenerator::cbnz(rt, label);
     return;
   }
@@ -667,7 +821,7 @@ void A64Emitter::cbnz(const Xbyak_aarch64::XReg& rt,
 
 void A64Emitter::tbz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
                      const Xbyak_aarch64::Label& label) {
-  if (IsNearBoundLabel(label, kNearBranch14)) {
+  if (UseShortBranch(label, kNearBranch14)) {
     CodeGenerator::tbz(rt, imm, label);
     return;
   }
@@ -679,7 +833,7 @@ void A64Emitter::tbz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
 
 void A64Emitter::tbz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
                      const Xbyak_aarch64::Label& label) {
-  if (IsNearBoundLabel(label, kNearBranch14)) {
+  if (UseShortBranch(label, kNearBranch14)) {
     CodeGenerator::tbz(rt, imm, label);
     return;
   }
@@ -691,7 +845,7 @@ void A64Emitter::tbz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
 
 void A64Emitter::tbnz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
                       const Xbyak_aarch64::Label& label) {
-  if (IsNearBoundLabel(label, kNearBranch14)) {
+  if (UseShortBranch(label, kNearBranch14)) {
     CodeGenerator::tbnz(rt, imm, label);
     return;
   }
@@ -703,7 +857,7 @@ void A64Emitter::tbnz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
 
 void A64Emitter::tbnz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
                       const Xbyak_aarch64::Label& label) {
-  if (IsNearBoundLabel(label, kNearBranch14)) {
+  if (UseShortBranch(label, kNearBranch14)) {
     CodeGenerator::tbnz(rt, imm, label);
     return;
   }
@@ -1318,6 +1472,7 @@ Label& A64Emitter::GetLabel(uint32_t label_id) {
   }
   auto* label = new Label();
   label_map_[label_id] = label;
+  block_labels_.insert(label);  // hakuX-Boosted: see UseShortBranch
   return *label;
 }
 

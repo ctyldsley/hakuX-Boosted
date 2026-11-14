@@ -41,8 +41,12 @@ while IFS=';' read -r label suites flags; do
   suites=$(echo "$suites" | xargs)
   if [ -n "${ONLY:-}" ] && ! echo "$label" | grep -qE "$ONLY"; then continue; fi
   echo "::group::$label"
+  # A line whose flags end in "#ignore=<field>" leaves that field of the
+  # state out of the comparison (see STATE_IGNORE in run-tests.sh).
+  ignore=""
+  case "$flags" in *'#ignore='*) ignore=${flags##*#ignore=}; flags=${flags%%#ignore=*} ;; esac
   # shellcheck disable=SC2086
-  if ! LABEL="$label" STATE_REF="$work/reference.state" SUITES="$suites" \
+  if ! LABEL="$label" STATE_REF="$work/reference.state" SUITES="$suites" STATE_IGNORE="$ignore" \
       "$here/run-tests.sh" "$runner" "$bins" $flags; then
     failed+=("$label")
   fi

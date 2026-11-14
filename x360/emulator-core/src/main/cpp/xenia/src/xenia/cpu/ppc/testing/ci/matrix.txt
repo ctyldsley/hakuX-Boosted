@@ -39,3 +39,16 @@ wide stress, preempt        ; ^(seq_|instr_(b|add|cmp|l|st)) ; --guest_scheduler
 dead stores, flags          ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|f|rl|sl|sr)) ; --eliminate_dead_context_stores=1
 dead stores, all            ; . ; --eliminate_dead_context_stores=2
 dead stores (verify)        ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|f|rl|sl|sr)) ; --eliminate_dead_context_stores=2 --dead_context_store_verify=true
+# Level 3 takes the condition register fields the ABI leaves undefined at a
+# call or return for dead there, so the bits a function leaves in them at
+# its end differ from the reference: "#ignore=flags" compares the registers,
+# the memory and the ABI-stable flags instead, and tests that assert the
+# whole condition register after their return are skipped (run-tests.sh).
+dead stores, ABI            ; . ; --eliminate_dead_context_stores=3 #ignore=flags
+dead stores, ABI (verify)   ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|rl|sl|sr)) ; --eliminate_dead_context_stores=3 --dead_context_store_verify=true #ignore=flags
+
+# Compares fused with their branch; short forward branches. The second line
+# emits every function twice, which is what a function too large for short
+# forward branches gets.
+fuse, short branches        ; ^(seq_|instr_(add|sub|cmp|and|or|xor|b|cr|m|f|l|st|rl|sl|sr|t)) ; --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true
+short forward, emit twice   ; . ; --a64_fuse_compare_branch=true --a64_short_forward_branches=true --a64_short_backward_branches=true --a64_short_forward_branches_test_retry=true

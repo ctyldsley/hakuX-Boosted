@@ -15,6 +15,9 @@
 #              sorted: registers, flags and memory as hashes)
 #   STATE_REF  such a file from another run: this run's states must equal it,
 #              test for test (the tests named in nondeterministic.txt apart)
+#   STATE_IGNORE  a field of the state lines to leave out of that comparison
+#              ("flags": the run changes condition register bits that the
+#              ABI leaves undefined at a return; "abiflags" is still compared)
 #
 # Exit status 0 only if every shard ran to its end and no test failed.
 set -uo pipefail
@@ -51,6 +54,16 @@ grep -v '^#' "$here/known-failures.txt" | grep . | while read -r name when flag;
     if) [ "$has" = 1 ] && echo "$name" ;;
   esac
 done >> "$work/skip"
+# eliminate_dead_context_stores=3 takes cr0, cr1 and cr5 to cr7 for
+# undefined when a function returns, as the ABI has it. A test that asserts
+# the whole condition register after its return ("REGISTER_OUT cr") is then
+# a caller reading those fields, and is skipped in such a run. Tests that
+# read the condition register themselves (mfcr) are not affected.
+if echo " $* " | grep -q -F -- " --eliminate_dead_context_stores=3 "; then
+  awk '/^ *test_[A-Za-z0-9_]*:/ { name = $1; sub(/^test_/, "", name); sub(/:.*/, "", name) }
+       /#_ REGISTER_OUT cr / { if (name != "") print name }' "$tests"/instr_*.s "$tests"/seq_*.s \
+    | sort -u >> "$work/skip"
+fi
 
 pids=()
 for shard in "$work"/shard.*; do
@@ -103,8 +116,9 @@ if [ -n "${STATE_REF:-}" ]; then
   names() { cut -d' ' -f1 "$1" | sort -u; }
   # only the tests both runs have (a run may cover a subset of the suites)
   join <(names "$work/state") <(names "$STATE_REF") | grep -v -x -F -f "$work/nondet" > "$work/common" || true
-  join "$work/common" "$work/state" > "$work/a"
-  join "$work/common" "$STATE_REF" > "$work/b"
+  strip() { if [ -n "${STATE_IGNORE:-}" ]; then sed -E "s/ ${STATE_IGNORE}=[0-9a-f]+//"; else cat; fi; }
+  join "$work/common" "$work/state" | strip > "$work/a"
+  join "$work/common" "$STATE_REF" | strip > "$work/b"
   if ! cmp -s "$work/a" "$work/b"; then
     state_diff=$(diff "$work/a" "$work/b" | grep -c '^<' || true)
     echo "::error::$state_diff tests left a different state than the reference run; the first:"

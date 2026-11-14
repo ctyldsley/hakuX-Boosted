@@ -37,6 +37,12 @@ EMITTER_OPCODE_TABLE(OPCODE_BRANCH, BRANCH);
 struct BRANCH_TRUE_I8
     : Sequence<BRANCH_TRUE_I8, I<OPCODE_BRANCH_TRUE, VoidOp, I8Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_fuse_compare_branch.
+    Xbyak_aarch64::Cond cond;
+    if (e.TakeFusedCompare(i.instr, &cond)) {
+      e.b(cond, e.GetLabel(i.src2.value->id));
+      return;
+    }
     e.cbnz(i.src1, e.GetLabel(i.src2.value->id));
   }
 };
@@ -82,6 +88,14 @@ EMITTER_OPCODE_TABLE(OPCODE_BRANCH_TRUE, BRANCH_TRUE_I8, BRANCH_TRUE_I16,
 struct BRANCH_FALSE_I8
     : Sequence<BRANCH_FALSE_I8, I<OPCODE_BRANCH_FALSE, VoidOp, I8Op, LabelOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_fuse_compare_branch. Conditions pair up as even
+    // and odd encodings, so the opposite is the lowest bit flipped.
+    Xbyak_aarch64::Cond cond;
+    if (e.TakeFusedCompare(i.instr, &cond)) {
+      e.b(static_cast<Xbyak_aarch64::Cond>(cond ^ 1),
+          e.GetLabel(i.src2.value->id));
+      return;
+    }
     e.cbz(i.src1, e.GetLabel(i.src2.value->id));
   }
 };

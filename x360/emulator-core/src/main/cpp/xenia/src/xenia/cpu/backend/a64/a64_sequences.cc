@@ -2566,7 +2566,7 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I16                                                            \
@@ -2591,7 +2591,7 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I32                                                            \
@@ -2618,7 +2618,7 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I64                                                            \
@@ -2643,7 +2643,7 @@ EMITTER_OPCODE_TABLE(OPCODE_CNTLZ, CNTLZ_I8, CNTLZ_I16, CNTLZ_I32, CNTLZ_I64);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct _tag_##NAME {}
@@ -2670,7 +2670,7 @@ DEFINE_COMPARE_XX(COMPARE_NE, NE);
         e.sxtb(e.w1, i.src2);                                                  \
         e.cmp(e.w0, e.w1);                                                     \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I16                                                            \
@@ -2690,7 +2690,7 @@ DEFINE_COMPARE_XX(COMPARE_NE, NE);
         e.sxth(e.w1, i.src2);                                                  \
         e.cmp(e.w0, e.w1);                                                     \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I32                                                            \
@@ -2717,7 +2717,7 @@ DEFINE_COMPARE_XX(COMPARE_NE, NE);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct NAME##_I64                                                            \
@@ -2742,7 +2742,7 @@ DEFINE_COMPARE_XX(COMPARE_NE, NE);
       } else {                                                                 \
         e.cmp(i.src1, i.src2);                                                 \
       }                                                                        \
-      e.cset(i.dest, Xbyak_aarch64::COND);                                     \
+      e.EmitCompareResult(i.dest, Xbyak_aarch64::COND);                   \
     }                                                                          \
   };                                                                           \
   struct _tag_##NAME {}

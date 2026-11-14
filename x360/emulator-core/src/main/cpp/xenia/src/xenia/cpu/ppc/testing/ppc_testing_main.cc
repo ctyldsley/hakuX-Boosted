@@ -36,6 +36,7 @@
 #endif  // XE_COMPILER_MSVC
 
 DECLARE_bool(log_translation_stats);  // hakuX-Boosted
+DECLARE_path(log_file);
 
 DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
 DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
@@ -444,18 +445,27 @@ class TestRunner {
     flags = Hash(&ctx->fpscr, sizeof(ctx->fpscr), flags);
     flags = Hash(&ctx->vscr_sat, 1, flags);
     flags = Hash(&ctx->vscr_vec, sizeof(ctx->vscr_vec), flags);
+    // The same without the condition register fields the ABI leaves
+    // undefined when a function returns (cr0, cr1, cr5, cr6, cr7): what a
+    // run with eliminate_dead_context_stores=3 must still agree on.
+    uint64_t abi_flags = Hash(&ctx->cr2, 12);
+    abi_flags = Hash(&ctx->xer_ca, 3, abi_flags);
+    abi_flags = Hash(&ctx->fpscr, sizeof(ctx->fpscr), abi_flags);
+    abi_flags = Hash(&ctx->vscr_sat, 1, abi_flags);
+    abi_flags = Hash(&ctx->vscr_vec, sizeof(ctx->vscr_vec), abi_flags);
     uint64_t mem = Hash(memory_->TranslateVirtual(0x10001000), 0xEFFF);
     mem = Hash(memory_->TranslateVirtual(START_ADDRESS - 64 * 1024 -
                                          kStackDumpSize),
                kStackDumpSize, mem);
     fprintf(state_dump_file_,
             "%s gpr=%016llx fpr=%016llx vr=%016llx flags=%016llx "
-            "mem=%016llx\n",
+            "mem=%016llx abiflags=%016llx\n",
             test_case.name.c_str(), static_cast<unsigned long long>(gpr),
             static_cast<unsigned long long>(fpr),
             static_cast<unsigned long long>(vr),
             static_cast<unsigned long long>(flags),
-            static_cast<unsigned long long>(mem));
+            static_cast<unsigned long long>(mem),
+            static_cast<unsigned long long>(abi_flags));
     fflush(state_dump_file_);
   }
 
@@ -797,6 +807,13 @@ bool RunTests(const std::vector<std::string>& test_names) {
 }
 
 int main(const std::vector<std::string>& args) {
+  // hakuX-Boosted: the console entry point this runner is built with does
+  // not start the log, so nothing the translator logged was ever seen. With
+  // --log_file it is started here (the self-check lines, and the HIR and
+  // machine code of a failed test, go to it).
+  if (!cvars::log_file.empty()) {
+    xe::InitializeLogging("xenia-cpu-ppc-tests");
+  }
   std::vector<std::string> test_names;
   // Collect test names from all positional arguments.
   // argv[0] is the program name, skip it. Also skip --flag arguments

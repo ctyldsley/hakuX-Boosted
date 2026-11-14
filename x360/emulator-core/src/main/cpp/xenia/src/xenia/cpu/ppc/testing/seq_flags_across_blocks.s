@@ -176,6 +176,30 @@ cr_returning_callee:
   andi. r0, r3, 3
   blr
 
+# The same from a callee that cannot be inlined into its caller (it has a
+# branch). This is the pattern eliminate_dead_context_stores=3 gets wrong by
+# design: it takes cr0 for undefined at a return, as the ABI says, and this
+# hand-written callee returns its answer there. The test is skipped at that
+# level (ci/known-failures.txt), where dead_context_store_verify reports it.
+test_cr_returned_by_callee_with_branch:
+  #_ REGISTER_IN r3 20
+  FRAME_IN
+  li r5, 0
+  bl cr_branchy_callee
+  bne cr_branchy_skip
+  addi r5, r5, 1
+cr_branchy_skip:
+  FRAME_OUT
+  blr
+  #_ REGISTER_OUT r5 1
+cr_branchy_callee:
+  cmpwi cr7, r3, 100
+  blt cr7, cr_branchy_1
+  addi r3, r3, 1
+cr_branchy_1:
+  andi. r0, r3, 3
+  blr
+
 # A loop whose compare bits are all rewritten every trip, left on a
 # different bit than it loops on, with the remaining bits read afterwards.
 test_cr_loop_exit_bits:

@@ -24,3 +24,8 @@ mcrf_3 if --ppc_mcrf_copies_field=true
 mcrf_3_constant if --ppc_mcrf_copies_field=true
 mcrf_5 if --ppc_mcrf_copies_field=true
 mcrf_5_constant if --ppc_mcrf_copies_field=true
+
+# A callee that returns its answer in cr0, which the ABI leaves undefined at
+# a return: wrong by design at level 3 of eliminate_dead_context_stores (see
+# the test's comment).
+cr_returned_by_callee_with_branch if --eliminate_dead_context_stores=3
