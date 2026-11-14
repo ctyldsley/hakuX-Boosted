@@ -406,8 +406,11 @@ why, and mode 2 is the fallback), and everything about timing.
 - Run 124 (`ea37bf2`: the pixel interpreter in the draw path, the fetch's
   vector form): its first job (the Xbox core) was green; its APK job was
   still compiling when the next push replaced it, so it did not finish.
-- The push after it carries everything else on this branch. Its run is the
-  one that vouches for the branch as it stands; its result is added below
-  when it is known. Until a line here says green, treat the commits after
-  `46837f0` (run 122, green) as compiled on the host only.
-
+- Run 125 (`802e3bf`, everything on this branch: the thread policy, the
+  record, the measurements, the vertex texture switch, the rig's stronger
+  kill tests): green, both jobs
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43574298982). It
+  proves the code compiles for the phone, that the Actions shader tools
+  compiled `ucode_program.ps.glsl` and the other interpreter shaders, and
+  that the APK packs. Nothing about behaviour. The commit that adds this
+  line changes this file only.
