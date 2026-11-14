@@ -581,8 +581,14 @@ class VulkanCommandProcessor final : public CommandProcessor {
                       bool placeholder_pixel_shader = false,
                       // hakuX-Boosted: the one texture of a stand-in pixel
                       // shader (its sampler is in current_samplers_pixel_).
+                      // Then the program of the guest shader interpreter,
+                      // version 2, that the draw's placeholder runs, and
+                      // the vertex stage's per-draw word.
                       const VulkanShader::TextureBinding* stand_in_texture =
-                          nullptr);
+                          nullptr,
+                      const ucode_program::Program* interpreter_program =
+                          nullptr,
+                      uint32_t interpreter_vertex_word = 0);
   // Allocates a descriptor set and fills one or two VkWriteDescriptorSet
   // structure instances (for images and samplers).
   // The descriptor set layout must be the one for the given is_vertex,
@@ -1265,6 +1271,12 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // constants for the ucode interpreter rather than a shader's packed subset.
   // Used to invalidate the binding when switching interpreter <-> normal.
   bool float_constants_vertex_are_full_ = false;
+  // hakuX-Boosted: what follows the bool and loop constants in their buffer:
+  // nothing (nullptr), or the program of the guest shader interpreter,
+  // version 2, with the vertex stage's per-draw word. Used to write the buffer
+  // again when either changes.
+  const ucode_program::Program* bool_loop_program_ = nullptr;
+  uint32_t bool_loop_program_vertex_word_ = 0;
 
   // System shader constants, including user clip planes and tessellation
   // constants.

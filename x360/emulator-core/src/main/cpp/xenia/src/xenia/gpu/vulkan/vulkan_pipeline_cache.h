@@ -394,7 +394,10 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     kSkipMemoryExport = 1u << 10,
     kSkipLoops = 1u << 11,
     kSkipVertexShaderTranslated = 1u << 12,
-    kSkipInterpreterMask = (1u << 13) - 1,
+    // vulkan_placeholder_interpreter = 2: the vertex shader's microcode is
+    // malformed or longer than the interpreter's buffer.
+    kSkipInterpreterProgram = 1u << 13,
+    kSkipInterpreterMask = (1u << 14) - 1,
 
     // The vertex shader was not translated yet, so there was nothing to make
     // a placeholder from ("no interpreter placeholder, real pipeline not
@@ -441,6 +444,14 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     return pipeline->uses_interpreter.load(std::memory_order_acquire) &&
            pipeline->is_placeholder.load(std::memory_order_acquire);
   }
+
+  // hakuX-Boosted: whether the interpreter of this session's placeholders is
+  // the guest shader interpreter, version 2 (vulkan_placeholder_interpreter =
+  // 2, read once when the cache is set up, and its module was made). Its
+  // draws are fed a prepared copy of the microcode (VulkanShader::
+  // GetUcodeProgram) instead of the microcode's address in guest memory, and
+  // its stand-in pixel shader reads the interpolators at their own locations.
+  bool IsInterpreterProgram() const { return interpreter_program_; }
 
   // Whether ConfigurePipeline will create the pipeline asynchronously (so the
   // draw thread must not translate shaders itself). Matches the use_async
@@ -931,6 +942,20 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // locations 0 and 1), then copies with the inputs at other locations, by
   // GetStandInPixelShader's key (the draw thread only).
   VkShaderModule ucode_interpreter_stand_in_vs_ = VK_NULL_HANDLE;
+  // hakuX-Boosted: the guest shader interpreter, version 2, as a vertex
+  // shader (shaders/ucode_program.vs.glsl), and whether the placeholders of
+  // this session use it (see IsInterpreterProgram). It writes all sixteen
+  // interpolators, so one module serves with and without a stand-in.
+  VkShaderModule ucode_program_vs_ = VK_NULL_HANDLE;
+  bool interpreter_program_ = false;
+  // The interpreter's vertex shader module for a placeholder: version 2's, or
+  // version 1's with or without the stand-in's two outputs.
+  VkShaderModule GetInterpreterVertexShader(bool stand_in) const {
+    return interpreter_program_
+               ? ucode_program_vs_
+               : (stand_in ? ucode_interpreter_stand_in_vs_
+                           : ucode_interpreter_vs_);
+  }
   VkShaderModule stand_in_pixel_shaders_[3][2] = {};
   std::unordered_map<uint32_t, VkShaderModule> stand_in_pixel_shaders_moved_;
 
