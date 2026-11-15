@@ -31,6 +31,13 @@ detail, register gradients). None differs. With `--vector-signs` the
 translator emits its other form of a fetch's sign step
 (`spirv_tfetch_vector_signs`), which must match too, and does.
 
+Added on `claude/standin-precompile` and **not run yet** (the machine it was
+written on could not build the rig): the pixel interpreter has twelve 2D
+texture slots instead of six, the rig's descriptor layout for its slots
+follows `ucode_program::kMaxTextures`, and `ps_tfetch_all_slots` fetches
+twelve 2D and two cube textures in one shader. Run the rig before trusting
+either.
+
 Not tested: the tessellation and point sprite forms of the vertex side (they
 share the core and differ in how registers 0 and 1 are loaded), loops and
 subroutine calls in pixel shaders (the core's, tested by the vertex tests),
