@@ -27,6 +27,7 @@ DECLARE_bool(a64_stack_access_no_fixup);
 DECLARE_bool(a64_tight_sequences);  // hakuX-Boosted
 DECLARE_bool(a64_fuse_compare_branch);
 DECLARE_bool(a64_stack_access_verify);
+DECLARE_bool(a64_address_fixup_bit_tests);  // hakuX-Boosted
 
 #if XE_COMPILER_MSVC
 #include <intrin.h>
@@ -376,6 +377,22 @@ inline XReg ComputeMemoryAddress(A64Emitter& e, const I64Op& guest) {
       // nearly all of them (few addresses are in 0xE0000000+): a taken
       // branch per access for the front end to follow. The same four
       // instructions' worth, flags clobbered as before.
+      if (cvars::a64_address_fixup_bit_tests && !stack_based) {
+        // hakuX-Boosted: a64_address_fixup_bit_tests. An address is in
+        // 0xE0000000+ exactly when its top three bits are all set, so the
+        // first clear one among them ends the matter: one instruction for
+        // everything below 0x80000000 (stacks, the heaps titles use most),
+        // two for 0x80000000-0xBFFFFFFF, three for 0xC0000000-0xDFFFFFFF,
+        // and all four only where the page has to be added. No flag is
+        // touched and w17 is not used.
+        Xbyak_aarch64::Label no_fixup;
+        e.CodeGenerator::tbz(e.w0, 31, no_fixup);
+        e.CodeGenerator::tbz(e.w0, 30, no_fixup);
+        e.CodeGenerator::tbz(e.w0, 29, no_fixup);
+        e.add(e.w0, e.w0, 1, 12);  // + 0x1000
+        e.L(no_fixup);
+        return e.x0;
+      }
       e.mov(e.w17, 0xE0000000u);
       e.cmp(e.w0, e.w17);
       e.cset(e.w17, HS);                   // 1 if the address is 0xE0000000+
@@ -760,6 +777,52 @@ inline bool EmitVmxNanFixupTight(A64Emitter& e, int result, const int* srcs,
   e.fmov(e.w0, SReg(scratch));
   e.cbz(e.w0, fix);
   e.L(done);
+  return true;
+}
+
+// hakuX-Boosted: a64_tight_sequences. vmaxfp and vminfp without the copies
+// and with FixupVmxMaxMinNan's work out of line. That fix-up changes the
+// hardware's result only in lanes where both operands are NaNs (to the
+// bitwise OR of the two); in such a lane the hardware's result is a NaN
+// too, so the usual path is the operation and one test of its result. Not
+// used (false is returned, nothing emitted) on a core that needs denormals
+// flushed in software or when an operand is a constant sitting in one of
+// the scratch registers the out-of-line code needs.
+template <typename T1, typename T2>
+inline bool EmitVmxMaxMinTight(A64Emitter& e, int dest_idx, const T1& src1,
+                               const T2& src2, bool is_max) {
+  using namespace Xbyak_aarch64;
+  if (!cvars::a64_tight_sequences ||
+      !e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs) ||
+      src1.is_constant || src2.is_constant) {
+    return false;
+  }
+  const int s1 = src1.reg().getIdx();
+  const int s2 = src2.reg().getIdx();
+  const int result = (dest_idx == s1 || dest_idx == s2) ? 2 : dest_idx;
+  if (is_max) {
+    e.fmax(VReg(result).s4, VReg(s1).s4, VReg(s2).s4);
+  } else {
+    e.fmin(VReg(result).s4, VReg(s1).s4, VReg(s2).s4);
+  }
+  auto& done = e.NewCachedLabel();
+  auto& fix = e.AddToTail([=, &done](A64Emitter& e, Xbyak_aarch64::Label&) {
+    e.orr(VReg(3).b16, VReg(s1).b16, VReg(s2).b16);
+    e.fcmeq(VReg(0).s4, VReg(s1).s4, VReg(s1).s4);
+    e.fcmeq(VReg(1).s4, VReg(s2).s4, VReg(s2).s4);
+    e.orr(VReg(0).b16, VReg(0).b16, VReg(1).b16);
+    e.bsl(VReg(0).b16, VReg(result).b16, VReg(3).b16);
+    e.mov(VReg(result).b16, VReg(0).b16);
+    e.CodeGenerator::b(done);
+  });
+  e.fcmeq(VReg(3).s4, VReg(result).s4, VReg(result).s4);
+  e.uminv(SReg(3), VReg(3).s4);
+  e.fmov(e.w0, SReg(3));
+  e.cbz(e.w0, fix);
+  e.L(done);
+  if (result != dest_idx) {
+    e.mov(VReg(dest_idx).b16, VReg(2).b16);
+  }
   return true;
 }
 

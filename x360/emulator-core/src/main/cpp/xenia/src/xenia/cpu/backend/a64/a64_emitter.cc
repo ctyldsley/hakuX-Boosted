@@ -108,6 +108,33 @@ DEFINE_bool(
     "translated after it is set.",
     "a64");
 
+// hakuX-Boosted: see ComputeMemoryAddress in a64_seq_util.h.
+DEFINE_bool(
+    a64_address_fixup_bit_tests, false,
+    "On hosts with pages larger than 4 KiB (16 KiB Android kernels), where "
+    "every load and store with a computed address moves guest addresses "
+    "from 0xE0000000 up by one page: test the address's top three bits one "
+    "at a time and stop at the first that is clear, instead of four "
+    "instructions that never branch. One instruction (a short forward "
+    "branch, taken) for addresses below 0x80000000, two or three for the "
+    "rest below 0xE0000000. Nothing changes on a 4 KiB host. Takes effect "
+    "for functions translated after it is set.",
+    "a64");
+
+// hakuX-Boosted: see A64Emitter::lean_calls_.
+DEFINE_bool(
+    a64_lean_calls, false,
+    "Fewer instructions round every guest call and return, with the same "
+    "effect: the return address goes from the call site to the callee in a "
+    "register without a round trip through the caller's stack frame; a "
+    "callee that already has code is reached through an address literal; "
+    "the function prologue's record for longjmp is written with paired "
+    "stores and its overflow test is one bit test (when a64_max_stackpoints "
+    "is a power of two); and the tests after a call and at a return branch "
+    "in one instruction on the usual path. Takes effect for functions "
+    "translated after it is set.",
+    "a64");
+
 // hakuX-Boosted: see A64Emitter::PushStackpoint.
 DEFINE_bool(
     a64_compact_stackpoint_push, false,
@@ -224,6 +251,7 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
   // the function is emitted again from the same HIR with the long form.
   short_forward_ok_ = cvars::a64_short_forward_branches;
   linked_calls_ok_ = cvars::a64_linked_calls;
+  call_literals_allowed_ = true;
   locals_laid_out_ = false;
   for (int attempt = 0; attempt < 2; ++attempt) {
     used_short_forward19_ = false;
@@ -261,10 +289,12 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
     source_map_arena_.Reset();
     short_forward_ok_ = false;
     linked_calls_ok_ = false;
+    call_literals_allowed_ = false;
     emitted = false;
   }
   short_forward_ok_ = false;
   linked_calls_ok_ = false;
+  call_literals_allowed_ = false;
   if (!emitted) {
     // Emplace only runs on success, so a failed compile has to reset too.
     ResetPerFunctionState();
@@ -277,7 +307,9 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
     std::vector<std::pair<uint32_t, uint32_t>> literals;
     literals.reserve(call_literals_.size());
     for (const auto& literal : call_literals_) {
-      literals.emplace_back(literal.guest_target, literal.code_offset);
+      if (literal.guest_target) {  // (not the fixed ones of a64_lean_calls)
+        literals.emplace_back(literal.guest_target, literal.code_offset);
+      }
     }
     static_cast<A64Function*>(function)->SetCallLiterals(std::move(literals));
   }
@@ -313,6 +345,9 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   load_expectations_ = builder->context_load_expectations().empty()
                            ? nullptr
                            : &builder->context_load_expectations();
+  elided_truncates_ = builder->elided_truncates().empty()
+                          ? nullptr
+                          : &builder->elided_truncates();
   pin_home_verify_ = builder->pin_home_verify().empty()
                          ? nullptr
                          : &builder->pin_home_verify();
@@ -418,12 +453,45 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   }
   code_offsets.prolog_stack_alloc = getSize();
 
+  // hakuX-Boosted: a64_lean_calls applies to a function all of whose calls
+  // that hand on a return address (every call but a tail call) come after
+  // the SET_RETURN_ADDRESS that names it in the same block, which is how
+  // the front end emits them. The address is then a constant at the call
+  // and the frame's slot for it is not used at all.
+  lean_calls_ = cvars::a64_lean_calls;
+  for (auto block = builder->first_block(); block && lean_calls_;
+       block = block->next) {
+    bool named = false;
+    for (auto i = block->instr_head; i; i = i->next) {
+      switch (i->GetOpcodeNum()) {
+        case hir::OPCODE_SET_RETURN_ADDRESS:
+          named = true;
+          break;
+        case hir::OPCODE_CALL:
+        case hir::OPCODE_CALL_TRUE:
+        case hir::OPCODE_CALL_INDIRECT:
+        case hir::OPCODE_CALL_INDIRECT_TRUE:
+          if (!(i->flags & hir::CALL_TAIL) && !named) {
+            lean_calls_ = false;
+          }
+          break;
+        default:
+          break;
+      }
+    }
+  }
+  pending_return_address_valid_ = false;
+  x0_const_valid_ = false;
+  x0_const_noted_ = false;
+
   // Store host return address (x30/LR) so the epilog can restore it.
   str(x30, ptr(sp, static_cast<uint32_t>(StackLayout::HOST_RET_ADDR)));
   // Store guest PPC return address (passed in x0 by convention).
   str(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
   // Store zero for call return address (we haven't made a call yet).
-  str(xzr, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
+  if (!lean_calls_) {
+    str(xzr, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
+  }
 
   // Record stackpoint for longjmp recovery.
   PushStackpoint();
@@ -466,6 +534,8 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     // predecessor ran, so mode is unknown).
     ForgetFpcrMode();
     flags_key_.valid = false;  // hakuX-Boosted: nor what the flags hold
+    pending_return_address_valid_ = false;
+    x0_const_valid_ = false;
 
     // Bind all labels targeting this block.
     auto label = block->label_head;
@@ -572,7 +642,8 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
           auto home = pin_home_verify_->find(sources[n]);
           if (home != pin_home_verify_->end() &&
               home->second.slot < pins_.size()) {
-            EmitPinHomeVerify(sources[n], pins_[home->second.slot]);
+            EmitPinHomeVerify(sources[n], pins_[home->second.slot],
+                              home->second.low32);
           }
         }
       }
@@ -654,6 +725,29 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
           selected = SelectSequence(this, instr, &new_tail);
         }
         skip_next_cmp_ = false;
+        // hakuX-Boosted: a64_lean_calls, what x0 holds now: the constant
+        // this instruction's sequence said it left there, or nothing known
+        // once any other instruction that emits code has run.
+        if (x0_const_noted_) {
+          x0_const_noted_ = false;
+          x0_const_valid_ = true;
+        } else {
+          switch (instr->GetOpcodeNum()) {
+            case hir::OPCODE_SOURCE_OFFSET:
+            case hir::OPCODE_COMMENT:
+            case hir::OPCODE_NOP:
+            case hir::OPCODE_CONTEXT_BARRIER:
+              break;
+            case hir::OPCODE_SET_RETURN_ADDRESS:
+              if (!lean_calls_) {
+                x0_const_valid_ = false;
+              }
+              break;
+            default:
+              x0_const_valid_ = false;
+              break;
+          }
+        }
         // What the flags hold now.
         if (compare_key.valid) {
           flags_key_ = compare_key;
@@ -815,14 +909,17 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     }
     const uint64_t thunk =
         reinterpret_cast<uint64_t>(backend()->resolve_function_thunk());
+    size_t linked = 0;
     for (auto& literal : call_literals_) {
       L(*literal.label);
       literal.code_offset = static_cast<uint32_t>(getSize());
-      dd(static_cast<uint32_t>(thunk));
-      dd(static_cast<uint32_t>(thunk >> 32));
+      const uint64_t value = literal.guest_target ? thunk : literal.fixed;
+      linked += literal.guest_target ? 1 : 0;
+      dd(static_cast<uint32_t>(value));
+      dd(static_cast<uint32_t>(value >> 32));
     }
     compiler::translation_stats.linked_call_sites.fetch_add(
-        call_literals_.size(), std::memory_order_relaxed);
+        linked, std::memory_order_relaxed);
   }
   code_offsets.tail = getSize();
 
@@ -929,8 +1026,12 @@ bool A64Emitter::UseShortBranch(const Xbyak_aarch64::Label& label,
   if (IsNearBoundLabel(label, max_distance)) {
     return true;
   }
+  // hakuX-Boosted: a64_lean_calls, the epilog too: it comes after every
+  // block, and the test at a return branches to it.
+  const bool is_epilog =
+      lean_calls_ && epilog_label_ && &label == epilog_label_;
   if (!short_forward_ok_ || bound_label_offsets_.count(&label) ||
-      !block_labels_.count(&label)) {
+      !(block_labels_.count(&label) || is_epilog)) {
     return false;
   }
   (max_distance == kNearBranch14 ? used_short_forward14_
@@ -1219,10 +1320,10 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
 
   if (fn->machine_code()) {
     // Direct call — function is already compiled.
-    mov(x9, reinterpret_cast<uint64_t>(fn->machine_code()));
+    EmitLoadCallTarget(reinterpret_cast<uint64_t>(fn->machine_code()));
     if (!(instr->flags & hir::CALL_TAIL)) {
       // Pass the next call's guest return address in x0.
-      ldr(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
+      EmitCallReturnAddress();
       blr(x9);
       synchronize_stack_on_next_instruction_ = true;
     } else {
@@ -1301,10 +1402,35 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     }
     br(x9);
   } else {
-    ldr(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
+    EmitCallReturnAddress();
     blr(x9);
     synchronize_stack_on_next_instruction_ = true;
   }
+}
+
+void A64Emitter::EmitCallReturnAddress() {
+  if (!lean_calls_) {
+    ldr(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
+    return;
+  }
+  // (lean_calls_ is only set when a SET_RETURN_ADDRESS precedes every such
+  // call in its block; a zero here would mean that check and this code
+  // disagree, and is what the frame slot held before any call.)
+  const uint64_t address =
+      pending_return_address_valid_ ? pending_return_address_ : 0;
+  if (!(x0_const_valid_ && x0_const_ == address)) {
+    mov(x0, address);
+  }
+}
+
+void A64Emitter::EmitLoadCallTarget(uint64_t host_address) {
+  if (lean_calls_ && call_literals_allowed_) {
+    auto& literal = NewCachedLabel();
+    call_literals_.push_back({0, &literal, 0, host_address});
+    ldr(x9, literal);
+    return;
+  }
+  mov(x9, host_address);
 }
 
 void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
@@ -1315,6 +1441,7 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
   if (instr->flags & hir::CALL_POSSIBLE_RETURN) {
     // Compare target guest address with our function's return address.
     ldr(w0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
+    x0_const_valid_ = false;  // hakuX-Boosted
     cmp(target_w, w0);
     b(EQ, epilog_label());
   }
@@ -1378,7 +1505,7 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
     br(x9);
   } else {
     // Regular call: pass the next call's return address.
-    ldr(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
+    EmitCallReturnAddress();
     blr(x9);
     synchronize_stack_on_next_instruction_ = true;
   }
@@ -1393,7 +1520,49 @@ void A64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
   // outlives its block, so none is live in a vector register after the call.
   // See A64HelperEmitter::EmitGuestToHostLeanThunk for the whole argument.
   auto thunk = backend()->guest_to_host_thunk();
-  if (cvars::a64_lean_extern_thunk && instr && !instr->next &&
+  // hakuX-Boosted: or when instructions do follow in the block and none of
+  // them uses a value defined before the call. That is the case of an
+  // import thunk (sc 2; blr: the blr's instructions follow the call in one
+  // block and load everything afresh), which is how titles reach nearly
+  // every kernel export, and the "last instruction of its block" test never
+  // held for it: the setting did nothing there (the bench's host_calls
+  // loop, finding 3 of bench-harness.md). Checked by position, not by
+  // ordinals: a value used after the call is live across it exactly when
+  // its definition is not among the instructions after the call. Pinned
+  // guest registers are written back before this instruction and read back
+  // after it by Emit's loop, so they do not count.
+  bool nothing_live_across = instr && !instr->next;
+  if (cvars::a64_lean_extern_thunk && instr && instr->next) {
+    using hir::OpcodeSignatureType;
+    std::unordered_set<const hir::Value*> defined_after;
+    nothing_live_across = true;
+    for (const hir::Instr* i = instr->next; i && nothing_live_across;
+         i = i->next) {
+      const uint32_t signature = i->opcode->signature;
+      const hir::Value* sources[3] = {
+          GET_OPCODE_SIG_TYPE_SRC1(signature) == hir::OPCODE_SIG_TYPE_V
+              ? i->src1.value
+              : nullptr,
+          GET_OPCODE_SIG_TYPE_SRC2(signature) == hir::OPCODE_SIG_TYPE_V
+              ? i->src2.value
+              : nullptr,
+          GET_OPCODE_SIG_TYPE_SRC3(signature) == hir::OPCODE_SIG_TYPE_V
+              ? i->src3.value
+              : nullptr,
+      };
+      for (const hir::Value* source : sources) {
+        if (source && !source->IsConstant() &&
+            !defined_after.count(source)) {
+          nothing_live_across = false;
+        }
+      }
+      if (GET_OPCODE_SIG_TYPE_DEST(signature) == hir::OPCODE_SIG_TYPE_V &&
+          i->dest) {
+        defined_after.insert(i->dest);
+      }
+    }
+  }
+  if (cvars::a64_lean_extern_thunk && nothing_live_across &&
       backend()->guest_to_host_lean_thunk()) {
     thunk = backend()->guest_to_host_lean_thunk();
   }
@@ -1672,14 +1841,20 @@ static uint64_t ReportPinHomeMismatch(void* raw_context, uint64_t function,
 }
 
 void A64Emitter::EmitPinHomeVerify(const hir::Value* value,
-                                   const PinnedGuestRegister& pin) {
+                                   const PinnedGuestRegister& pin,
+                                   bool low32) {
   ForgetFpcrMode();  // the report goes through the thunk, as EmitPinnedVerify
   flags_key_.valid = false;
+  x0_const_valid_ = false;
   Label& same = NewCachedLabel();
   const uint32_t index = static_cast<uint32_t>(value->reg.index);
   switch (pin.type) {
     case hir::INT64_TYPE:
-      eor(x0, XReg(gpr_reg_map_[index]), XReg(pin.host_reg));
+      if (low32) {
+        eor(w0, WReg(gpr_reg_map_[index]), WReg(pin.host_reg));
+      } else {
+        eor(x0, XReg(gpr_reg_map_[index]), XReg(pin.host_reg));
+      }
       break;
     case hir::INT8_TYPE:
       eor(w0, WReg(gpr_reg_map_[index]), WReg(pin.host_reg));
@@ -1829,6 +2004,12 @@ A64Emitter::PinSync A64Emitter::ClassifyPinSync(const hir::Instr* instr) {
 }
 
 void A64Emitter::SetReturnAddress(uint64_t value) {
+  if (lean_calls_) {
+    // hakuX-Boosted: a64_lean_calls. Nothing here: the call materialises it.
+    pending_return_address_ = value;
+    pending_return_address_valid_ = true;
+    return;
+  }
   mov(x0, value);
   str(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
 }
@@ -1976,6 +2157,47 @@ void A64Emitter::PushStackpoint() {
   if (!cvars::a64_enable_host_guest_stack_synchronization) {
     return;
   }
+  // hakuX-Boosted: a64_lean_calls. The same record, written with fewer
+  // instructions: the entry's address by a shifted add (as
+  // a64_compact_stackpoint_push), the guest stack pointer and return
+  // address with one paired store (they are adjacent 32-bit fields), and
+  // the overflow test as a test of one bit: the depth goes up by one at a
+  // time, so it reaches a limit of 2^n the first time bit n is set.
+  const uint64_t max_stackpoints =
+      static_cast<uint64_t>(cvars::a64_max_stackpoints);
+  if (lean_calls_ && max_stackpoints >= 2 && max_stackpoints < (1ull << 31) &&
+      (max_stackpoints & (max_stackpoints - 1)) == 0) {
+    static_assert(sizeof(A64BackendStackpoint) == 16,
+                  "the shift below is the entry size");
+    static_assert(offsetof(A64BackendStackpoint, guest_return_address_) ==
+                      offsetof(A64BackendStackpoint, guest_stack_) + 4,
+                  "the paired store below writes both");
+    ldr(x8, ptr(x19, static_cast<uint32_t>(
+                         offsetof(A64BackendContext, stackpoints))));
+    ldr(w9, ptr(x19, static_cast<uint32_t>(offsetof(
+                         A64BackendContext, current_stackpoint_depth))));
+    add(x8, x8, x9, LSL, 4);
+    mov(x10, sp);
+    str(x10, ptr(x8, static_cast<uint32_t>(
+                         offsetof(A64BackendStackpoint, host_stack_))));
+    ldr(w10, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+    ldr(w11, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, lr))));
+    stp(w10, w11, ptr(x8, static_cast<int32_t>(offsetof(A64BackendStackpoint,
+                                                        guest_stack_))));
+    add(w9, w9, 1);
+    str(w9, ptr(x19, static_cast<uint32_t>(offsetof(
+                         A64BackendContext, current_stackpoint_depth))));
+    auto& overflow = AddToTail([](A64Emitter& e, Label& lbl) {
+      e.CallNativeSafe(
+          reinterpret_cast<void*>(A64Emitter::HandleStackpointOverflowError));
+    });
+    uint32_t bit = 0;
+    while ((1ull << bit) != max_stackpoints) {
+      ++bit;
+    }
+    tbnz(w9, bit, overflow);
+    return;
+  }
   // x8 = stackpoints array, w9 = current depth
   ldr(x8, ptr(x19,
               static_cast<uint32_t>(offsetof(A64BackendContext, stackpoints))));
@@ -2053,7 +2275,13 @@ void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
 
   ldr(w16, ptr(x19, static_cast<uint32_t>(offsetof(
                         A64BackendContext, pending_stackpoint_sync_depth))));
-  cbz(w16, return_from_sync);
+  if (lean_calls_) {
+    // hakuX-Boosted: a64_lean_calls. The label is three instructions on:
+    // the one-instruction form always reaches.
+    CodeGenerator::cbz(w16, return_from_sync);
+  } else {
+    cbz(w16, return_from_sync);
+  }
 
   auto& sync_label = AddToTail([](A64Emitter& e, Label& lbl) {
     // x8 was set up in the body to point at return_from_sync; do that there

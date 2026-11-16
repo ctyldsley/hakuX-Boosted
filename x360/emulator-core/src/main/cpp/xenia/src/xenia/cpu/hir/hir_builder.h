@@ -11,6 +11,7 @@
 #define XENIA_CPU_HIR_HIR_BUILDER_H_
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "third_party/fmt/include/fmt/format.h"
@@ -121,9 +122,17 @@ class HIRBuilder {
   struct PinHomeVerify {
     uint8_t slot;  // index into pinned_context_slots()
     bool is_def;   // computed into the pin, not loaded from it
+    bool low32;    // a truncation of the pin: only its low half is compared
   };
   std::unordered_map<const Value*, PinHomeVerify>& pin_home_verify() {
     return pin_home_verify_;
+  }
+  // hakuX-Boosted: register_allocation_elide_copies. Truncations whose
+  // result the allocator put in the operand's own register because every
+  // use of the result reads only its low 32 bits: the backend emits nothing
+  // for them (it would otherwise clear the register's upper half).
+  std::unordered_set<const Instr*>& elided_truncates() {
+    return elided_truncates_;
   }
 
   // hakuX-Boosted: context_constant_verify. Context loads the cross-block
@@ -414,6 +423,7 @@ class HIRBuilder {
   std::vector<PinnedContextSlot> pinned_context_slots_;
   PinSyncState pin_sync_;
   std::unordered_map<const Value*, PinHomeVerify> pin_home_verify_;
+  std::unordered_set<const Instr*> elided_truncates_;
   std::unordered_map<const Instr*, uint64_t> context_load_expectations_;
   uint32_t pass_stamp_ = 0;
   uint32_t pass_stamp_floor_ = UINT32_MAX;

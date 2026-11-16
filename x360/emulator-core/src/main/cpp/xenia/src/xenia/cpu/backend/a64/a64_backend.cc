@@ -982,6 +982,9 @@ bool A64Backend::Initialize(Processor* processor) {
 
   // Set up machine info for the register allocator.
   machine_info_.supports_extended_load_store = true;
+  // hakuX-Boosted: see VECTOR_DENORMFLUSH in a64_seq_vector.cc.
+  machine_info_.denormflush_is_copy =
+      (xe::arm64::GetFeatureFlags() & xe::arm64::kA64FZFlushesInputs) != 0;
   // GPR set: x22-x28 (7 registers; x19=backend ctx, x20=context, x21=membase)
   auto& gpr_set = machine_info_.register_sets[0];
   gpr_set.id = 0;

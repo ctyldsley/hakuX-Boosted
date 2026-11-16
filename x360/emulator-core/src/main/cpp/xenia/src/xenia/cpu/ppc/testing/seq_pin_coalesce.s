@@ -218,3 +218,67 @@ test_pin_memory_round_trip:
   #_ REGISTER_OUT r4 0x11223344
   #_ REGISTER_OUT r5 0x6688AACC
   #_ REGISTER_OUT r6 0
+
+# Between a compare and the branch that uses it: instructions whose
+# translation uses the host's flags for something else (a float add and a
+# float compare, each of which tests for NaN; a load and a store, whose
+# address is adjusted with a compare on a 16 KiB host). The branch must go
+# by the integer compare. All three bits.
+test_cmp_then_flag_users_then_branch:
+  #_ REGISTER_IN r3 5
+  #_ REGISTER_IN r4 9
+  #_ REGISTER_IN f1 2.0
+  #_ REGISTER_IN f2 1.0
+  li r10, 0
+  cmpw cr6, r3, r4
+  fadd f3, f1, f2
+  fcmpu cr1, f1, f2
+  bge cr6, 1f
+  ori r10, r10, 1
+1:
+  cmpw cr6, r4, r3
+  stw r3, -16(r1)
+  lwz r5, -16(r1)
+  fsub f4, f2, f1
+  ble cr6, 2f
+  ori r10, r10, 2
+2:
+  cmpw cr6, r5, r3
+  fmul f5, f3, f4
+  fcmpu cr1, f2, f1
+  bne cr6, 3f
+  ori r10, r10, 4
+3:
+  cmplw cr6, r3, r4
+  fdiv f6, f1, f1
+  lwz r6, -16(r1)
+  blt cr6, 4f
+  ori r10, r10, 8
+4:
+  blr
+  #_ REGISTER_OUT r5 5
+  #_ REGISTER_OUT r6 5
+  #_ REGISTER_OUT r10 7
+  #_ REGISTER_OUT f3 3.0
+  #_ REGISTER_OUT f4 -1.0
+  #_ REGISTER_OUT f5 -3.0
+  #_ REGISTER_OUT f6 1.0
+
+# A float compare's own branch after an integer compare of other things,
+# and the integer compare's branch after that.
+test_float_cmp_between_integer_cmp_and_branch:
+  #_ REGISTER_IN r3 9
+  #_ REGISTER_IN r4 5
+  #_ REGISTER_IN f1 1.0
+  #_ REGISTER_IN f2 2.0
+  li r10, 0
+  cmpw cr6, r3, r4
+  fcmpu cr7, f1, f2
+  bge cr7, 1f
+  ori r10, r10, 1
+1:
+  ble cr6, 2f
+  ori r10, r10, 2
+2:
+  blr
+  #_ REGISTER_OUT r10 3

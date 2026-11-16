@@ -77,6 +77,7 @@ void HIRBuilder::Reset() {
   pinned_context_slots_.clear();
   pin_sync_.Clear();
   pin_home_verify_.clear();  // hakuX-Boosted
+  elided_truncates_.clear();
   context_load_expectations_.clear();
   pass_stamp_ = 0;
   pass_stamp_floor_ = UINT32_MAX;

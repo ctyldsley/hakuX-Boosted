@@ -99,6 +99,10 @@ struct TranslationStats {
   // whose result has other uses.
   std::atomic<uint64_t> compares_reused_flags{0};
   std::atomic<uint64_t> branches_on_flags{0};
+  // register_allocation_elide_copies (static): copies that took their
+  // operand's register (those of values living in a pin are counted with
+  // the pin's loads).
+  std::atomic<uint64_t> copies_elided{0};
   std::atomic<uint64_t> pin_coalesced_loads{0};
   std::atomic<uint64_t> pin_coalesced_defs{0};
   // Static: blocks translated in functions with and without pinned

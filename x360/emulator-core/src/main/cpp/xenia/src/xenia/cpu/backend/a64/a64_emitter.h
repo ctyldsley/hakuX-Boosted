@@ -148,6 +148,14 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   uint32_t EmitSaveExtendedGprsForBareCall();
   void EmitRestoreExtendedGprsAfterBareCall();
   void SetReturnAddress(uint64_t value);
+  // hakuX-Boosted: a64_lean_calls. A sequence that has just left this
+  // constant in x0 says so; a call emitted straight after that needs the
+  // same constant in x0 (the return address, which the front end also
+  // stores to the link register) does not load it again.
+  void NoteX0Constant(uint64_t value) {
+    x0_const_ = value;
+    x0_const_noted_ = true;
+  }
 
   // Backend context register = x19.
   // Points to A64BackendContext (immediately before PPCContext in memory).
@@ -328,10 +336,16 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // register with that register, and report a difference. Clobbers x0 to
   // x2, v0 and no flag.
   void EmitPinHomeVerify(const hir::Value* value,
-                         const PinnedGuestRegister& pin);
+                         const PinnedGuestRegister& pin, bool low32);
   const std::unordered_map<const hir::Value*,
                            hir::HIRBuilder::PinHomeVerify>* pin_home_verify_ =
       nullptr;
+  // hakuX-Boosted: register_allocation_elide_copies, see
+  // HIRBuilder::elided_truncates.
+  bool IsElidedTruncate(const hir::Instr* instr) const {
+    return elided_truncates_ && elided_truncates_->count(instr) != 0;
+  }
+  const std::unordered_set<const hir::Instr*>* elided_truncates_ = nullptr;
   // hakuX-Boosted: context_constant_verify. After a context load the
   // cross-block constant pass has an expectation for: report if the loaded
   // value differs. Clobbers x0 to x2 and x17; no flag.
@@ -413,12 +427,31 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // for the second attempt at a function too large for a literal load to
   // be certain to reach its literal.
   struct CallLiteral {
-    uint32_t guest_target;
+    uint32_t guest_target;  // 0: |fixed| is the value, nothing links it
     Xbyak_aarch64::Label* label;
     uint32_t code_offset;
+    uint64_t fixed = 0;
   };
   std::vector<CallLiteral> call_literals_;
   bool linked_calls_ok_ = false;
+  // hakuX-Boosted: a64_lean_calls for the function being emitted (the
+  // setting, and every call in the function preceded in its own block by
+  // the instruction that names its return address: see Emit). The return
+  // address then never goes through the frame's GUEST_CALL_RET_ADDR slot.
+  bool lean_calls_ = false;
+  bool pending_return_address_valid_ = false;
+  uint64_t pending_return_address_ = 0;
+  uint64_t x0_const_ = 0;
+  bool x0_const_valid_ = false;
+  bool x0_const_noted_ = false;
+  // Cleared for the second attempt at a function too large for a literal
+  // load to be certain to reach.
+  bool call_literals_allowed_ = false;
+  // x0 <- the return address for the call being emitted.
+  void EmitCallReturnAddress();
+  // x9 <- the host address of a function that has code: three instructions
+  // of immediate, or one load from a literal with a64_lean_calls.
+  void EmitLoadCallTarget(uint64_t host_address);
   // The locals' stack offsets are assigned once per function (see Emit).
   bool locals_laid_out_ = false;
   size_t locals_stack_size_ = 0;

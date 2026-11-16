@@ -39,9 +39,10 @@ count() {  # count <program> <passes>: prints "<host instructions> <guest instru
     return 1
   fi
   BENCH_XLAT_TRACE="$1:$2" $qemu -one-insn-per-tb -d exec,nochain -dfilter "$range" -D "$work/log" \
-    "$dir/bench_core" --suite=xlat --label=count "${args[@]}" > "$work/out" 2>/dev/null
+    "$dir/bench_core" --suite=xlat --label=count "${args[@]}" > "$work/out" 2> "$work/err"
   if ! grep -q "code_cache=${range/../\\.\\.}" "$work/out"; then
-    echo "FAILED: the code cache moved between two runs" >&2
+    echo "FAILED: the counting run stopped, or the code cache moved between two runs:" >&2
+    grep -v MIDR_EL1 "$work/err" | tail -3 >&2
     return 1
   fi
   echo "$(grep -c '^Trace' "$work/log") $(sed -n 's/.* guest_insns=\([0-9]*\) ok=1$/\1/p' "$work/out")"

@@ -41,6 +41,16 @@ DEFINE_bool(
     "Slower code. Takes effect for functions translated after it is set.",
     "CPU");
 DEFINE_bool(
+    register_allocation_elide_copies, false,
+    "The register allocator gives the result of a copy the register of what "
+    "it copies, where that register stays untouched for as long as the "
+    "result is used, so that the copy needs no instruction: assignments, "
+    "truncations to 32 bits whose result is only compared or extended "
+    "again (every compare of two 32-bit guest values has two), and the "
+    "denormal flush in front of VMX float operations on cores that flush in "
+    "hardware. Takes effect for functions translated after it is set.",
+    "CPU");
+DEFINE_bool(
     register_allocation_from_top, false,
     "For the translator's tests, not for play: the register allocator hands "
     "out the highest numbered free host register instead of the lowest, so "
@@ -67,7 +77,7 @@ using xe::cpu::hir::Value;
 #define ASSERT_NO_CYCLES 0
 
 RegisterAllocationPass::RegisterAllocationPass(const MachineInfo* machine_info)
-    : CompilerPass() {
+    : CompilerPass(), machine_info_(machine_info) {
   // Initialize register sets.
   // TODO(benvanik): rewrite in a way that makes sense - this is terrible.
   auto mi_sets = machine_info->register_sets;
@@ -195,12 +205,49 @@ bool RegisterAllocationPass::Run(HIRBuilder* builder) {
                                : stats.pin_coalesced_loads)
               .fetch_add(1, std::memory_order_relaxed);
           if (cvars::pin_guest_registers_coalesce_verify) {
-            builder->pin_home_verify()[instr->dest] =
-                {home->second.slot, home->second.is_def};
+            builder->pin_home_verify()[instr->dest] = {
+                home->second.slot, home->second.is_def,
+                home->second.is_truncate};
           } else {
             SortUsageList(instr->dest);
             instr->dest->reg.set = home->second.set->set;
             instr->dest->reg.index = home->second.reg_index;
+            // A copy whose operand lives in the same pin needs no
+            // instruction. (A value computed into a pin *by* such an
+            // instruction, from an operand elsewhere, does.)
+            if ((instr->opcode == &OPCODE_TRUNCATE_info ||
+                 instr->opcode == &OPCODE_ZERO_EXTEND_info) &&
+                !home->second.is_def && instr->src1.value &&
+                instr->src1.value->reg.set == instr->dest->reg.set &&
+                instr->src1.value->reg.index == instr->dest->reg.index) {
+              builder->elided_truncates().insert(instr);
+            }
+            instr = instr->next;
+            continue;
+          }
+        }
+      }
+      // hakuX-Boosted: register_allocation_elide_copies. A copy whose
+      // operand is used for the last time here takes over the operand's
+      // register, which AdvanceUses has just freed.
+      if (cvars::register_allocation_elide_copies &&
+          GET_OPCODE_SIG_TYPE_DEST(signature) == OPCODE_SIG_TYPE_V &&
+          IsElidableCopy(instr) && !instr->src1_use->next) {
+        const Value* source = instr->src1.value;
+        RegisterSetUsage* source_set = RegisterSetForValue(source);
+        if (source->reg.set == source_set->set &&
+            source_set == RegisterSetForValue(instr->dest) &&
+            !source_set->reserved.test(source->reg.index) &&
+            !IsRegInUse(source->reg)) {
+          SortUsageList(instr->dest);
+          if (TryAllocateRegister(instr->dest, source->reg)) {
+            if ((instr->opcode == &OPCODE_TRUNCATE_info ||
+                 instr->opcode == &OPCODE_ZERO_EXTEND_info) &&
+                instr->dest->reg.index == source->reg.index) {
+              builder->elided_truncates().insert(instr);
+            }
+            translation_stats.copies_elided.fetch_add(
+                1, std::memory_order_relaxed);
             instr = instr->next;
             continue;
           }
@@ -717,6 +764,105 @@ uint32_t LastUseOrdinal(const Value* value) {
 
 }  // namespace
 
+bool RegisterAllocationPass::IsElidableCopy(const Instr* instr) const {
+  const uint32_t signature = instr->opcode->signature;
+  if (GET_OPCODE_SIG_TYPE_DEST(signature) != OPCODE_SIG_TYPE_V ||
+      GET_OPCODE_SIG_TYPE_SRC1(signature) != OPCODE_SIG_TYPE_V ||
+      !instr->dest || !instr->src1.value || instr->src1.value->IsConstant()) {
+    return false;
+  }
+  const Value* dest = instr->dest;
+  const Value* source = instr->src1.value;
+  switch (instr->opcode->num) {
+    case OPCODE_ASSIGN:
+      return dest->type == source->type;
+    case OPCODE_VECTOR_DENORMFLUSH:
+      return machine_info_ && machine_info_->denormflush_is_copy;
+    case OPCODE_TRUNCATE: {
+      // 64 to 32 bits, and every use of the result one that reads the low
+      // 32 bits of its register and nothing else: the integer compares and
+      // the two extensions back to 64 bits. (The register's upper half then
+      // need not be cleared, and when the result shares its operand's
+      // register it is not.)
+      if (dest->type != INT32_TYPE || source->type != INT64_TYPE) {
+        return false;
+      }
+      for (auto use = dest->use_head; use; use = use->next) {
+        switch (use->instr->opcode->num) {
+          case OPCODE_COMPARE_EQ:
+          case OPCODE_COMPARE_NE:
+          case OPCODE_COMPARE_SLT:
+          case OPCODE_COMPARE_SLE:
+          case OPCODE_COMPARE_SGT:
+          case OPCODE_COMPARE_SGE:
+          case OPCODE_COMPARE_ULT:
+          case OPCODE_COMPARE_ULE:
+          case OPCODE_COMPARE_UGT:
+          case OPCODE_COMPARE_UGE:
+          case OPCODE_ZERO_EXTEND:
+          case OPCODE_SIGN_EXTEND:
+            break;
+          case OPCODE_ROTATE_LEFT:
+          case OPCODE_BYTE_SWAP:
+            // The 32-bit rotate and byte swap read their first operand as
+            // 32 bits. (A rotate's amount is an 8-bit value: a 32-bit
+            // result cannot be it.)
+            if (use->instr->src1.value != dest) {
+              return false;
+            }
+            break;
+          case OPCODE_STORE:
+          case OPCODE_STORE_OFFSET:
+            // The value stored to memory (stw: every 32-bit store has such
+            // a truncation in front of it). The address operands are 64-bit
+            // values, so a 32-bit result is never one of them; checked all
+            // the same.
+            if (use->instr->src1.value == dest ||
+                (use->instr->opcode->num == OPCODE_STORE_OFFSET &&
+                 use->instr->src2.value == dest)) {
+              return false;
+            }
+            break;
+          default:
+            return false;
+        }
+      }
+      return true;
+    }
+    case OPCODE_ZERO_EXTEND: {
+      // 32 to 64 bits of a value whose register is known to have a clear
+      // upper half already: the result of a 32-bit rotate by other than a
+      // constant 0, which the backend emits as one instruction writing the
+      // 32-bit register (and so clearing the rest). ppc_rlw_narrow_rotate
+      // produces exactly this pair. (A byte swap of a constant is a constant
+      // load into the 32-bit register, which clears the rest too.)
+      if (dest->type != INT64_TYPE || source->type != INT32_TYPE ||
+          !source->def) {
+        return false;
+      }
+      // Likewise a 32-bit load from memory and a 32-bit byte swap (lwz:
+      // every 32-bit load has such an extension behind it): their sequences
+      // end in an instruction that writes the 32-bit register.
+      if (source->def->opcode == &OPCODE_LOAD_info ||
+          source->def->opcode == &OPCODE_LOAD_OFFSET_info ||
+          source->def->opcode == &OPCODE_BYTE_SWAP_info) {
+        return true;
+      }
+      if (source->def->opcode != &OPCODE_ROTATE_LEFT_info) {
+        return false;
+      }
+      const Instr* rotate = source->def;
+      if (!rotate->src1.value || rotate->src1.value->IsConstant()) {
+        return false;
+      }
+      const Value* amount = rotate->src2.value;
+      return !amount->IsConstant() || (amount->constant.i8 & 0x1F) != 0;
+    }
+    default:
+      return false;
+  }
+}
+
 void RegisterAllocationPass::PlanPinHomes(HIRBuilder* builder, Block* block) {
   const auto& pinned = builder->pinned_context_slots();
   const size_t pin_count = pinned.size();
@@ -726,6 +872,10 @@ void RegisterAllocationPass::PlanPinHomes(HIRBuilder* builder, Block* block) {
     const Value* value;
     uint32_t last_use;
     bool is_def;
+    // For a copy of another tenant (register_allocation_elide_copies): that
+    // tenant's place in the list. The copy stays only if it does.
+    int parent;
+    bool is_truncate;
   };
   std::vector<std::vector<Tenant>> tenants(pin_count);
 
@@ -743,14 +893,21 @@ void RegisterAllocationPass::PlanPinHomes(HIRBuilder* builder, Block* block) {
   };
   // The register of pin n is written at |ordinal|: tenants whose uses all
   // come at or before it stay, the others get registers of their own.
+  std::vector<bool> stays;
   const auto settle = [&](size_t n, uint32_t ordinal) {
-    for (const Tenant& tenant : tenants[n]) {
+    stays.assign(tenants[n].size(), false);
+    for (size_t t = 0; t < tenants[n].size(); ++t) {
+      const Tenant& tenant = tenants[n][t];
       if (tenant.is_def) {
-        continue;  // settled when it was planned (rule 4)
+        stays[t] = true;  // settled when it was planned (rule 4)
+        continue;
       }
-      if (tenant.last_use <= ordinal) {
+      if (tenant.last_use <= ordinal &&
+          (tenant.parent < 0 || stays[tenant.parent])) {
+        stays[t] = true;
         pin_homes_[tenant.value] = {set_for(n), pinned[n].reg_index,
-                                    static_cast<uint8_t>(n), false};
+                                    static_cast<uint8_t>(n), false,
+                                    tenant.is_truncate};
       }
     }
     tenants[n].clear();
@@ -760,7 +917,25 @@ void RegisterAllocationPass::PlanPinHomes(HIRBuilder* builder, Block* block) {
     if (i->opcode == &OPCODE_LOAD_CONTEXT_info) {
       const int n = find_pin(i, i->dest->type);
       if (n >= 0 && set_for(n)) {
-        tenants[n].push_back({i->dest, LastUseOrdinal(i->dest), false});
+        tenants[n].push_back(
+            {i->dest, LastUseOrdinal(i->dest), false, -1, false});
+      }
+      continue;
+    }
+    // A copy of a value that lives in a pin lives there too, on the same
+    // terms (and only if the value it copies does).
+    if (cvars::register_allocation_elide_copies && IsElidableCopy(i)) {
+      for (size_t n = 0; n < pin_count; ++n) {
+        for (size_t t = 0; t < tenants[n].size(); ++t) {
+          if (tenants[n][t].value == i->src1.value) {
+            tenants[n].push_back({i->dest, LastUseOrdinal(i->dest), false,
+                                  static_cast<int>(t),
+                                  i->opcode == &OPCODE_TRUNCATE_info ||
+                                      tenants[n][t].is_truncate});
+            n = pin_count - 1;  // found: leave both loops
+            break;
+          }
+        }
       }
       continue;
     }
@@ -841,7 +1016,7 @@ void RegisterAllocationPass::PlanPinHomes(HIRBuilder* builder, Block* block) {
       if (coalesce) {
         pin_homes_[w] = {set_for(n), pinned[n].reg_index,
                          static_cast<uint8_t>(n), true};
-        tenants[n].push_back({w, LastUseOrdinal(w), true});
+        tenants[n].push_back({w, LastUseOrdinal(w), true, -1, false});
       }
       continue;
     }

@@ -413,6 +413,9 @@ struct STORE_CONTEXT_I64
       } else {
         e.mov(e.x0, static_cast<uint64_t>(i.src2.constant()));
         e.str(e.x0, ptr(e.GetContextReg(), offset));
+        // hakuX-Boosted: a64_lean_calls (the store of the link register
+        // before a call leaves the return address in x0).
+        e.NoteX0Constant(static_cast<uint64_t>(i.src2.constant()));
       }
     } else {
       e.str(i.src2, ptr(e.GetContextReg(), offset));
@@ -1030,6 +1033,12 @@ struct ZERO_EXTEND_I64_I16
 struct ZERO_EXTEND_I64_I32
     : Sequence<ZERO_EXTEND_I64_I32, I<OPCODE_ZERO_EXTEND, I64Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: register_allocation_elide_copies. The allocator put
+    // the result in the operand's register, and the operand is one whose
+    // register already has a clear upper half: nothing to do.
+    if (e.IsElidedTruncate(i.instr)) {
+      return;
+    }
     // mov wD, wS implicitly zero-extends to 64 bits on ARM64.
     auto w_dest = WReg(i.dest.reg().getIdx());
     e.mov(w_dest, i.src1);
@@ -1121,6 +1130,12 @@ struct TRUNCATE_I16_I64
 struct TRUNCATE_I32_I64
     : Sequence<TRUNCATE_I32_I64, I<OPCODE_TRUNCATE, I32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: register_allocation_elide_copies. The allocator put
+    // the result in the operand's register, having checked that every use
+    // reads 32 bits only: nothing to do.
+    if (e.IsElidedTruncate(i.instr)) {
+      return;
+    }
     // mov wD, wS — implicitly truncates (upper 32 bits zeroed).
     auto w_src = WReg(i.src1.reg().getIdx());
     e.mov(i.dest, w_src);
@@ -3453,6 +3468,11 @@ struct MAX_F64 : Sequence<MAX_F64, I<OPCODE_MAX, F64Op, F64Op, F64Op>> {
 struct MAX_V128 : Sequence<MAX_V128, I<OPCODE_MAX, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     EmitWithVmxFpcr(e, [&] {
+      // hakuX-Boosted: a64_tight_sequences.
+      if (EmitVmxMaxMinTight(e, i.dest.reg().getIdx(), i.src1, i.src2,
+                             true)) {
+        return;
+      }
       int s1, s2;
       PrepareVmxFpSources(e, i.src1, i.src2, s1, s2);
       e.fmax(VReg(2).s4, VReg(s1).s4, VReg(s2).s4);
@@ -3592,6 +3612,11 @@ struct MIN_F64 : Sequence<MIN_F64, I<OPCODE_MIN, F64Op, F64Op, F64Op>> {
 struct MIN_V128 : Sequence<MIN_V128, I<OPCODE_MIN, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     EmitWithVmxFpcr(e, [&] {
+      // hakuX-Boosted: a64_tight_sequences.
+      if (EmitVmxMaxMinTight(e, i.dest.reg().getIdx(), i.src1, i.src2,
+                             false)) {
+        return;
+      }
       int s1, s2;
       PrepareVmxFpSources(e, i.src1, i.src2, s1, s2);
       e.fmin(VReg(2).s4, VReg(s1).s4, VReg(s2).s4);
@@ -4303,12 +4328,17 @@ struct MUL_ADD_V128
         // (Three constant operands would leave no scratch register for the
         // test; the form below handles that.)
         if (!(t1 == 0 && t2 == 1 && t3 == 3) || !cvars::a64_vmx_nan_fixup) {
-          e.mov(VReg(2).b16, VReg(t3).b16);
-          e.fmla(VReg(2).s4, VReg(t1).s4, VReg(t2).s4);
+          // (Straight into the destination when it is none of the
+          // operands.)
+          const int r = (d == t1 || d == t2 || d == t3) ? 2 : d;
+          e.mov(VReg(r).b16, VReg(t3).b16);
+          e.fmla(VReg(r).s4, VReg(t1).s4, VReg(t2).s4);
           if (cvars::a64_vmx_nan_fixup) {
-            EmitVmxNanFixupTight(e, 2, srcs, 3);
+            EmitVmxNanFixupTight(e, r, srcs, 3);
           }
-          e.mov(VReg(d).b16, VReg(2).b16);
+          if (r != d) {
+            e.mov(VReg(d).b16, VReg(2).b16);
+          }
           return;
         }
       }
@@ -4425,12 +4455,15 @@ struct MUL_SUB_V128
         // (Three constant operands would leave no scratch register for the
         // test; the form below handles that.)
         if (!(t1 == 0 && t2 == 1 && t3 == 3) || !cvars::a64_vmx_nan_fixup) {
-          e.fneg(VReg(2).s4, VReg(t3).s4);
-          e.fmla(VReg(2).s4, VReg(t1).s4, VReg(t2).s4);
+          const int r = (d == t1 || d == t2 || d == t3) ? 2 : d;
+          e.fneg(VReg(r).s4, VReg(t3).s4);
+          e.fmla(VReg(r).s4, VReg(t1).s4, VReg(t2).s4);
           if (cvars::a64_vmx_nan_fixup) {
-            EmitVmxNanFixupTight(e, 2, srcs, 3);
+            EmitVmxNanFixupTight(e, r, srcs, 3);
           }
-          e.mov(VReg(d).b16, VReg(2).b16);
+          if (r != d) {
+            e.mov(VReg(d).b16, VReg(2).b16);
+          }
           return;
         }
       }

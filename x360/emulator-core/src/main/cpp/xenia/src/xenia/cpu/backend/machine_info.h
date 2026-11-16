@@ -18,6 +18,10 @@ namespace backend {
 
 struct MachineInfo {
   bool supports_extended_load_store;
+  // hakuX-Boosted: OPCODE_VECTOR_DENORMFLUSH is a plain copy on this machine
+  // (its flush-to-zero mode covers inputs), so the register allocator may
+  // give its result the operand's register (register_allocation_elide_copies).
+  bool denormflush_is_copy = false;
 
   struct RegisterSet {
     enum Types {
