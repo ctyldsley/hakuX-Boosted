@@ -1006,12 +1006,18 @@ struct ZERO_EXTEND_I16_I8
 struct ZERO_EXTEND_I32_I8
     : Sequence<ZERO_EXTEND_I32_I8, I<OPCODE_ZERO_EXTEND, I32Op, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    if (e.IsElidedTruncate(i.instr)) {  // hakuX-Boosted: as I64_I32 below
+      return;
+    }
     e.uxtb(i.dest, i.src1);
   }
 };
 struct ZERO_EXTEND_I64_I8
     : Sequence<ZERO_EXTEND_I64_I8, I<OPCODE_ZERO_EXTEND, I64Op, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    if (e.IsElidedTruncate(i.instr)) {  // hakuX-Boosted: as I64_I32 below
+      return;
+    }
     // Zero-extend 8-bit to 64-bit: AND with 0xFF in 32-bit clears upper 32.
     auto w_dest = WReg(i.dest.reg().getIdx());
     e.uxtb(w_dest, i.src1);
@@ -1020,12 +1026,18 @@ struct ZERO_EXTEND_I64_I8
 struct ZERO_EXTEND_I32_I16
     : Sequence<ZERO_EXTEND_I32_I16, I<OPCODE_ZERO_EXTEND, I32Op, I16Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    if (e.IsElidedTruncate(i.instr)) {  // hakuX-Boosted: as I64_I32 below
+      return;
+    }
     e.uxth(i.dest, i.src1);
   }
 };
 struct ZERO_EXTEND_I64_I16
     : Sequence<ZERO_EXTEND_I64_I16, I<OPCODE_ZERO_EXTEND, I64Op, I16Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    if (e.IsElidedTruncate(i.instr)) {  // hakuX-Boosted: as I64_I32 below
+      return;
+    }
     auto w_dest = WReg(i.dest.reg().getIdx());
     e.uxth(w_dest, i.src1);
   }

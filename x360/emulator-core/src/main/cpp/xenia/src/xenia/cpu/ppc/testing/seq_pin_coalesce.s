@@ -282,3 +282,35 @@ test_float_cmp_between_integer_cmp_and_branch:
 2:
   blr
   #_ REGISTER_OUT r10 3
+
+# register_allocation_elide_copies also takes the zero extension after a
+# byte or halfword load for a copy (the load clears the rest of the
+# register). Loads into registers that held all ones, from memory that
+# holds all ones, with the results used as 64-bit values.
+test_byte_and_halfword_loads_extend:
+  lis r4, 0x1000
+  ori r4, r4, 0x1100
+  li r0, -1
+  std r0, 0(r4)
+  std r0, 8(r4)
+  li r5, -1
+  li r6, -1
+  li r8, -1
+  li r9, -1
+  li r10, 9
+  lbz r5, 3(r4)
+  lhz r6, 2(r4)
+  lbzx r8, r4, r10
+  lhzx r9, r4, r10
+  add r7, r5, r6
+  add r7, r7, r8
+  add r7, r7, r9
+  sldi r11, r5, 56
+  srdi r11, r11, 8
+  blr
+  #_ REGISTER_OUT r5 0xFF
+  #_ REGISTER_OUT r6 0xFFFF
+  #_ REGISTER_OUT r7 0x201FC
+  #_ REGISTER_OUT r8 0xFF
+  #_ REGISTER_OUT r9 0xFFFF
+  #_ REGISTER_OUT r11 0x00FF000000000000

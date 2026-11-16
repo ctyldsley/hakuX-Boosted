@@ -64,6 +64,14 @@ Done after the first round (2026-11-16, second part; sections 1.12 and
   default. And a fault in upstream's `mtfsfi` found on the way, recorded
   there, not changed.
 
+- `register_allocation_elide_copies` also takes the zero extension after
+  a byte or halfword load (`lbz`, `lhz`) for a copy, as it did after a
+  32-bit one. The question left open in the first round (a load that
+  faults into the MMIO handler) has an answer: on ARM64 the handler
+  emulates 32-bit loads only (`cpu/mmio_handler.cc`), so no byte or
+  halfword load has its register written by it. Small: `seq_cc_int`
+  429,656 to 429,374 with everything on.
+
 In progress: nothing half-written is on the branch.
 
 Next, in order (section 5 lists everything left; section 5a is the
@@ -983,21 +991,22 @@ counters, which stood here after the first round, are done: sections 1.13,
 - **Scalar float still tests every result** (two instructions per
   operation). The study's R8 (PowerPC's choice of NaN as a setting) is
   untouched.
-- **`lbz` and `lhz` still zero-extend with an instruction**, and the load
-  before it already did (`ldrb`, `ldrh` and `rev16` all write the 32-bit
-  register). Not done because of one thing I could not settle here: a
-  load that faults into the MMIO handler has its register written by the
-  handler (`cpu/mmio_handler.cc`) with a 32-bit value, and for a byte or
-  halfword load the extension instruction is what cuts that down today.
-  Either the handler masks by the access size or the elision stays off
-  for loads that can reach MMIO. One instruction per byte or halfword
-  load once that is answered (`RegisterAllocationPass::IsElidableCopy`'s
-  `OPCODE_ZERO_EXTEND` case, and the four extend sequences).
 - **A callee found to return a flag after it was translated** is reported
   by the ABI flag guard, not repaired (section 1.14, 5a C).
+- **`lwz`, `lbz` and `lhz` into a pinned register take two instructions**
+  (the load into a temporary, the extension into the pin): the extension
+  is planned as the value computed into the pin, so the load does not
+  get the pin's register. `PlanPinHomes` would have to take the load for
+  the definition when the stored value is an elidable copy of it.
 - **The matrix's `#16k` lines still run in processes of 1,500 tests.**
-  Section 0's fix should make that unnecessary; one `#16k` line without the
-  split would show it and save the job a quarter of an hour.
+  In the container the whole corpus now runs at 16 KiB pages in single
+  processes without the abort (everything on, with the frame chain:
+  141,959 of 141,959), so section 0's fix does make the split
+  unnecessary here; I left the job as it is rather than change it on the
+  container's evidence alone. Dropping `line_max` for `#16k` lines in
+  `ci/run-matrix.sh` would save the job about a quarter of an hour, and
+  the retry in `run-tests.sh` is still there if the runner's qemu
+  differs.
 - **Upstream's `mtfsfi`** reads its immediate shifted by one bit (section
   1.15, last paragraph). Not this branch's to change.
 

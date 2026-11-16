@@ -836,6 +836,18 @@ bool RegisterAllocationPass::IsElidableCopy(const Instr* instr) const {
       // 32-bit register (and so clearing the rest). ppc_rlw_narrow_rotate
       // produces exactly this pair. (A byte swap of a constant is a constant
       // load into the 32-bit register, which clears the rest too.)
+      // Likewise an 8-bit or 16-bit load (lbz, lhz): the load instruction
+      // writes the 32-bit register with the upper bits clear, and so does
+      // the byte swap after a 16-bit one. (A load that faults into the MMIO
+      // handler is no exception: on this architecture the handler emulates
+      // 32-bit loads only, see cpu/mmio_handler.cc.)
+      if ((dest->type == INT64_TYPE || dest->type == INT32_TYPE) &&
+          (source->type == INT8_TYPE || source->type == INT16_TYPE) &&
+          source->def &&
+          (source->def->opcode == &OPCODE_LOAD_info ||
+           source->def->opcode == &OPCODE_LOAD_OFFSET_info)) {
+        return true;
+      }
       if (dest->type != INT64_TYPE || source->type != INT32_TYPE ||
           !source->def) {
         return false;
