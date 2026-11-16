@@ -997,7 +997,13 @@ counters, which stood here after the first round, are done: sections 1.13,
   (the load into a temporary, the extension into the pin): the extension
   is planned as the value computed into the pin, so the load does not
   get the pin's register. `PlanPinHomes` would have to take the load for
-  the definition when the stored value is an elidable copy of it.
+  the definition when the stored value is an elidable copy of it. Tried
+  in the second round (a dozen lines there) and taken out again: it
+  passed the tests, and moved `seq_cc_int` from 429,374 to 429,079 and
+  the bench's copy loop not at all (its loads go to registers that are
+  not pinned). Not worth a change to settings that have been through the
+  whole matrix; worth another look once a device profile shows where
+  loads into pinned registers are hot.
 - **The matrix's `#16k` lines still run in processes of 1,500 tests.**
   In the container the whole corpus now runs at 16 KiB pages in single
   processes without the abort (everything on, with the frame chain:
@@ -1159,6 +1165,14 @@ Outside the core: `boosted/bench/core/bench_xlat.cc` (the counting mode),
   setting, and again with its verify mode: pass, no mismatch; the verify
   mode alone and with the whole set and the frame chain over subsets: no
   mismatch.
+- The byte and halfword extension (`ac2b0d3`): in the container, all
+  tests with the whole set, the frame chain and the FPCR setting, and all
+  with `register_allocation_elide_copies` alone: pass.
+- Actions run 143 (on `e681c3a`: the `longjmp` corrections, the frame
+  chain, the guard) had built the core and the APK and was halfway
+  through the translator tests when the push after it replaced it with a
+  run on the whole second round, so that one run covers everything; its
+  result is recorded below when known.
 - Bench run 22 (the second round's commit `e681c3a`): green
   (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43947299227).
   Its row "overhaul 13: 8 + frame chain" has calls at 2.37 host
