@@ -949,58 +949,59 @@ set together is the matrix's "overhaul, everything" line.
 
 ## 5. Not done, and how to go on
 
-Largest first.
+Largest first. (The stackpoint record, the ABI flag guard and the
+counters, which stood here after the first round, are done: sections 1.13,
+1.14 and 1.12's opening.)
 
-- **FPCR is written at the first float operation of every block** (`ldr;
-  msr`, and `msr` is not a cheap instruction on a real core). The emitter
-  forgets the mode at each block start because it cannot know which
-  predecessor ran. To go on: give each block an assumed entry mode (that of
-  the first edge emitted into it), and make every other edge conform before
-  it branches, with the switch on the edge; a call leaves the mode unknown.
-  It is a change to `A64Emitter::Emit`'s block loop and to the branch
-  sequences (a branch whose target assumes another mode goes through a
-  stub in the tail). Float results depend on it, so it wants the whole
-  corpus at both modes. Two instructions and a system register write per
-  float-using block.
-- **The stackpoint record and the check after every call**: 11 + 3
-  instructions in every prologue and epilogue and 2 after every call, all
-  for `longjmp`. Two ways on, both needing a `longjmp` test first (the
-  runner crashes on one today because return-site records live in
-  `XexModule`; a stub of that for `RawModule` would be the first step):
-  (a) link guest frames through the host stack instead of a side array
-  (four instructions in the prologue, two in the epilogue, no overflow
-  test), with `ResolveFunction` walking the list; (b) have
-  `ResolveFunction` return a stub that repairs the stack before the return
-  site runs, which removes the check after every call.
-- **Making the ABI level of the dead-flag pass safe by default.** Level 3
-  is wrong for a function that returns a result in a condition register
-  field to a caller that reads it. A caller that does that is visible when
-  it is translated (a load of cr0, cr1, cr5 to cr7 reached from a call with
-  no store between: the pass has the data flow). Recording the callee's
-  address then, before the callee is translated (callers are usually
-  translated first), and translating recorded callees at level 2, would
-  make level 3 right in every case where the caller is seen first, and
-  detectable (a counter) in the rest.
-- **Scalar float still tests every result** (two instructions per
-  operation). The study's R8 (PowerPC's choice of NaN as a setting) is
-  untouched.
 - **A pinned register is written back before every call that could read
   it.** A static mapping shared by all functions (the study's R1 in its
   FEX form) would remove that for the registers both sides agree on. The
   pool and the coalescing here are what it would be built on: the
   allocator already treats a pin's host register as a value's home.
+  Section 5a D. With the frame chain in, this is the largest fixed cost
+  left on a call.
+- **No FPCR write at all in functions without VMX float code.** Section
+  1.15 removes the writes a block can inherit from the blocks before it.
+  What is left: the first float block after a function's entry, after
+  each call, and at the top of each loop. All three go if "FPCR holds the
+  scalar value at every call, return and function entry" is made a rule
+  for all translated code (the thunks already establish it on the way in
+  and after a host call): a function with no VMX float operation then
+  never writes FPCR, and one with them restores the scalar value before
+  it calls or returns. It has to know, before it emits a function's first
+  block, whether the function uses VMX mode anywhere, and at each exit
+  whether the mode may be VMX. Two ways: emit such functions twice (the
+  first pass records what each block does to the mode, as section 1.15's
+  records do; costs translation time), or have each sequence declare the
+  mode it needs so the HIR can be scanned (fifteen places call
+  `ChangeFpcrMode(Fpu)`, one helper `EmitWithVmxFpcr`). It must be a
+  start-up setting (all code agrees or none), and the verify mode of
+  section 1.15 is the check for it. A loop's first block can also be
+  given a known mode without the rule, by setting the mode on the way
+  into the loop (a stub on the fall-through edge) when its back edges
+  agree; that is local and smaller.
+- **Scalar float still tests every result** (two instructions per
+  operation). The study's R8 (PowerPC's choice of NaN as a setting) is
+  untouched.
 - **`lbz` and `lhz` still zero-extend with an instruction**, and the load
-  that precedes them already did; the 8-bit and 16-bit load sequences were
-  not audited for it as the 32-bit ones were.
+  before it already did (`ldrb`, `ldrh` and `rev16` all write the 32-bit
+  register). Not done because of one thing I could not settle here: a
+  load that faults into the MMIO handler has its register written by the
+  handler (`cpu/mmio_handler.cc`) with a 32-bit value, and for a byte or
+  halfword load the extension instruction is what cuts that down today.
+  Either the handler masks by the access size or the elision stays off
+  for loads that can reach MMIO. One instruction per byte or halfword
+  load once that is answered (`RegisterAllocationPass::IsElidableCopy`'s
+  `OPCODE_ZERO_EXTEND` case, and the four extend sequences).
+- **A callee found to return a flag after it was translated** is reported
+  by the ABI flag guard, not repaired (section 1.14, 5a C).
 - **The matrix's `#16k` lines still run in processes of 1,500 tests.**
   Section 0's fix should make that unnecessary; one `#16k` line without the
   split would show it and save the job a quarter of an hour.
-- **`log_translation_stats` does not print the new counters** yet
-  (`pin_coalesced_loads`, `pin_coalesced_defs`, `copies_elided`,
-  `compares_reused_flags`, `branches_on_flags` are counted, in
-  `compiler/translation_stats.h`, and not in `FormatTranslationStats`).
+- **Upstream's `mtfsfi`** reads its immediate shifted by one bit (section
+  1.15, last paragraph). Not this branch's to change.
 
-## 5a. Handover: the three pieces that would finish the job
+## 5a. Handover: the pieces that would finish the job
 
 Written for whoever picks this up (the main thread or another cloud
 session). Each can be done in a cloud session's container; none needs the
