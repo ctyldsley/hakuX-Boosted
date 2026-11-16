@@ -595,8 +595,12 @@ the front end emits nothing between the link register's store and its
 call, so the x0 rule guards against a front end change. The zero test is
 the one I would look at first: `seq_pin_coalesce.s` has two cases written
 for it (`cmp_zero_register_reused`, `bdnz_with_register_reuse`) and neither
-makes the fault show, so either the fused form is not chosen there or the
-register happens to survive; I did not find out which. The form itself is
+makes the fault show. Counted with a temporary print over three suites, an
+equality compare that could be fused has something written between it and
+its branch once at level 2 and three times at the ABI level (against 27
+and 50 where nothing is), so the guard does make decisions in the tests;
+but in none of those does ignoring it give a wrong answer, and I did not
+construct a case that does. The form itself is
 exercised (the bench's integer loop ends in `sub; cbnz`).
 
 ## 4. The settings: what I judge safe to default on, and the order on the phone
