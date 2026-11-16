@@ -43,6 +43,13 @@ struct TranslationStats {
   // hakuX-Boosted: run time: non-local returns that resumed on the landing
   // function's own host frame (a64_longjmp_resume_live_frame).
   std::atomic<uint64_t> longjmp_landing_frames{0};
+  // hakuX-Boosted: a64_fpcr_known_block_entry. Loads and writes of FPCR
+  // emitted (static, with or without the setting); blocks that started in
+  // a known mode (static); what the verify mode found (run time; a plain
+  // counter the emitted code adds to).
+  std::atomic<uint64_t> fpcr_sets_emitted{0};
+  std::atomic<uint64_t> fpcr_known_entries{0};
+  uint64_t fpcr_entry_mismatches = 0;
   // hakuX-Boosted: dead_context_stores_abi_guard (static). Functions whose
   // flags are kept at their returns because a caller reads them; call
   // sites whose flags are kept because the callee reads them at entry;

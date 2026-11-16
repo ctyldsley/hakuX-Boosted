@@ -146,6 +146,24 @@ DEFINE_bool(
     "a64");
 
 // hakuX-Boosted: see A64Emitter::EmitPinnedVerify.
+// hakuX-Boosted: see the block loop in A64Emitter::Emit.
+DEFINE_bool(
+    a64_fpcr_known_block_entry, false,
+    "A block starts with FPCR in the mode its predecessors left it in "
+    "when all of them have been emitted before it and agree (straight-line "
+    "code and the arms of a branch; not a loop's first block, not the "
+    "code after a call), instead of always being taken as unknown. "
+    "Scalar float or VMX float code spread over several blocks then loads "
+    "and writes FPCR once, not once in every block. Exact: nothing about "
+    "calls or other functions changes.",
+    "a64");
+DEFINE_bool(
+    a64_fpcr_known_block_entry_verify, false,
+    "Self-check for a64_fpcr_known_block_entry: at every block entered "
+    "with a known mode, FPCR is read and compared with that mode's value; "
+    "a difference is counted with the self-check mismatches.",
+    "a64");
+
 DEFINE_bool(
     a64_pin_verify, false,
     "Self-check for pin_guest_registers, for a debugging run only: every "
@@ -548,10 +566,94 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   auto block = builder->first_block();
   synchronize_stack_on_next_instruction_ = false;
   hir::Opcode last_opcode = hir::OPCODE_NOP;  // hakuX-Boosted
+  // hakuX-Boosted: a64_fpcr_known_block_entry. A block is entered by the
+  // branches that name its label and by falling out of the block before
+  // it, and by nothing else (a return site after a call is in the middle
+  // of a block, and the call has already made the mode unknown there). So
+  // when every branch to a block has been emitted by the time the block
+  // is reached, the mode each left FPCR in is known, and if they and the
+  // block before agree, that is the mode the block starts in. A block with
+  // a branch to it still to come (a loop's first block) is unknown as
+  // before, and so is the function's first.
+  bool fpcr_flow = cvars::a64_fpcr_known_block_entry ||
+                   cvars::a64_fpcr_known_block_entry_verify;
+  struct FpcrEdges {
+    uint32_t total = 0;  // branches in the function that name the block
+    uint32_t seen = 0;   // of which emitted so far
+    FPCRMode mode = FPCRMode::Unknown;
+    bool agree = true;
+  };
+  std::unordered_map<const hir::Block*, FpcrEdges> fpcr_edges;
+  const auto branch_target = [](const hir::Instr* i) -> const hir::Label* {
+    switch (i->GetOpcodeNum()) {
+      case hir::OPCODE_BRANCH:
+        return i->src1.label;
+      case hir::OPCODE_BRANCH_TRUE:
+      case hir::OPCODE_BRANCH_FALSE:
+        return i->src2.label;
+      default:
+        return nullptr;
+    }
+  };
+  if (fpcr_flow) {
+    for (auto b = builder->first_block(); b && fpcr_flow; b = b->next) {
+      for (auto i = b->instr_head; i; i = i->next) {
+        const hir::Opcode num = i->GetOpcodeNum();
+        if (num != hir::OPCODE_BRANCH && num != hir::OPCODE_BRANCH_TRUE &&
+            num != hir::OPCODE_BRANCH_FALSE) {
+          continue;
+        }
+        const hir::Label* label = branch_target(i);
+        if (!label || !label->block) {
+          fpcr_flow = false;  // a branch that cannot be followed
+          break;
+        }
+        ++fpcr_edges[label->block].total;
+      }
+    }
+  }
+  bool fpcr_first_block = true;
+  bool fpcr_previous_falls_through = false;
+  FPCRMode fpcr_previous_end = FPCRMode::Unknown;
   while (block) {
     // Reset FPCR tracking on each block entry (we don't know which
     // predecessor ran, so mode is unknown).
-    ForgetFpcrMode();
+    FPCRMode fpcr_entry = FPCRMode::Unknown;
+    if (fpcr_flow && !fpcr_first_block) {
+      bool any = false;
+      bool agree = true;
+      uint32_t total = 0;
+      uint32_t seen = 0;
+      auto edges = fpcr_edges.find(block);
+      if (edges != fpcr_edges.end()) {
+        total = edges->second.total;
+        seen = edges->second.seen;
+        if (seen) {
+          any = true;
+          fpcr_entry = edges->second.mode;
+          agree = edges->second.agree;
+        }
+      }
+      if (fpcr_previous_falls_through) {
+        if (!any) {
+          any = true;
+          fpcr_entry = fpcr_previous_end;
+        } else if (fpcr_entry != fpcr_previous_end) {
+          agree = false;
+        }
+      }
+      if (!any || !agree || seen != total) {
+        fpcr_entry = FPCRMode::Unknown;
+      }
+    }
+    fpcr_first_block = false;
+    if (fpcr_entry != FPCRMode::Unknown) {
+      fpcr_mode_ = fpcr_entry;
+      compiler::translation_stats.fpcr_known_entries.fetch_add(
+          1, std::memory_order_relaxed);
+    } else {
+      ForgetFpcrMode();
+    }
     flags_key_.valid = false;  // hakuX-Boosted: nor what the flags hold
     pending_return_address_valid_ = false;
     x0_const_valid_ = false;
@@ -568,6 +670,32 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     // hakuX-Boosted: log_translation_stats counts the blocks that run.
     if (count_blocks_) {
       EmitBlockCounter();
+    }
+    // hakuX-Boosted: a64_fpcr_known_block_entry_verify, here so that every
+    // way into the block runs it.
+    if (fpcr_entry != FPCRMode::Unknown) {
+      if (cvars::a64_fpcr_known_block_entry_verify) {
+        // FPCR against the value of the mode this block is taken to start
+        // in. x0 and x1 are free between instructions; no flag is written.
+        auto& same = NewCachedLabel();
+        mrs(x0, 3, 3, 4, 4, 0);
+        ldr(w1, ptr(x19, static_cast<uint32_t>(
+                             fpcr_entry == FPCRMode::Vmx
+                                 ? offsetof(A64BackendContext, fpcr_vmx)
+                                 : offsetof(A64BackendContext, fpcr_fpu))));
+        eor(w0, w0, w1);
+        cbz(w0, same);
+        mov(x1, reinterpret_cast<uint64_t>(
+                    &compiler::translation_stats.fpcr_entry_mismatches));
+        ldr(x0, ptr(x1));
+        add(x0, x0, 1);
+        str(x0, ptr(x1));
+        L(same);
+        if (!cvars::a64_fpcr_known_block_entry) {
+          // Checking only: emit what would have been emitted without.
+          fpcr_mode_ = FPCRMode::Unknown;
+        }
+      }
     }
 
     // Process each instruction in the block.
@@ -750,6 +878,25 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
           selected = SelectSequence(this, instr, &new_tail);
         }
         skip_next_cmp_ = false;
+        // hakuX-Boosted: a64_fpcr_known_block_entry. The branches this
+        // sequence emitted (its own instruction, and one fused into it)
+        // left FPCR in the mode tracked now: no sequence changes the mode
+        // after its branch.
+        if (fpcr_flow && selected) {
+          for (const hir::Instr* done = instr; done && done != new_tail;
+               done = done->next) {
+            const hir::Label* label = branch_target(done);
+            if (!label) {
+              continue;
+            }
+            auto& edges = fpcr_edges[label->block];
+            if (edges.seen++ == 0) {
+              edges.mode = fpcr_mode_;
+            } else if (edges.mode != fpcr_mode_) {
+              edges.agree = false;
+            }
+          }
+        }
         // hakuX-Boosted: a64_lean_calls, what x0 holds now: the constant
         // this instruction's sequence said it left there, or nothing known
         // once any other instruction that emits code has run.
@@ -846,6 +993,14 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
       }
       instr = new_tail;
     }
+
+    // hakuX-Boosted: a64_fpcr_known_block_entry, what the next block
+    // inherits by position.
+    fpcr_previous_end = fpcr_mode_;
+    fpcr_previous_falls_through =
+        !block->instr_tail ||
+        (block->instr_tail->GetOpcodeNum() != hir::OPCODE_BRANCH &&
+         block->instr_tail->GetOpcodeNum() != hir::OPCODE_RETURN);
 
     block = block->next;
   }
@@ -2059,6 +2214,8 @@ bool A64Emitter::ChangeFpcrMode(FPCRMode new_mode, bool already_set) {
   }
   fpcr_mode_ = new_mode;
   if (!already_set) {
+    compiler::translation_stats.fpcr_sets_emitted.fetch_add(
+        1, std::memory_order_relaxed);  // hakuX-Boosted
     // Load the pre-computed FPCR value from the backend context.
     // This avoids an expensive MRS + read-modify-write cycle.
     auto bctx = GetBackendCtxReg();

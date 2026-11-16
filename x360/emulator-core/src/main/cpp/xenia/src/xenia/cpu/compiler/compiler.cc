@@ -215,13 +215,16 @@ std::string FormatExtraStats() {
       "landing function's frame {}; frame chain mismatches {}; ABI flag "
       "guard: functions keeping flags at returns {}, call sites keeping "
       "them {}, found too late {}, readers after a call through a pointer "
-      "{}, functions reading a flag at entry {}",
+      "{}, functions reading a flag at entry {}; FPCR writes emitted {}, "
+      "blocks starting in a known FPCR mode {}, FPCR mismatches {}",
       get(t.pin_coalesced_loads), get(t.pin_coalesced_defs),
       get(t.copies_elided), get(t.compares_reused_flags),
       get(t.branches_on_flags), get(t.longjmp_landing_frames),
       get(t.frame_chain_mismatches), get(t.abi_guard_returns_kept),
       get(t.abi_guard_calls_kept), get(t.abi_guard_late),
-      get(t.abi_guard_indirect), get(t.abi_guard_entry_readers));
+      get(t.abi_guard_indirect), get(t.abi_guard_entry_readers),
+      get(t.fpcr_sets_emitted), get(t.fpcr_known_entries),
+      t.fpcr_entry_mismatches);
   return line;
 }
 }  // namespace
@@ -232,6 +235,7 @@ uint64_t SelfCheckMismatches() {
          t.simplify_skip_mismatches.load(std::memory_order_relaxed) +
          t.verify_mismatches.load(std::memory_order_relaxed) +
          t.frame_chain_mismatches.load(std::memory_order_relaxed) +
+         t.fpcr_entry_mismatches +
          t.stack_fixup_verify_hits;
 }
 

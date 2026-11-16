@@ -59,12 +59,18 @@ Done after the first round (2026-11-16, second part; sections 1.12 and
   kinds of hand-written code that level was wrong for are found and
   translated round, and what cannot be repaired is counted and logged.
 
+- FPCR taken as known at the start of a block whose predecessors agree
+  (`a64_fpcr_known_block_entry`, with a verify mode; section 1.15). Off by
+  default. And a fault in upstream's `mtfsfi` found on the way, recorded
+  there, not changed.
+
 In progress: nothing half-written is on the branch.
 
 Next, in order (section 5 lists everything left; section 5a is the
 handover):
 1. The device runs of section 4.
-2. FPCR written once per function region instead of once per block.
+2. No FPCR write at all in functions without VMX float code (section
+   1.15's last paragraph before the tests).
 3. One register mapping for all translated code (5a D), which wants the
    device runs first.
 
@@ -627,6 +633,72 @@ With the guard off all five fail at level 3; with it on all pass. The
 pointer form runs only in the matrix line made for it, because it turns
 return-side elimination off for every test after it in the process.
 
+### 1.15 FPCR known at the start of a block (`a64_fpcr_known_block_entry`)
+
+Scalar float code runs with FPCR holding the guest's rounding mode, VMX
+float code with a fixed value, and the emitter tracks which is loaded so
+that consecutive operations in a block do not write it again. At the
+start of every block it forgot: the first float operation of each block
+loads the value from the backend context and writes FPCR (`ldr; msr`),
+whatever the block before had done.
+
+With the setting, a block starts in the mode its predecessors left when
+all of them have been emitted before it and they agree. A block is
+entered by the branches that name its label and by falling out of the
+block before it, and by nothing else (a return site after a call is in
+the middle of a block, where the call has already made the mode unknown),
+so the emitter counts the branches to each block up front, records the
+mode at each branch as it emits it, and at a block all of whose branches
+it has seen compares them with the block above. Straight-line float code
+over several blocks and the arms of a branch are covered, scalar and VMX
+alike. A loop's first block is not (its back edge comes later), nor the
+code after a call, nor the function's first block. Nothing about calls or
+other functions changes, so it is exact by construction and can be turned
+on and off freely.
+
+`a64_fpcr_known_block_entry_verify` reads FPCR at every block entered
+with a known mode and compares it with that mode's value; a difference
+is counted with the self-check mismatches. It works on its own as well
+(checking the prediction while emitting what was emitted before), which
+is how to try it on a device first.
+
+What it is worth is a question of time, not of instruction count, and so
+not one this session can answer. The bench loops are single blocks and do
+not change. The compiled-C corpus has little float code spread over
+blocks: `seq_cc_int` 626,383 to 625,703 host instructions at the
+defaults, `seq_cc_vec` 75,058 to 74,802. A write to FPCR costs far more
+than an ordinary instruction on most cores, though (how much on the
+phone's I do not know), and game code is float code in small blocks, so
+the device may show more than these counts suggest:
+`log_translation_stats` prints "FPCR writes emitted" and "blocks starting
+in a known FPCR mode" to say how much of a title it reaches. The larger
+step (no FPCR write at all in functions without VMX float code, by making
+"scalar mode at every call and return" a rule for all translated code)
+needs a second emission of each function or a prediction of what each
+sequence does to the mode; section 5.
+
+Tests: `seq_fpcr_blocks.s`, six cases with the guest rounding up, each
+dividing 1.0 by 3.0 in a block reached in more than one way (scalar arm
+and VMX arm, both scalar, a loop whose body ends in VMX, both VMX, after
+a call): the quotient's last bit shows which mode it was computed in.
+Two deliberate faults (a disagreement between predecessors ignored;
+branches still to come ignored) each fail one of them and are counted by
+the verify mode. The second showed the verify check had been placed in
+front of the block's label, where only a fall-through reached it; it is
+behind the label now.
+
+**Found on the way, not changed:** `mtfsfi` sets the wrong bits.
+`InstrEmit_mtfsfix` (`cpu/ppc/ppc_emit_fpu.cc`) takes the immediate from
+the five-bit field at bits 16 to 20, of which the instruction's
+immediate is the upper four, so the value written to the FPSCR field is
+twice what the instruction says: `mtfsfi 7, 2` (round up) sets the
+non-IEEE bit and round-to-nearest. It is upstream's, it changes the
+rounding mode of any title that uses the instruction, and it is outside
+this branch's brief, so it is only recorded here; the tests set the mode
+with `mtfsf` so that a fix does not break them. Worth a look by the main
+thread: the fix is `i.X.RB >> 1`, and `instr_mtfsfix.s` has cases to
+extend.
+
 ## 2. What it reached
 
 **The aim was a third to a half fewer host instructions per guest
@@ -799,6 +871,8 @@ taken out):
 | a frame does not record the guest stack pointer of entry | crash; 10 mismatches with verify | |
 | the old frame search (`a64_longjmp_resume_live_frame = false`) | `longjmp_three_frames` crashes | this is the fault of section 1.12 |
 | the guard off at level 3 | the five hand-written flag conventions of `seq_flags_across_blocks.s` fail | by design: it is what the guard is for |
+| FPCR: a disagreement between a block's predecessors ignored | `fpcr_join_vector_arm` fails; 1 mismatch counted by the verify mode alone | |
+| FPCR: branches to the block still to come ignored | `fpcr_loop_header` fails; 2 mismatches counted | the verify check had to be moved behind the block's label to see this one |
 
 The four that went unnoticed are to be read as limits of the tests, not as
 proof the checks are unneeded. What I can say about each: rule 3 only
@@ -844,6 +918,7 @@ it wrong, with the verify mode that would show it.
 | `inline_leaf_keeps_lr_writers_out` | a correction (section 1.12) | **on by default already** |
 | `a64_frame_chain` (start-up setting) | exact for calls and returns; changes how a `longjmp` finds its frame, and x29 | default on after a device run with `a64_frame_chain_verify` in a title that uses `setjmp` shows no mismatch |
 | `dead_context_stores_abi_guard` | makes level 3 more careful, never less | **on by default already** (it only acts at level 3) |
+| `a64_fpcr_known_block_entry` | exact | default on after one device run with `a64_fpcr_known_block_entry_verify` alone shows "FPCR mismatches 0" |
 | `a64_vmx_nan_fixup = false` | changes results (ARM's choice of NaN in VMX operations) | not a default; a per-title option worth knowing about for vector-heavy titles |
 
 Order on the phone, one step at a time against the run before it, each
@@ -862,6 +937,7 @@ before, saves backed up:
 | 7 | `eliminate_dead_context_stores = 3` (the guard is on with it) | `dead_context_store_verify` at 3, per title | the "ABI flag guard" counts in the stats line: "found too late" and "through a pointer" should be 0; if not, that title stays at 2 |
 | 8 | `inline_extern_calls` | | |
 | 9 | `a64_frame_chain` (start-up setting) | `a64_frame_chain_verify`: no `a64_frame_chain_verify:` line, "frame chain mismatches" 0, in a title that uses `setjmp` (the counter "non-local returns resumed on the landing function's frame" above 0 says it does) | call-heavy code is where it shows |
+| 10 | `a64_fpcr_known_block_entry` | `a64_fpcr_known_block_entry_verify` on its own first: "FPCR mismatches" 0 | a profile: this one is about time, not instruction count |
 
 Steps 1 to 3 can be one run if time is short: they are the exact ones.
 The earlier sessions' settings not named here (`a64_stack_access_no_fixup`,
@@ -1020,6 +1096,8 @@ For `ARCHITECTURE.md`, upstream files changed (all marked `hakuX-Boosted:`):
 | `cpu/backend/a64/a64_emitter.h`, `.cc` | the frame chain's prologue, `EmitRestoreHostReturn`, `EmitLoadGuestReturnAddress`; no stackpoint push, pop or check with it; the check after a call steps over HIR comments |
 | `cpu/compiler/passes/dead_context_store_pass.cc` | `dead_context_stores_abi_guard`: `AbiGuard`, `GuestCodeReadsFlagsAtEntry`, `FindFlagReadsAfterCalls` |
 | `cpu/compiler/compiler.cc` | the overhaul's counters in the `TranslationStats` line |
+| `cpu/backend/a64/a64_emitter.cc` (again) | `a64_fpcr_known_block_entry`, `_verify`: the block loop's edge records |
+| `cpu/ppc/testing/seq_fpcr_blocks.s` | new tests |
 | `cpu/ppc/testing/seq_longjmp.s`, `seq_flags_across_blocks.s`, `ci/known-failures.txt`, `ci/matrix.txt` | new tests and lines |
 
 Outside the core: `boosted/bench/core/bench_xlat.cc` (the counting mode),
@@ -1065,6 +1143,16 @@ Outside the core: `boosted/bench/core/bench_xlat.cc` (the counting mode),
     that line runs: 124,824 of 124,824; the pointer line and the ABI level
     with the chain: pass;
   - the deliberate faults of section 3's table.
+- FPCR known at block entry (section 1.15), committed after that with
+  `[skip ci]` so as not to cancel the run above; it is tested by the next
+  run that is not skipped. In the container: all 141,960 tests with the
+  setting, and again with its verify mode: pass, no mismatch; the verify
+  mode alone and with the whole set and the frame chain over subsets: no
+  mismatch.
+- Bench run 22 (the second round's commit `e681c3a`): green
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43947299227).
+  Its row "overhaul 13: 8 + frame chain" has calls at 2.37 host
+  instructions per guest instruction, the figure counted here.
 
 In the container before the push (x86-64, tests cross-compiled for ARM64
 and run under qemu-aarch64 8.2), on the tree of `0293269`: every new line
