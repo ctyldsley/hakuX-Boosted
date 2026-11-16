@@ -43,7 +43,8 @@ Done (every setting off by default; the defaults' code is unchanged):
 
 In progress: nothing half-written is on the branch.
 
-Next, in order (section 5 has each in full):
+Next, in order (section 5 lists everything left; section 5a is the
+handover with full instructions for the three large pieces):
 1. The device runs of section 4.
 2. FPCR written once per function region instead of once per block.
 3. The stackpoint record and the check after every call (the two largest
@@ -702,6 +703,159 @@ Largest first.
   (`pin_coalesced_loads`, `pin_coalesced_defs`, `copies_elided`,
   `compares_reused_flags`, `branches_on_flags` are counted, in
   `compiler/translation_stats.h`, and not in `FormatTranslationStats`).
+
+## 5a. Handover: the three pieces that would finish the job
+
+Written for whoever picks this up (the main thread or another cloud
+session). Each can be done in a cloud session's container; none needs the
+phone to write or to test, only to judge at the end. Order: A, then C (it
+does not depend on A), then B1, B2, D. Cut a branch from
+`claude/translator-overhaul`.
+
+### A. A `longjmp` test (the gate for B)
+
+Why there is none: a non-local return (a `blr` or `bctr` to a return site
+in a frame further up) is recognised in `ResolveFunction`
+(`cpu/backend/a64/a64_backend.cc`) only when the target's module is a
+`XexModule` whose info cache says `is_return_site` for that address
+(`XexModule::GetInstructionAddressFlags`). The tests load a `RawModule`,
+the `dynamic_cast` gives null, the target is taken for a new function
+starting in the middle of another, and the runner crashes. The flag is set
+by the front end when it emits a call (`PPCHIRBuilder::SetReturnAddress`,
+`cpu/ppc/ppc_hir_builder.cc`, also only for a `XexModule`).
+
+What to build:
+1. Move the two questions "mark this address as a return site" and "is
+   this address a return site" behind virtual functions of `Module`
+   (`cpu/module.h`), implemented by `XexModule` as today and by `RawModule`
+   with a set of addresses under a mutex. `ResolveFunction` and
+   `SetReturnAddress` then ask the module, not the `XexModule`. Small, and
+   marked `hakuX-Boosted:` (three upstream files).
+2. The return site's host address comes from the function's source map
+   (`GuestFunction::MapGuestAddressToMachineCode`); check it works for a
+   `RawModule` function (it should: the map is per function).
+3. Tests, `cpu/ppc/testing/seq_longjmp.s`, by hand. PowerPC `setjmp` and
+   `longjmp` written out in the test itself (save r1, LR, r14 to r31 and
+   CR in a buffer; restore them and `blr`). Cases: a jump back over one
+   frame (which `FindStackpointSyncDepth` deliberately treats as an early
+   stack restore, not a `longjmp`: more than one frame must be skipped),
+   over three frames, out of a loop that has made calls, twice to the same
+   buffer, with float and vector registers live in the frame returned to,
+   and a jump taken from a function reached through `bctrl`.
+4. Run them with every matrix line that has pins, with
+   `pin_guest_registers_stress`: the resume stubs of pinned functions
+   (`pinned_resume_stubs_`, `a64_emitter.cc`) have never run anywhere.
+
+Done when: the tests pass at the defaults and in the matrix, and a
+deliberate fault in `EmitGuestAndHostSynchronizeStackHelper` (restore the
+wrong entry's stack pointer) makes them fail.
+
+### B. Calls without the `longjmp` tax (needs A)
+
+What a call still pays for `longjmp`: 11 instructions in the prologue
+(`A64Emitter::PushStackpoint`), 3 in the epilogue (`PopStackpoint`), 2
+after every call (`EnsureSynchronizedGuestAndHostStack`). About half of
+what a call and return cost beyond the guest's own instructions.
+
+**B1. No check after a call.** Today `ResolveFunction` records
+`pending_stackpoint_sync_depth` and returns the return site's address; the
+return site then tests that field after every call, for ever. Instead:
+`ResolveFunction` stores the return site's address in a new field of
+`A64BackendContext` and returns the address of the synchronisation helper;
+the helper (which already restores the host stack pointer from the record)
+ends with a jump to the stored address instead of to x8. Then
+`EnsureSynchronizedGuestAndHostStack` emits nothing. With pins the stored
+address is the function's resume stub, as now. Two instructions off every
+call, and the smallest change of the three: do it first. Setting:
+`a64_resolve_repairs_stack`, off by default.
+
+**B2. The record in the frame, not in a side array.** Each guest frame
+already holds the guest return address at `StackLayout::GUEST_RET_ADDR`.
+Add the guest stack pointer at entry (the `GUEST_RESERVED` slot is free)
+and a pointer to the previous guest frame, with the head of the chain in
+`A64BackendContext`:
+- prologue: `ldr x8, [x19, #head]; str x8, [sp, #prev]; mov x9, sp; str
+  x9, [x19, #head]; ldr w10, [x20, #r1]; str w10, [sp, #guest_sp]`
+  (6 for 11, and no overflow test: the chain is in the stack);
+- epilogue and tail calls: `ldr x8, [sp, #prev]; str x8, [x19, #head]`
+  (2 for 3);
+- `FindStackpointSyncDepth` becomes a walk of the chain comparing guest
+  stack pointers, with the same "more than one frame" rule; the helper sets
+  the host stack pointer to the frame found and the head to it.
+Everything that reads `stackpoints` or `current_stackpoint_depth` has to
+move with it: grep both names in `cpu/` and `kernel/` first (thread
+creation allocates the array; the fibre switch may save the depth).
+Setting: `a64_frame_chain`, read at start-up, because both record forms
+cannot coexist in one process.
+
+Expected on the bench's `calls` loop: 3.07 to about 2.6 (B1 and B2
+together take roughly 10 of the 33 instructions a call pair costs now).
+
+### C. The ABI flag level, safe by default (needs nothing)
+
+`eliminate_dead_context_stores = 3` takes cr0, cr1, cr5, cr6 and cr7 for
+dead at calls and returns. It is wrong only for a caller that reads such a
+field after a call without setting it (the callee returned a result in
+it), or a callee that reads one at entry.
+
+1. In `DeadContextStorePass::Run`
+   (`cpu/compiler/passes/dead_context_store_pass.cc`) add a forward
+   analysis over the same items: "this ABI-volatile slot may hold what a
+   call left there" (set at a call item, cleared at a store to the slot).
+   A load of the slot in that state is a caller reading a callee's flag;
+   the same analysis from the function's entry finds a callee reading its
+   caller's.
+2. Keep a process-wide set of guest addresses (in `Processor`, under a
+   mutex): "functions whose flags at return are read". When a caller is
+   found reading after a direct call, add that call's target. When it is an
+   indirect call, set a flag that turns level 3 off for functions
+   translated from then on (it cannot name the callee), and count it.
+3. A function in the set is translated at level 2. A function that reads
+   at entry adds itself to a second set, "callers of this must keep their
+   flags": harder to act on (the callers may be translated already), so
+   count it and log it once; `dead_context_store_verify` remains the check.
+4. The gap that remains: a callee translated at level 3 before its
+   flag-reading caller is first seen. Callers are normally translated
+   first (a function is translated when first called), so it needs a
+   callee shared with an earlier, ordinary caller. Count it
+   (`TranslationStats`), log it once per callee. If the count is ever
+   non-zero on a title, that title runs at level 2.
+5. Tests: `seq_flags_across_blocks.s` already has
+   `cr_returned_by_callee_with_branch`, which level 3 fails by design and
+   skips; with this it must pass at level 3, and the skip in
+   `ci/run-tests.sh` for that test goes. Add the indirect call form and the
+   callee-reads-at-entry form.
+
+Worth: the difference between rows 7 and 8 of section 2 (integer 2.52 to
+1.57; corpus 31% to 38%), without the per-title risk.
+
+### D. One register mapping for all translated code (after B)
+
+The largest remaining step for call-heavy code, and the largest change.
+Today each function picks its own pins and writes the changed ones back
+before every call. With a mapping all functions agree on, a register in
+the shared set needs no write-back at a guest call and no reload after.
+
+- The shared set: r1, r3 to r10, r31, r30, LR and CTR is a starting point;
+  take it from the phone's `TranslationStats:` "pinned gprs" counts.
+- The context copy of a shared register is brought up to date only where
+  host code can look: the guest-to-host thunks store them before the host
+  call and reload after; the host-to-guest thunk loads them on entry and
+  stores them on return; the resolve thunk stores them (it reads r1).
+  That is `EmitGuestToHostThunk`, `EmitGuestToHostLeanThunk`,
+  `EmitHostToGuestThunk`, `EmitResolveFunctionThunk`.
+- In `GuestRegisterPinningPass::RunWide` a shared register is always
+  pinned, to its fixed host register, and a guest call is not a sync point
+  for it. Everything else in the pass and all of `PlanPinHomes` works
+  unchanged: that is what this branch built it for.
+- Anything that reads a guest register from the context while guest code
+  is interrupted, not at a call: the fault handler, the debugger, thread
+  suspension, the scheduler's switch if it can happen from a signal. Audit
+  before writing code; this is where it can go wrong silently.
+- `PushStackpoint` reads r1 and LR from the context: with B2 done it reads
+  the registers.
+Start-up setting, a verify mode that stores at every write as
+`a64_pin_verify` does, and stress lines in the matrix.
 
 ## 6. For `HANDOFF.md` and `ARCHITECTURE.md`
 
