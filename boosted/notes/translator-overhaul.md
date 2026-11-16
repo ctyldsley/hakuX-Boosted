@@ -518,7 +518,24 @@ qemu-aarch64 -L /usr/aarch64-linux-gnu -one-insn-per-tb -d exec,nochain \
 grep -c '^Trace' /tmp/log
 ```
 
-**The runner's own table for this branch**: see section 7.
+**The runner's own table for this branch**: bench run 21, green,
+https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43903306476 (commit
+`0293269`; rows "overhaul 1" to "overhaul 10" of the translator section,
+each against this branch's own "defaults" row). Its instruction counts are
+the ones above to the digit, from the CPU's counter this time: integer
+5.52, 4.05 at row 4, 3.95 at row 5, 2.52 at rows 6 and 7, 1.57 at row 8;
+float 3.22 from row 6; vector 5.00 at row 7, 4.56 at row 8, 3.22 at row 9;
+calls 3.07 from row 4 and 2.85 at row 8; copy 3.41, 3.05, 3.04 at rows 6,
+7, 8. `host_calls` there counts the host function as well: 19.3 at the
+defaults (run 13), 11.5 from row 4, 10.5 at row 8, 5.50 at row 10.
+
+The same run's times on that runner (a GitHub ARM64 machine, lowest of
+several samples, not the phone): nanoseconds per guest instruction at row 7
+are 0.392 integer, 0.671 float, 0.394 vector, 0.195 copy, 0.761 host calls;
+run 13 on the same kind of runner had 0.560 integer and 0.904 vector at the
+defaults. In the scheduler section a kernel call that does nothing takes
+10.0 ns with the lean calls and the lean thunk; run 12 had 18.6 ns. I
+quote these as what the runner said, not as what a phone will.
 
 ## 3. Tests
 
@@ -717,4 +734,36 @@ Outside the core: `boosted/bench/core/bench_xlat.cc` (the counting mode),
 
 ## 7. Build state
 
-(Filled in after the push: see the commit that follows this one.)
+- `b9b2c46` (section 0's fix alone): Actions run 138, **green, all three
+  jobs**, the translator tests among them
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43649271608).
+  Bench run 16 green.
+- `cc22121` (the pool, coalescing, the compare forms, tight float): not
+  pushed on its own. In the container: the whole corpus with the set on,
+  with stress pinning and allocation from the top, with tight sequences
+  and fused compares alone; the verify mode over the integer, float and
+  vector tests.
+- `0293269` (everything): bench run 21 green
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43903306476).
+  Actions run 142
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43903307406):
+  "Xbox core" green; the translator tests and the APK job were still running when this was written (the tests take over two hours with the new lines): read their result on that page.
+
+In the container before the push (x86-64, tests cross-compiled for ARM64
+and run under qemu-aarch64 8.2), on the tree of `0293269`: every new line
+of `ci/matrix.txt` at least once; the four lines over all the tests
+("overhaul, everything" 141,942 of 141,942, "overhaul, stress, preempt"
+141,942, "overhaul, ABI flags" 124,812 of the 124,812 that level runs,
+"overhaul, everything, 16k" 141,942, with no process needing a second go), each with every test's state
+equal to the reference's; the deliberate faults of section 3; and every
+changed source file compiled with the compiler's default warnings as
+errors (clean, apart from warnings in upstream's `a64_op.h` that were
+there before).
+
+That the defaults translate the same code as before was checked two ways:
+every test's state with nothing set equals the state the tests left on
+`claude/integration-1115`'s tree (141,882 tests in common; the two that
+read the time base differ, as `ci/nondeterministic.txt` says they do), and
+the bench's
+integer loop with nothing set disassembles to the same instructions as
+before this branch (addresses apart).
