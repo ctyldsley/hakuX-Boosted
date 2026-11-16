@@ -88,6 +88,18 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   static void SetExtendedGprPool(bool extended) {
     gpr_count_ = extended ? GPR_COUNT_EXTENDED : GPR_COUNT;
   }
+  // hakuX-Boosted: a64_frame_chain. 0 = call records in the per-thread
+  // array (PushStackpoint and the rest), 1 = in the host frames themselves,
+  // linked through x29, 2 = both, the array deciding and the two compared
+  // at every non-local return. Set once by the backend before any code is
+  // emitted: the thunks and every function have to agree.
+  static int frame_chain() { return frame_chain_; }
+  static void SetFrameChain(int mode) { frame_chain_ = mode; }
+  // Where a frame keeps the guest stack pointer it was entered with: the
+  // upper half of the guest return address's slot (the address is 32 bits).
+  static constexpr size_t kFrameGuestStackOffset = 48 + 4;
+  // Where it keeps the caller's x29: next to the host return address.
+  static constexpr size_t kFramePreviousOffset = 72;
   // Available VEC regs: v4-v15, v16-v31
   static constexpr int VEC_COUNT = 28;
   static constexpr size_t kStashOffset = 32;
@@ -396,6 +408,7 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   static const uint32_t gpr_reg_map_[GPR_COUNT_EXTENDED];
   static int gpr_count_;
+  static int frame_chain_;  // hakuX-Boosted
   static const uint32_t vec_reg_map_[VEC_COUNT];
 
   std::vector<TailEmitter> tail_code_;
@@ -518,6 +531,11 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;
   bool synchronize_stack_on_next_instruction_ = false;
+  // hakuX-Boosted: a64_frame_chain. The host return address (and the
+  // caller's x29) back from the frame, and the guest return address into
+  // x0 for a tail call.
+  void EmitRestoreHostReturn();
+  void EmitLoadGuestReturnAddress();
 };
 
 }  // namespace a64

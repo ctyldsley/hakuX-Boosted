@@ -40,6 +40,24 @@ struct TranslationStats {
   // Run time: a longjmp-style return into the middle of a function with
   // pinned registers went through its resume stub.
   std::atomic<uint64_t> pin_resume_entries{0};
+  // hakuX-Boosted: run time: non-local returns that resumed on the landing
+  // function's own host frame (a64_longjmp_resume_live_frame).
+  std::atomic<uint64_t> longjmp_landing_frames{0};
+  // hakuX-Boosted: dead_context_stores_abi_guard (static). Functions whose
+  // flags are kept at their returns because a caller reads them; call
+  // sites whose flags are kept because the callee reads them at entry;
+  // callees found to return a flag after they were translated without
+  // (the guard came too late for them: use level 2 for the title); callers
+  // reading a flag after a call through a pointer (which keeps every
+  // function's flags from then on); functions that read a flag at entry.
+  std::atomic<uint64_t> abi_guard_returns_kept{0};
+  std::atomic<uint64_t> abi_guard_calls_kept{0};
+  std::atomic<uint64_t> abi_guard_late{0};
+  std::atomic<uint64_t> abi_guard_indirect{0};
+  std::atomic<uint64_t> abi_guard_entry_readers{0};
+  // hakuX-Boosted: run time: a64_frame_chain_verify found the array and
+  // the chain naming different frames.
+  std::atomic<uint64_t> frame_chain_mismatches{0};
   // Run time: mismatches reported by a64_pin_verify.
   std::atomic<uint64_t> pin_verify_mismatches{0};
   // Which guest register each pinned integer slot was (r0..r31, 32 = ctr,

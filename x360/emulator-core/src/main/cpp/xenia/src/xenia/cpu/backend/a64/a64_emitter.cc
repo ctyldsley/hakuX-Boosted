@@ -199,6 +199,7 @@ const uint32_t A64Emitter::gpr_reg_map_[GPR_COUNT_EXTENDED] = {
     22, 23, 24, 25, 26, 27, 28, 9, 10, 11, 12, 13, 14, 15,
 };
 int A64Emitter::gpr_count_ = A64Emitter::GPR_COUNT;
+int A64Emitter::frame_chain_ = 0;  // hakuX-Boosted
 
 // VEC allocatable registers: v4-v15, v16-v31
 // (v0-v3 are scratch)
@@ -484,10 +485,28 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   x0_const_valid_ = false;
   x0_const_noted_ = false;
 
+  static_assert(kFramePreviousOffset == StackLayout::GUEST_RESERVED &&
+                    kFramePreviousOffset == StackLayout::HOST_RET_ADDR + 8 &&
+                    kFrameGuestStackOffset == StackLayout::GUEST_RET_ADDR + 4,
+                "the frame chain's slots");
+  if (frame_chain_) {
+    // hakuX-Boosted: a64_frame_chain. The call record is the frame: the
+    // caller's x29 goes next to the host return address (one paired store
+    // in place of the single one), the guest stack pointer of entry into
+    // the upper half of the guest return address's slot, and x29 points at
+    // this frame from here to the epilog. ResolveFunction walks x29 back
+    // from the frame a non-local return was made from.
+    stp(x30, x29, ptr(sp, static_cast<int32_t>(StackLayout::HOST_RET_ADDR)));
+    str(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
+    ldr(w8, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+    str(w8, ptr(sp, static_cast<uint32_t>(kFrameGuestStackOffset)));
+    mov(x29, sp);
+  } else {
   // Store host return address (x30/LR) so the epilog can restore it.
   str(x30, ptr(sp, static_cast<uint32_t>(StackLayout::HOST_RET_ADDR)));
   // Store guest PPC return address (passed in x0 by convention).
   str(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
+  }
   // Store zero for call return address (we haven't made a call yet).
   if (!lean_calls_) {
     str(xzr, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
@@ -558,7 +577,13 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
       // Skip SOURCE_OFFSET because the return address from the call would
       // point past the check, so it would never execute.
       if (synchronize_stack_on_next_instruction_) {
-        if (instr->GetOpcodeNum() != hir::OPCODE_SOURCE_OFFSET) {
+        if (instr->GetOpcodeNum() == hir::OPCODE_COMMENT) {
+          // hakuX-Boosted: a comment (the front end writes one ahead of the
+          // source offset when debug information is asked for, as the
+          // instruction tests do) emits nothing, and the check must not
+          // go in front of it: the source offset after it is where a
+          // longjmp resumes, and it would resume past the check.
+        } else if (instr->GetOpcodeNum() != hir::OPCODE_SOURCE_OFFSET) {
           synchronize_stack_on_next_instruction_ = false;
           EnsureSynchronizedGuestAndHostStack();
         } else if (pins_live_) {
@@ -859,7 +884,7 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   PopStackpoint();
 
   // Restore host return address and deallocate stack.
-  ldr(x30, ptr(sp, static_cast<uint32_t>(StackLayout::HOST_RET_ADDR)));
+  EmitRestoreHostReturn();
   if (stack_size <= 4095) {
     add(sp, sp, static_cast<uint32_t>(stack_size));
   } else {
@@ -1329,8 +1354,8 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     } else {
       // Tail call: pass our return address to the callee.
       PopStackpoint();
-      ldr(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
-      ldr(x30, ptr(sp, static_cast<uint32_t>(StackLayout::HOST_RET_ADDR)));
+      EmitLoadGuestReturnAddress();
+      EmitRestoreHostReturn();
       if (stack_size() <= 4095) {
         add(sp, sp, static_cast<uint32_t>(stack_size()));
       } else {
@@ -1385,6 +1410,10 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     // No indirection table: resolve at runtime.
     mov(x0, x20);  // context
     mov(x1, static_cast<uint64_t>(function->address()));
+    if (frame_chain_) {  // hakuX-Boosted: where its walk starts
+      str(x29, ptr(x19, static_cast<uint32_t>(
+                            offsetof(A64BackendContext, resolve_frame))));
+    }
     mov(x9, reinterpret_cast<uint64_t>(&ResolveFunction));
     blr(x9);
     mov(x9, x0);  // resolved address in x9
@@ -1392,8 +1421,8 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
 
   if (instr->flags & hir::CALL_TAIL) {
     PopStackpoint();
-    ldr(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
-    ldr(x30, ptr(sp, static_cast<uint32_t>(StackLayout::HOST_RET_ADDR)));
+    EmitLoadGuestReturnAddress();
+    EmitRestoreHostReturn();
     if (stack_size() <= 4095) {
       add(sp, sp, static_cast<uint32_t>(stack_size()));
     } else {
@@ -1486,6 +1515,10 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
     mov(w16, target_w);
     mov(x0, x20);  // context
     mov(x1, x16);  // guest address
+    if (frame_chain_) {  // hakuX-Boosted: where its walk starts
+      str(x29, ptr(x19, static_cast<uint32_t>(
+                            offsetof(A64BackendContext, resolve_frame))));
+    }
     mov(x9, reinterpret_cast<uint64_t>(&ResolveFunction));
     blr(x9);
     mov(x9, x0);  // resolved address
@@ -1494,8 +1527,8 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
   if (instr->flags & hir::CALL_TAIL) {
     // Tail call: pass our return address to the callee.
     PopStackpoint();
-    ldr(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
-    ldr(x30, ptr(sp, static_cast<uint32_t>(StackLayout::HOST_RET_ADDR)));
+    EmitLoadGuestReturnAddress();
+    EmitRestoreHostReturn();
     if (stack_size() <= 4095) {
       add(sp, sp, static_cast<uint32_t>(stack_size()));
     } else {
@@ -2153,8 +2186,27 @@ void A64Emitter::HandleStackpointOverflowError(ppc::PPCContext* context) {
       "Xenia developers.");
 }
 
+// hakuX-Boosted: see frame_chain().
+void A64Emitter::EmitRestoreHostReturn() {
+  if (frame_chain_) {
+    ldp(x30, x29, ptr(sp, static_cast<int32_t>(StackLayout::HOST_RET_ADDR)));
+  } else {
+    ldr(x30, ptr(sp, static_cast<uint32_t>(StackLayout::HOST_RET_ADDR)));
+  }
+}
+
+void A64Emitter::EmitLoadGuestReturnAddress() {
+  if (frame_chain_) {
+    // The slot's upper half is the guest stack pointer of entry.
+    ldr(w0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
+  } else {
+    ldr(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
+  }
+}
+
 void A64Emitter::PushStackpoint() {
-  if (!cvars::a64_enable_host_guest_stack_synchronization) {
+  if (!cvars::a64_enable_host_guest_stack_synchronization ||
+      frame_chain_ == 1) {
     return;
   }
   // hakuX-Boosted: a64_lean_calls. The same record, written with fewer
@@ -2253,7 +2305,8 @@ void A64Emitter::PushStackpoint() {
 }
 
 void A64Emitter::PopStackpoint() {
-  if (!cvars::a64_enable_host_guest_stack_synchronization) {
+  if (!cvars::a64_enable_host_guest_stack_synchronization ||
+      frame_chain_ == 1) {
     return;
   }
   // Decrement current_stackpoint_depth.
@@ -2265,7 +2318,11 @@ void A64Emitter::PopStackpoint() {
 }
 
 void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
-  if (!cvars::a64_enable_host_guest_stack_synchronization) {
+  // hakuX-Boosted: with the frame chain ResolveFunction's answer is a
+  // helper that puts the stack right before the return site runs, so
+  // there is nothing to check after a call.
+  if (!cvars::a64_enable_host_guest_stack_synchronization ||
+      frame_chain_ == 1) {
     return;
   }
   // ResolveFunction marks this when it returns a return-site address inside an

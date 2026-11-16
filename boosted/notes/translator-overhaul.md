@@ -16,7 +16,8 @@ they start with another directory.
 
 ## Done / in progress / next
 
-Done (every setting off by default; the defaults' code is unchanged):
+Done in the first round (every setting off by default; the defaults' code
+unchanged by it):
 - Step 0: why the "Translator tests" job failed on `claude/integration-1115`
   (Actions run 135), and the fix (section 0). Green on this branch.
 - Counting host instructions per guest instruction without a performance
@@ -41,15 +42,31 @@ Done (every setting off by default; the defaults' code is unchanged):
   (`a64_address_fixup_bit_tests`), section 1.11.
 - Tests for all of it (section 3), matrix lines, bench rows.
 
+Done after the first round (2026-11-16, second part; sections 1.12 and
+1.13):
+- `log_translation_stats` prints the overhaul's counters.
+- A `longjmp` test (`seq_longjmp.s`, eight cases), which the tests could
+  not make before, and the four faults it found on the way: two in the test
+  set-up, one in the leaf inliner (a mistranslation, fixed by default) and
+  one in the search for the frame a `longjmp` lands in (fixed by default
+  where the records confirm the frame; section 1.12).
+- The call records kept in the host frames (`a64_frame_chain`, with
+  `a64_frame_chain_verify`): the bench's calls 3.07 to 2.59 on top of row
+  7, kernel calls 10.67 to 8.50 (section 1.13). Off by default.
+
+- A guard for the ABI level of the dead-flag pass
+  (`dead_context_stores_abi_guard`, on by default, section 1.14): the two
+  kinds of hand-written code that level was wrong for are found and
+  translated round, and what cannot be repaired is counted and logged.
+
 In progress: nothing half-written is on the branch.
 
 Next, in order (section 5 lists everything left; section 5a is the
-handover with full instructions for the three large pieces):
+handover):
 1. The device runs of section 4.
 2. FPCR written once per function region instead of once per block.
-3. The stackpoint record and the check after every call (the two largest
-   fixed costs left on a call), which need a `longjmp` test first.
-4. A guard that makes the ABI level of the dead-flag pass safe by default.
+3. One register mapping for all translated code (5a D), which wants the
+   device runs first.
 
 ## 0. The failed "Translator tests" job of run 135
 
@@ -423,6 +440,193 @@ The instruction tests reach the first two tests (their code and data are
 at 0x80000000+ and their stack below); nothing in them touches 0xC0000000
 or above, so the third test and the add are checked by reading only.
 
+### 1.12 Non-local returns: a test, and what it found
+
+`cpu/ppc/testing/seq_longjmp.s`: `setjmp` and `longjmp` written out in
+PowerPC, and eight cases: out of three frames, out of one, three times to
+one buffer from a loop, with float and vector registers live in the frame
+landed in, through `bctrl`, into a function that made no stack frame, and
+into the outermost and the middle activation of a function that calls
+itself. Every case changes registers in the frames it leaves and reads
+them after landing. The suite runs with every line of the matrix, so the
+resume stubs of pinned functions (never run anywhere before) now run under
+plain, wide and stress pinning with their verify modes.
+
+To get the first case to pass took four changes, each a fault of its own:
+
+1. **Raw modules kept no return sites.** `ResolveFunction` recognises a
+   non-local return only at an address the module has marked as a return
+   site, and only a `XexModule` could mark one. `RawModule` (what the tests
+   load) now keeps a set (`RawModule::MarkReturnSite`, `IsReturnSite`);
+   `PPCHIRBuilder::SetReturnAddress` and `ResolveFunction` ask it. Test
+   set-up only.
+2. **The leaf inliner folded `longjmp` into its caller.** `inline_leaf_calls`
+   inlines a callee of a few instructions that ends in `blr`, taking the
+   `blr` for a return to the call site. A callee that writes the link
+   register first (`mtlr`) does not return there: inlined, its jump became
+   a fall-through. The test's nine-instruction `longjmp` was inlined and
+   never jumped. This is a mistranslation of any such leaf in a title, not
+   a test artefact, so the fix is on by default: bodies containing `mtlr`
+   are not inlined (`inline_leaf_keeps_lr_writers_out`, false gives the old
+   behaviour for comparison).
+3. **The check after a call sat in front of the resume address** when the
+   front end writes a HIR comment ahead of each source offset, which it
+   does with debug information on (the tests; not the app's default). The
+   emitter now steps over comments as it does over source offsets. Test
+   set-up only, unless a title is run with that debug setting.
+4. **The wrong frame was restored.** A record is made on entry to a
+   function with the guest stack pointer it was entered with.
+   `FindStackpointSyncDepth` (taken from the x64 backend, where a record is
+   made before the frame is allocated) stops at the first record whose
+   pointer is not below the current one. That is the record of the landing
+   function's *callee*: it was entered with the landing function's stack
+   pointer. Its host stack pointer was restored, the landing function ran
+   on its callee's host frame, read that frame's saved return address as
+   its own, and its return was resolved as a jump to an unknown address.
+   In the test that address was the runner's sentinel and the runner
+   crashed; in a title the return is resolved through the general path
+   (a function translated from the middle of another, a host frame
+   leaked), which may well be why `setjmp` titles work at all today, but
+   it is not what was meant. `FindLandingStackpointDepth`
+   (`a64_longjmp_resume_live_frame`, **on by default**) picks the frame
+   whose callee's record holds a return address inside the landing
+   function; where the records do not confirm one it falls back to the old
+   search, so behaviour changes only where the frame is positively
+   identified. A function with no guest frame of its own and recursion are
+   handled and tested. I made this default-on, against the rule for this
+   branch, because the reference line of the matrix runs the suite at the
+   defaults and the old search crashes on a correct program; turning it
+   off gives the earlier behaviour exactly. It deserves one run of a title
+   known to use `setjmp` with `log_translation_stats`: the counter
+   "non-local returns resumed on the landing function's frame" says how
+   often it applied.
+
+### 1.13 The call record in the frame (`a64_frame_chain`)
+
+What a call paid for `longjmp` before: eleven instructions on entry to
+write a record into a per-thread array (`PushStackpoint`), three on exit
+(`PopStackpoint`), two after every call to see whether the resolver had
+asked for a stack repair (`EnsureSynchronizedGuestAndHostStack`).
+
+With `a64_frame_chain` the record is the host frame itself:
+- on entry `stp x30, x29` takes the place of `str x30` (the caller's x29
+  goes in the frame's reserved slot), the guest stack pointer of entry goes
+  into the unused upper half of the guest return address's slot, and
+  `mov x29, sp`: three instructions more than no record at all;
+- on exit and at tail calls `ldp x30, x29` takes the place of `ldr x30`:
+  nothing more;
+- after a call: nothing. The resolve thunk stores x29 (the frame the
+  return was made from) in the backend context; `ResolveFunction` walks
+  the frames back from it with the same rule as 1.12 (`FindLandingFrame`)
+  and, when it finds the landing frame, answers with a five-instruction
+  helper that makes that frame the stack pointer and x29 again and jumps
+  to the return site (or its resume stub). The return site needs no check
+  because the stack is already right when it runs.
+- the host-to-guest thunk zeroes x29, which ends the chain of that entry
+  into guest code. A jump out of a guest callback into the guest code that
+  called the kernel is therefore not resumed in place (the array could
+  name such a frame, across host frames it then abandoned; I do not
+  believe a title depends on it, but it is the one behavioural
+  difference, and the verify mode would report it as a mismatch).
+- no array is allocated (a megabyte a thread at the default size), and
+  there is no stackpoint overflow report: a runaway recursion ends at the
+  host stack's guard page instead.
+- `PopulatePseudoStacktrace` (the guest return addresses a crash report
+  lists) has nothing to read and returns false.
+- x29 no longer points at a host frame record while guest code runs, so a
+  native unwinder (a crash dump) stops at the first guest frame. It could
+  not get through guest frames before either.
+
+`a64_frame_chain_verify` keeps both: the array decides, the chain is
+walked as well, and a difference between the two frames is logged
+("a64_frame_chain_verify: ...") and counted with the self-check
+mismatches (so a test line with it fails on one).
+
+The mode is read once at start-up (the thunks and every function must
+agree); it needs `a64_enable_host_guest_stack_synchronization`, which is
+on.
+
+Counts, in the container under qemu (the runner's figures will be in the
+bench run of this commit, rows "overhaul 11" to "13"): host instructions
+per guest instruction, 4 KiB pages unless said.
+
+| | calls | host calls |
+|---|---|---|
+| defaults | 3.963 | 18.500 |
+| defaults + frame chain | 3.222 | 15.167 |
+| row 7 (exact settings) | 3.074 | 10.667 |
+| row 7 + frame chain | 2.593 | 8.500 |
+| row 8 (ABI flag level) | 2.852 | 9.667 |
+| row 8 + frame chain | 2.370 | 7.500 |
+| row 8 + frame chain + `inline_extern_calls` | 2.370 | 4.667 |
+| row 7, 16 KiB pages | 3.407 | |
+| row 7 + frame chain, 16 KiB pages | 2.926 | |
+
+(The host calls column is this script's count, which leaves out what the
+host function itself does; it is lower than the runner's for that reason,
+see "How it is measured".) So calls are now 35% below the defaults with
+exact settings (they were 22%), and the loops that make no calls are
+unchanged, as they should be.
+
+On the compiled-C test corpus (host instructions run in the code cache by
+the whole suite, everything on at the ABI level): `seq_cc_int` 388,091
+without the chain, 363,263 with it (6% fewer; 42% below the defaults'
+626,383).
+
+### 1.14 The ABI flag level, guarded (`dead_context_stores_abi_guard`)
+
+`eliminate_dead_context_stores = 3` takes cr0, cr1 and cr5 to cr7 for dead
+at calls and returns, which is what the ABI says and what makes the
+integer loop 1.57 instead of 2.52. It was wrong for two kinds of
+hand-written code, and nothing but a verify run per title stood between
+it and them. Both kinds can be seen in the code from the side that reads,
+and the guard (on by default; it does nothing below level 3) looks:
+
+- **A caller that reads a flag its callee returned.** A forward analysis
+  of every function (`FindFlagReadsAfterCalls`, run before the pass can
+  decide to leave the function alone): which volatile flag bytes may hold
+  what a call left there, and which call. A load of such a byte names the
+  callee, and that callee is translated with its flags kept at its returns
+  (as at level 2). A callee is normally translated after its caller (on
+  its first call), so the name is there in time. What the callee jumps to
+  instead of returning is named too when the callee is translated.
+- **A callee that takes a flag as an argument.** When a caller is
+  translated, the first instructions of each function it calls directly
+  are read from guest memory (`GuestCodeReadsFlagsAtEntry`: straight line
+  from the entry, through unconditional jumps, to the first call, return
+  or conditional branch): a read of a volatile field before a write keeps
+  the flags alive at that call. A function found reading a flag at entry
+  when it is itself translated is recorded as well, for callers
+  translated after it.
+
+What it cannot repair, it counts and logs once each:
+- a callee already translated (with dead flags at its returns) when the
+  caller that reads its flag is first seen: "found too late". It needs a
+  callee shared with an earlier caller that ignores the flag. The log line
+  says to use level 2 for the title;
+- a read after a call through a pointer: the callee cannot be named, so
+  every function translated from then on keeps its flags at returns (the
+  level degrades to 2 at returns, stays 3 at calls), and the line says how
+  many were translated before;
+- a callee that reads a flag at entry only after a branch, or is called
+  through a pointer: not seen by the scan. `dead_context_store_verify`
+  remains the check for those.
+
+`log_translation_stats` prints all five counts ("ABI flag guard: ...").
+A title whose "found too late" and "through a pointer" counts are both 0
+after a play session has shown no code the level is wrong for that the
+guard did not handle.
+
+On the bench and the test corpus the guard costs nothing: every figure of
+row 8 is the same with it on and off (compiled code never does either
+thing). The tests it is for: `seq_flags_across_blocks.s` has a callee
+returning its answer in cr0 (which level 3 failed by design and skipped),
+the same through a jump to another function, a callee branching on cr6
+set by its caller, the same through a jump stub, and the pointer form.
+With the guard off all five fail at level 3; with it on all pass. The
+pointer form runs only in the matrix line made for it, because it turns
+return-side elimination off for every test after it in the process.
+
 ## 2. What it reached
 
 **The aim was a third to a half fewer host instructions per guest
@@ -433,6 +637,12 @@ between 51% and 59% fewer at 4 KiB pages. Calls are 22% down, kernel calls
 settings and 29% to 38% with the ABI level of the dead-flag pass: the low
 edge of the aim, not past it.** None of it has run on a phone, and these
 are instruction counts, not times.
+
+Second round: with the call records in the host frames (section 1.13)
+calls are 35% down with exact settings (2.59 against 3.96) and kernel
+calls 54% by this script's count; the loops without calls are unchanged.
+The table below is the first round's and does not have that row; section
+1.13 has its own.
 
 Host instructions run per guest instruction on the bench loops, counted in
 the session's container under qemu ("How it is measured"). Each numbered
@@ -584,6 +794,11 @@ taken out):
 | every truncation treated as a copy, whatever uses its result | **not noticed** | not noticed |
 | the zero test used although the register is rewritten before the branch | **not noticed**, at either flag level | |
 | the return address assumed still in x0 after any instruction | **not noticed** | |
+| (second round) the frame chain's resume helper leaves x29 alone | `seq_longjmp` crashes with `a64_frame_chain` | |
+| the chain names the callee's frame instead of the landing function's | `seq_longjmp` crashes with `a64_frame_chain`; 9 mismatches counted with `a64_frame_chain_verify` | |
+| a frame does not record the guest stack pointer of entry | crash; 10 mismatches with verify | |
+| the old frame search (`a64_longjmp_resume_live_frame = false`) | `longjmp_three_frames` crashes | this is the fault of section 1.12 |
+| the guard off at level 3 | the five hand-written flag conventions of `seq_flags_across_blocks.s` fail | by design: it is what the guard is for |
 
 The four that went unnoticed are to be read as limits of the tests, not as
 proof the checks are unneeded. What I can say about each: rule 3 only
@@ -607,7 +822,7 @@ exercised (the bench's integer loop ends in `sub; cbnz`).
 ## 4. The settings: what I judge safe to default on, and the order on the phone
 
 All of this branch's settings are off by default, like the earlier
-sessions'. "Exact" below means the emitted code computes the same values
+sessions', except three that correct or guard (marked in the table). "Exact" below means the emitted code computes the same values
 as before in every case, by construction, and the whole test corpus says
 the same; "assumes" means there is something a title could do that makes
 it wrong, with the verify mode that would show it.
@@ -623,8 +838,12 @@ it wrong, with the verify mode that would show it.
 | `a64_address_fixup_bit_tests` | exact; fewer instructions, more branches | the phone decides (it is a time question): try it with `log_translation_stats` and a profile |
 | `a64_extended_gpr_pool`, `pin_guest_registers` + `_wide` + `_flags`, `pin_guest_registers_max_int = 10`, `_max_vec = 16`, `pin_guest_registers_coalesce` | exact in what they compute; they change which host register holds what in every function | the largest change. Default on only after device runs with `a64_pin_verify` and then `pin_guest_registers_coalesce_verify` show no line, in more than one title |
 | `eliminate_dead_context_stores = 2` + `dead_context_stores_over_preempt_checks` | exact for the guest; a debugger or crash report may see an older flag | default on after a device run with `dead_context_store_verify` |
-| `eliminate_dead_context_stores = 3` | assumes the ABI: no code reads cr0, cr1, cr5 to cr7 after a call or return without setting them | per title, after `dead_context_store_verify` at level 3 shows no line. Worth it: it is the difference between "level 2" and "ABI" in the tables. Section 5 has what would make it safe to default |
+| `eliminate_dead_context_stores = 3` | assumes the ABI: no code reads cr0, cr1, cr5 to cr7 after a call or return without setting them; with the guard of section 1.14 the code that does is found and handled, except the cases it counts | per title, after `dead_context_store_verify` at level 3 shows no line. Worth it: it is the difference between "level 2" and "ABI" in the tables. Section 5 has what would make it safe to default |
 | `inline_extern_calls` | older; as its notes | after `a64_lean_extern_thunk` |
+| `a64_longjmp_resume_live_frame` | a correction (section 1.12); acts only where the call records confirm the frame | **on by default already**; false is the earlier behaviour |
+| `inline_leaf_keeps_lr_writers_out` | a correction (section 1.12) | **on by default already** |
+| `a64_frame_chain` (start-up setting) | exact for calls and returns; changes how a `longjmp` finds its frame, and x29 | default on after a device run with `a64_frame_chain_verify` in a title that uses `setjmp` shows no mismatch |
+| `dead_context_stores_abi_guard` | makes level 3 more careful, never less | **on by default already** (it only acts at level 3) |
 | `a64_vmx_nan_fixup = false` | changes results (ARM's choice of NaN in VMX operations) | not a default; a per-title option worth knowing about for vector-heavy titles |
 
 Order on the phone, one step at a time against the run before it, each
@@ -640,8 +859,9 @@ before, saves backed up:
 | 4 | `a64_extended_gpr_pool` (start-up setting), `pin_guest_registers`, `pin_guest_registers_wide`, `pin_guest_registers_flags`, `pin_guest_registers_max_int = 10`, `pin_guest_registers_max_vec = 16` | `a64_pin_verify`: no `PinVerify:` line | the third `TranslationStats:` line: functions pinned, blocks executed in pinned functions |
 | 5 | `pin_guest_registers_coalesce`, `register_allocation_elide_copies` | `pin_guest_registers_coalesce_verify`: no `TranslatorVerify:` line, "self-check mismatches" 0 | this is the step the instruction counts fall at |
 | 6 | `eliminate_dead_context_stores = 2`, `dead_context_stores_over_preempt_checks` | `dead_context_store_verify`: no `TranslatorVerify:` line | |
-| 7 | `eliminate_dead_context_stores = 3` | `dead_context_store_verify` at 3, per title | |
+| 7 | `eliminate_dead_context_stores = 3` (the guard is on with it) | `dead_context_store_verify` at 3, per title | the "ABI flag guard" counts in the stats line: "found too late" and "through a pointer" should be 0; if not, that title stays at 2 |
 | 8 | `inline_extern_calls` | | |
+| 9 | `a64_frame_chain` (start-up setting) | `a64_frame_chain_verify`: no `a64_frame_chain_verify:` line, "frame chain mismatches" 0, in a title that uses `setjmp` (the counter "non-local returns resumed on the landing function's frame" above 0 says it does) | call-heavy code is where it shows |
 
 Steps 1 to 3 can be one run if time is short: they are the exact ones.
 The earlier sessions' settings not named here (`a64_stack_access_no_fixup`,
@@ -708,126 +928,27 @@ Largest first.
 
 Written for whoever picks this up (the main thread or another cloud
 session). Each can be done in a cloud session's container; none needs the
-phone to write or to test, only to judge at the end. Order: A, then C (it
-does not depend on A), then B1, B2, D. Cut a branch from
+phone to write or to test, only to judge at the end. A, B and C are done; D is left. Cut a branch from
 `claude/translator-overhaul`.
 
-### A. A `longjmp` test (the gate for B)
+### A. A `longjmp` test: done (section 1.12)
 
-Why there is none: a non-local return (a `blr` or `bctr` to a return site
-in a frame further up) is recognised in `ResolveFunction`
-(`cpu/backend/a64/a64_backend.cc`) only when the target's module is a
-`XexModule` whose info cache says `is_return_site` for that address
-(`XexModule::GetInstructionAddressFlags`). The tests load a `RawModule`,
-the `dynamic_cast` gives null, the target is taken for a new function
-starting in the middle of another, and the runner crashes. The flag is set
-by the front end when it emits a call (`PPCHIRBuilder::SetReturnAddress`,
-`cpu/ppc/ppc_hir_builder.cc`, also only for a `XexModule`).
+### B. Calls without the `longjmp` tax: done (section 1.13)
 
-What to build:
-1. Move the two questions "mark this address as a return site" and "is
-   this address a return site" behind virtual functions of `Module`
-   (`cpu/module.h`), implemented by `XexModule` as today and by `RawModule`
-   with a set of addresses under a mutex. `ResolveFunction` and
-   `SetReturnAddress` then ask the module, not the `XexModule`. Small, and
-   marked `hakuX-Boosted:` (three upstream files).
-2. The return site's host address comes from the function's source map
-   (`GuestFunction::MapGuestAddressToMachineCode`); check it works for a
-   `RawModule` function (it should: the map is per function).
-3. Tests, `cpu/ppc/testing/seq_longjmp.s`, by hand. PowerPC `setjmp` and
-   `longjmp` written out in the test itself (save r1, LR, r14 to r31 and
-   CR in a buffer; restore them and `blr`). Cases: a jump back over one
-   frame (which `FindStackpointSyncDepth` deliberately treats as an early
-   stack restore, not a `longjmp`: more than one frame must be skipped),
-   over three frames, out of a loop that has made calls, twice to the same
-   buffer, with float and vector registers live in the frame returned to,
-   and a jump taken from a function reached through `bctrl`.
-4. Run them with every matrix line that has pins, with
-   `pin_guest_registers_stress`: the resume stubs of pinned functions
-   (`pinned_resume_stubs_`, `a64_emitter.cc`) have never run anywhere.
+Done differently from what was sketched here: one step instead of two, and
+x29 instead of a head pointer in the backend context, which makes the
+record cost three instructions on entry and none on exit. What is left of
+a call's fixed cost after it: the indirection-table load and compare of a
+return, the return-address constant for the callee, and the write-back and
+reload of pinned registers round the call, which is D.
 
-Done when: the tests pass at the defaults and in the matrix, and a
-deliberate fault in `EmitGuestAndHostSynchronizeStackHelper` (restore the
-wrong entry's stack pointer) makes them fail.
+### C. The ABI flag level, guarded: done (section 1.14)
 
-### B. Calls without the `longjmp` tax (needs A)
-
-What a call still pays for `longjmp`: 11 instructions in the prologue
-(`A64Emitter::PushStackpoint`), 3 in the epilogue (`PopStackpoint`), 2
-after every call (`EnsureSynchronizedGuestAndHostStack`). About half of
-what a call and return cost beyond the guest's own instructions.
-
-**B1. No check after a call.** Today `ResolveFunction` records
-`pending_stackpoint_sync_depth` and returns the return site's address; the
-return site then tests that field after every call, for ever. Instead:
-`ResolveFunction` stores the return site's address in a new field of
-`A64BackendContext` and returns the address of the synchronisation helper;
-the helper (which already restores the host stack pointer from the record)
-ends with a jump to the stored address instead of to x8. Then
-`EnsureSynchronizedGuestAndHostStack` emits nothing. With pins the stored
-address is the function's resume stub, as now. Two instructions off every
-call, and the smallest change of the three: do it first. Setting:
-`a64_resolve_repairs_stack`, off by default.
-
-**B2. The record in the frame, not in a side array.** Each guest frame
-already holds the guest return address at `StackLayout::GUEST_RET_ADDR`.
-Add the guest stack pointer at entry (the `GUEST_RESERVED` slot is free)
-and a pointer to the previous guest frame, with the head of the chain in
-`A64BackendContext`:
-- prologue: `ldr x8, [x19, #head]; str x8, [sp, #prev]; mov x9, sp; str
-  x9, [x19, #head]; ldr w10, [x20, #r1]; str w10, [sp, #guest_sp]`
-  (6 for 11, and no overflow test: the chain is in the stack);
-- epilogue and tail calls: `ldr x8, [sp, #prev]; str x8, [x19, #head]`
-  (2 for 3);
-- `FindStackpointSyncDepth` becomes a walk of the chain comparing guest
-  stack pointers, with the same "more than one frame" rule; the helper sets
-  the host stack pointer to the frame found and the head to it.
-Everything that reads `stackpoints` or `current_stackpoint_depth` has to
-move with it: grep both names in `cpu/` and `kernel/` first (thread
-creation allocates the array; the fibre switch may save the depth).
-Setting: `a64_frame_chain`, read at start-up, because both record forms
-cannot coexist in one process.
-
-Expected on the bench's `calls` loop: 3.07 to about 2.6 (B1 and B2
-together take roughly 10 of the 33 instructions a call pair costs now).
-
-### C. The ABI flag level, safe by default (needs nothing)
-
-`eliminate_dead_context_stores = 3` takes cr0, cr1, cr5, cr6 and cr7 for
-dead at calls and returns. It is wrong only for a caller that reads such a
-field after a call without setting it (the callee returned a result in
-it), or a callee that reads one at entry.
-
-1. In `DeadContextStorePass::Run`
-   (`cpu/compiler/passes/dead_context_store_pass.cc`) add a forward
-   analysis over the same items: "this ABI-volatile slot may hold what a
-   call left there" (set at a call item, cleared at a store to the slot).
-   A load of the slot in that state is a caller reading a callee's flag;
-   the same analysis from the function's entry finds a callee reading its
-   caller's.
-2. Keep a process-wide set of guest addresses (in `Processor`, under a
-   mutex): "functions whose flags at return are read". When a caller is
-   found reading after a direct call, add that call's target. When it is an
-   indirect call, set a flag that turns level 3 off for functions
-   translated from then on (it cannot name the callee), and count it.
-3. A function in the set is translated at level 2. A function that reads
-   at entry adds itself to a second set, "callers of this must keep their
-   flags": harder to act on (the callers may be translated already), so
-   count it and log it once; `dead_context_store_verify` remains the check.
-4. The gap that remains: a callee translated at level 3 before its
-   flag-reading caller is first seen. Callers are normally translated
-   first (a function is translated when first called), so it needs a
-   callee shared with an earlier, ordinary caller. Count it
-   (`TranslationStats`), log it once per callee. If the count is ever
-   non-zero on a title, that title runs at level 2.
-5. Tests: `seq_flags_across_blocks.s` already has
-   `cr_returned_by_callee_with_branch`, which level 3 fails by design and
-   skips; with this it must pass at level 3, and the skip in
-   `ci/run-tests.sh` for that test goes. Add the indirect call form and the
-   callee-reads-at-entry form.
-
-Worth: the difference between rows 7 and 8 of section 2 (integer 2.52 to
-1.57; corpus 31% to 38%), without the per-title risk.
+Left of it: retranslating a callee found too late instead of only
+reporting it (there is no way to retranslate a function today; the
+indirection table entry could be pointed back at the resolve thunk, but
+linked call sites and callers that hold the old address would have to be
+found), and the entry scan following conditional branches.
 
 ### D. One register mapping for all translated code (after B)
 
@@ -864,7 +985,15 @@ Not edited by this session. To copy in at the merge.
 For `HANDOFF.md`, "Right now": the translator tests' failure on
 `claude/integration-1115` was qemu's (section 0), fixed in the test build;
 the settings of section 4 and their order; the figures of section 2 with
-the run link; that nothing has run on a device.
+the run link; that nothing has run on a device. Also: three behaviours
+changed at the defaults in the second round, all corrections (section
+1.12): a small function that writes the link register is no longer
+inlined, a `longjmp` resumes on the landing function's own host frame
+where the call records confirm it, and (with debug information only) the
+stack check after a call sits where a `longjmp` resumes. If a title that
+worked stops working after this merge, `a64_longjmp_resume_live_frame =
+false` and `inline_leaf_keeps_lr_writers_out = false` give the earlier
+behaviour.
 
 For `ARCHITECTURE.md`, upstream files changed (all marked `hakuX-Boosted:`):
 
@@ -884,6 +1013,14 @@ For `ARCHITECTURE.md`, upstream files changed (all marked `hakuX-Boosted:`):
 | `cpu/ppc/ppc_emit_alu.cc` | setting `ppc_rlw_narrow_rotate`, `NarrowRotate32` |
 | `cpu/ppc/testing/ci/stubs.cc`, `matrix.txt`, `gen/gen-float-overlap-tests.py` | section 0's fix; the new lines; the generator |
 | `cpu/ppc/testing/seq_pin_coalesce.s`, `seq_float_overlap.s` | new tests |
+| (second round) `cpu/raw_module.h` | return sites for raw modules (`MarkReturnSite`, `IsReturnSite`) |
+| `cpu/ppc/ppc_hir_builder.cc` | raw modules' return sites marked; `inline_leaf_keeps_lr_writers_out`; the function's address handed to the HIR builder |
+| `cpu/hir/hir_builder.h` | `guest_function_address` |
+| `cpu/backend/a64/a64_backend.cc`, `.h` | `FindLandingStackpointDepth` and `a64_longjmp_resume_live_frame`; `a64_frame_chain`, `a64_frame_chain_verify`: `FindLandingFrame`, `EmitFrameChainResumeHelper`, x29 zeroed in the host-to-guest thunk and stored by the resolve thunk, three fields in `A64BackendContext`, no stackpoint array with the chain |
+| `cpu/backend/a64/a64_emitter.h`, `.cc` | the frame chain's prologue, `EmitRestoreHostReturn`, `EmitLoadGuestReturnAddress`; no stackpoint push, pop or check with it; the check after a call steps over HIR comments |
+| `cpu/compiler/passes/dead_context_store_pass.cc` | `dead_context_stores_abi_guard`: `AbiGuard`, `GuestCodeReadsFlagsAtEntry`, `FindFlagReadsAfterCalls` |
+| `cpu/compiler/compiler.cc` | the overhaul's counters in the `TranslationStats` line |
+| `cpu/ppc/testing/seq_longjmp.s`, `seq_flags_across_blocks.s`, `ci/known-failures.txt`, `ci/matrix.txt` | new tests and lines |
 
 Outside the core: `boosted/bench/core/bench_xlat.cc` (the counting mode),
 `bench_env.cc` (section 0's fix, for runs under qemu at 16 KiB),
@@ -908,6 +1045,26 @@ Outside the core: `boosted/bench/core/bench_xlat.cc` (the counting mode),
   **green, all three jobs**: "Xbox core", "APK (both cores)" and the
   translator tests with every line of the matrix, the new ones included
   (2 hours 25 minutes for that job).
+
+- The second round (the `longjmp` test and its corrections, the frame
+  chain, the ABI flag guard, the counters): pushed after this text was
+  written; the run links and results are in the last paragraph of this
+  section once known. In the container before the push, on that tree:
+  - defaults, all 141,948 tests then: pass, and every state equal to the
+    first round's reference apart from the new tests (so the three
+    default-on corrections change no test's result);
+  - `seq_longjmp` under each of the 57 lines the matrix had: 5 of 5 (it had
+    five cases then; eight now, run under the lines below);
+  - `a64_frame_chain` over everything: 141,951 of 141,951;
+    `a64_frame_chain_verify` over the seq_ suites and five instruction
+    groups: no mismatch; the whole set of settings with the chain over
+    everything: 141,950 of 141,950, and with verify over a subset: no
+    mismatch; the seq_longjmp and flag suites with everything and the
+    chain at 16 KiB pages: pass;
+  - "overhaul, ABI flags" with the guard on (its default) over everything
+    that line runs: 124,824 of 124,824; the pointer line and the ABI level
+    with the chain: pass;
+  - the deliberate faults of section 3's table.
 
 In the container before the push (x86-64, tests cross-compiled for ARM64
 and run under qemu-aarch64 8.2), on the tree of `0293269`: every new line

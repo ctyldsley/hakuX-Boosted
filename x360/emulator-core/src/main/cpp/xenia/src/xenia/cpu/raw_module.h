@@ -10,6 +10,8 @@
 #ifndef XENIA_CPU_RAW_MODULE_H_
 #define XENIA_CPU_RAW_MODULE_H_
 
+#include <mutex>
+#include <unordered_set>
 #include <string>
 
 #include "xenia/cpu/module.h"
@@ -35,6 +37,21 @@ class RawModule : public Module {
 
   bool ContainsAddress(uint32_t address) override;
 
+  // hakuX-Boosted: return sites, for longjmp emulation. A title's
+  // executable (XexModule) keeps them in its info cache; a raw module had
+  // nowhere to keep them, so a non-local return into one was never
+  // recognised and the instruction tests could not run a longjmp. The front
+  // end marks the address after each call; the backend's ResolveFunction
+  // asks when a jump lands somewhere that is not a function's start.
+  void MarkReturnSite(uint32_t address) {
+    std::lock_guard<std::mutex> lock(return_sites_mutex_);
+    return_sites_.insert(address);
+  }
+  bool IsReturnSite(uint32_t address) {
+    std::lock_guard<std::mutex> lock(return_sites_mutex_);
+    return return_sites_.count(address) != 0;
+  }
+
  protected:
   std::unique_ptr<Function> CreateFunction(uint32_t address) override;
 
@@ -44,6 +61,8 @@ class RawModule : public Module {
   uint32_t base_address_;
   uint32_t low_address_;
   uint32_t high_address_;
+  std::mutex return_sites_mutex_;
+  std::unordered_set<uint32_t> return_sites_;
 };
 
 }  // namespace cpu

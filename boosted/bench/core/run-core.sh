@@ -105,6 +105,11 @@ o8="$o6 eliminate_dead_context_stores=3 dead_context_stores_over_preempt_checks=
 run bench_core xlat "overhaul 8: 6 + dead stores 3 (ABI flags)" $o8
 run bench_core xlat "overhaul 9: 8 + a64_vmx_nan_fixup off" $o8 a64_vmx_nan_fixup=false
 run bench_core xlat "overhaul 10: 8 + inline_extern_calls" $o8 inline_extern_calls=true
+# The call records kept in the host frames (a64_frame_chain): alone, on top
+# of row 7, and on top of row 8.
+run bench_core xlat "overhaul 11: frame chain alone" a64_frame_chain=true
+run bench_core xlat "overhaul 12: 7 + frame chain" $o7 a64_frame_chain=true
+run bench_core xlat "overhaul 13: 8 + frame chain" $o8 a64_frame_chain=true
 # The scheduler's kernel call path with the lean thunk now that it applies
 # to import thunks.
 run bench_core sched "overhaul: lean calls, lean extern thunk" \

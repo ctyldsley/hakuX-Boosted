@@ -40,9 +40,43 @@
 #include "xenia/cpu/compiler/translation_stats.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/cpu/raw_module.h"
 #include "xenia/cpu/stack_walker.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/cpu/xex_module.h"
+
+// hakuX-Boosted: see FindLiveStackpointDepth.
+DEFINE_bool(
+    a64_longjmp_resume_live_frame, true,
+    "A non-local return (longjmp: a return to a call's return site further "
+    "up the stack) resumes on the host stack frame of the function it lands "
+    "in, when the call records show which that is (a dead frame that was "
+    "called from that function). Without this, and where the records do "
+    "not show it, the frame of that function's last callee is used, as "
+    "before: the function then reads another frame's saved return address "
+    "and its own return is resolved as a jump to an unknown place. Turn "
+    "off to get the earlier behaviour exactly.",
+    "a64");
+
+// hakuX-Boosted: see A64Emitter::frame_chain.
+DEFINE_bool(
+    a64_frame_chain, false,
+    "Keep the record of each call that a non-local return (longjmp) needs "
+    "in the host stack frame itself, linked through x29, instead of in a "
+    "per-thread array: entering a function costs three instructions more "
+    "than no record at all instead of eleven, leaving it none instead of "
+    "three, and the two-instruction check after every call goes "
+    "(ResolveFunction's answer puts the stack right before the return site "
+    "runs). Needs a64_enable_host_guest_stack_synchronization, and is read "
+    "once at start. Off until a title that uses setjmp has been run with "
+    "a64_frame_chain_verify.",
+    "a64");
+DEFINE_bool(
+    a64_frame_chain_verify, false,
+    "Keep both records (the array decides, so this costs more than either) "
+    "and compare what they say at every non-local return; a difference is "
+    "logged and counted with the self-check mismatches.",
+    "a64");
 
 // hakuX-Boosted: see A64Emitter::SetExtendedGprPool.
 DEFINE_bool(
@@ -127,6 +161,106 @@ uint32_t FindStackpointSyncDepth(const A64BackendStackpoint* stackpoints,
   return idx + 1;
 }
 
+// hakuX-Boosted: a64_longjmp_resume_live_frame. The frame a non-local
+// return lands in is the newest one that is still live. A record is made on
+// entry to a function, after its host frame is allocated, with the guest
+// stack pointer and return address it was entered with; so the record of
+// the landing function's callee holds a return address inside the landing
+// function, and the landing function's own record is the one before it.
+// The search above stops at the first record whose guest stack pointer is
+// not below the current one, and that is the callee's (it was entered with
+// the landing function's frame pointer, which is the current one): its
+// host stack pointer was then restored for the landing function's code. On
+// x64, where the search came from, a record is made before the frame is
+// allocated and that works out; here the landing function ran on its
+// callee's host frame, read that frame's saved return address as its own,
+// and its return went astray (the first longjmp test, seq_longjmp.s,
+// crashed there).
+//
+// Returns the depth to restore (the landing function's record index + 1),
+// or 0 when the records do not confirm one: the caller then does what it
+// did before.
+uint32_t FindLandingStackpointDepth(const A64BackendStackpoint* stackpoints,
+                                    uint32_t current_depth, uint32_t guest_sp,
+                                    uint32_t fn_start, uint32_t fn_end) {
+  if (!stackpoints || current_depth < 2) {
+    return 0;
+  }
+  // The oldest dead record.
+  uint32_t dead = current_depth;
+  while (dead > 0 && guest_sp >= stackpoints[dead - 1].guest_stack_) {
+    --dead;
+  }
+  auto called_from_fn = [&](uint32_t idx) {
+    const uint32_t ret = stackpoints[idx].guest_return_address_;
+    return ret > fn_start && ret <= fn_end + 4;
+  };
+  // Usually that is the callee's, and the landing function's is the last
+  // live one.
+  if (dead >= 1 && dead < current_depth && called_from_fn(dead)) {
+    return dead;  // record index dead - 1
+  }
+  // A landing function that made no guest frame was entered with the
+  // current stack pointer too: its record is the oldest dead one and its
+  // callee's is the next.
+  if (dead + 1 < current_depth && called_from_fn(dead + 1) &&
+      stackpoints[dead].guest_stack_ == guest_sp) {
+    return dead + 1;
+  }
+  return 0;
+}
+
+// hakuX-Boosted: a64_frame_chain. FindLandingStackpointDepth over the host
+// frames: |frame| is x29 where the return was made from (the newest frame
+// still on the host stack), each frame holds its caller's x29, the guest
+// stack pointer it was entered with and its guest return address, and the
+// chain ends at the 0 the host-to-guest thunk put in x29. Returns the
+// landing function's frame (which is also its stack pointer), or 0.
+uint64_t FindLandingFrame(uint64_t frame, uint32_t guest_sp, uint32_t fn_start,
+                          uint32_t fn_end) {
+  const auto entry_stack = [](uint64_t f) {
+    return *reinterpret_cast<const uint32_t*>(
+        f + A64Emitter::kFrameGuestStackOffset);
+  };
+  const auto called_from_fn = [&](uint64_t f) {
+    const uint32_t ret = *reinterpret_cast<const uint32_t*>(
+        f + StackLayout::GUEST_RET_ADDR);
+    return ret > fn_start && ret <= fn_end + 4;
+  };
+  uint64_t oldest_dead = 0;
+  uint64_t dead_before_it = 0;  // the next newer one
+  size_t walked = 0;
+  while (frame && guest_sp >= entry_stack(frame)) {
+    dead_before_it = oldest_dead;
+    oldest_dead = frame;
+    const uint64_t previous = *reinterpret_cast<const uint64_t*>(
+        frame + A64Emitter::kFramePreviousOffset);
+    // Frames are on one stack, callers above callees. Anything else is not
+    // a chain this code made.
+    if (previous && (previous <= frame || (previous & 15) ||
+                     previous - frame > (uint64_t(1) << 30))) {
+      return 0;
+    }
+    if (++walked > (size_t(1) << 20)) {
+      return 0;
+    }
+    frame = previous;
+  }
+  if (!oldest_dead) {
+    return 0;
+  }
+  if (frame && called_from_fn(oldest_dead)) {
+    return frame;  // the last live frame
+  }
+  // A landing function that made no guest frame: see
+  // FindLandingStackpointDepth.
+  if (dead_before_it && called_from_fn(dead_before_it) &&
+      entry_stack(oldest_dead) == guest_sp) {
+    return oldest_dead;
+  }
+  return 0;
+}
+
 // ==========================================================================
 // A64HelperEmitter — generates thunks using xbyak_aarch64.
 // ==========================================================================
@@ -142,6 +276,7 @@ class A64HelperEmitter : public A64Emitter {
   GuestToHostThunk EmitGuestToHostLeanThunk();  // hakuX-Boosted
   ResolveFunctionThunk EmitResolveFunctionThunk();
   void* EmitGuestAndHostSynchronizeStackHelper();
+  void* EmitFrameChainResumeHelper();  // hakuX-Boosted
 };
 
 A64HelperEmitter::A64HelperEmitter(A64Backend* backend,
@@ -236,6 +371,11 @@ HostToGuestThunk A64HelperEmitter::EmitHostToGuestThunk() {
   mov(x9, x0);  // x9 = target (scratch reg)
   // Pass guest return address in x0 (convention for guest function entry).
   mov(x0, x2);  // x0 = guest return address
+  if (A64Emitter::frame_chain()) {
+    // hakuX-Boosted: the frame chain of this entry into guest code starts
+    // here (x29 was saved above and comes back in the epilog).
+    mov(x29, 0);
+  }
 
   // Call the guest function.
   blr(x9);
@@ -523,6 +663,11 @@ ResolveFunctionThunk A64HelperEmitter::EmitResolveFunctionThunk() {
 
   code_offsets.body = getSize();
 
+  if (A64Emitter::frame_chain()) {
+    // hakuX-Boosted: where ResolveFunction's walk of the frames starts.
+    str(x29, ptr(x19, static_cast<uint32_t>(
+                          offsetof(A64BackendContext, resolve_frame))));
+  }
   // Call ResolveFunction(context, target_address).
   mov(x0, x20);  // x0 = PPCContext*
   mov(x1, x16);  // x1 = guest address (32-bit in w16)
@@ -629,6 +774,11 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
   ldr(x16, ptr(x14, static_cast<uint32_t>(
                         offsetof(A64BackendStackpoint, host_stack_))));
   mov(sp, x16);
+  if (A64Emitter::frame_chain()) {
+    // hakuX-Boosted: a64_frame_chain_verify. A function's x29 is its stack
+    // pointer.
+    mov(x29, x16);
+  }
 
   // Update current_stackpoint_depth = index + 1
   // (the entry we restored to has been consumed)
@@ -659,6 +809,27 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
       code_offsets.prolog_stack_alloc - code_offsets.prolog;
   func_info.stack_size = 0;
 
+  return Emplace(func_info);
+}
+
+// hakuX-Boosted: a64_frame_chain. What ResolveFunction answers with for a
+// non-local return: the landing function's frame becomes the stack pointer
+// and x29 again, and its return site (or that site's stub, when it keeps
+// guest registers in host registers) is jumped to. x16 is free at any
+// branch between functions.
+void* A64HelperEmitter::EmitFrameChainResumeHelper() {
+  ldr(x16, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext,
+                                                   pending_resume_frame))));
+  mov(sp, x16);
+  mov(x29, x16);
+  ldr(x16, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext,
+                                                   pending_resume_address))));
+  br(x16);
+
+  EmitFunctionInfo func_info = {};
+  func_info.code_size.total = getSize();
+  func_info.code_size.body = getSize();
+  func_info.stack_size = 0;
   return Emplace(func_info);
 }
 
@@ -803,10 +974,20 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     auto* module_for_address =
         processor->LookupModule(static_cast<uint32_t>(target_address));
     auto* xexmod = dynamic_cast<XexModule*>(module_for_address);
+    // hakuX-Boosted: a raw module keeps its return sites too (see
+    // RawModule::MarkReturnSite), so that the instruction tests can make a
+    // non-local return.
+    bool is_return_site = false;
     if (xexmod) {
       InfoCacheFlags* flags = xexmod->GetInstructionAddressFlags(
           static_cast<uint32_t>(target_address));
-      if (flags && flags->is_return_site) {
+      is_return_site = flags && flags->is_return_site;
+    } else if (auto* rawmod = dynamic_cast<RawModule*>(module_for_address)) {
+      is_return_site =
+          rawmod->IsReturnSite(static_cast<uint32_t>(target_address));
+    }
+    {
+      if (is_return_site) {
         uintptr_t host_address = 0;
         for (auto* entry : processor->FindFunctionsWithAddress(
                  static_cast<uint32_t>(target_address))) {
@@ -838,10 +1019,69 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
             auto* backend = static_cast<A64Backend*>(processor->backend());
             auto* backend_context =
                 backend->BackendContextForGuestContext(guest_context);
-            const uint32_t sync_depth = FindStackpointSyncDepth(
-                backend_context->stackpoints,
-                backend_context->current_stackpoint_depth,
-                static_cast<uint32_t>(guest_context->r[1]));
+            const int chain = A64Emitter::frame_chain();
+            uint64_t chain_landing = 0;
+            if (chain) {
+              // hakuX-Boosted: a64_frame_chain.
+              chain_landing = FindLandingFrame(
+                  backend_context->resolve_frame,
+                  static_cast<uint32_t>(guest_context->r[1]),
+                  afunc->address(), afunc->end_address());
+            }
+            if (chain == 1) {
+              if (!chain_landing) {
+                break;  // not confirmed: the general path, as with depth 0
+              }
+              backend_context->pending_resume_frame = chain_landing;
+              backend_context->pending_resume_address = host_address;
+              compiler::translation_stats.longjmp_landing_frames.fetch_add(
+                  1, std::memory_order_relaxed);
+              if (afunc->has_pinned_guest_registers()) {
+                compiler::translation_stats.pin_resume_entries.fetch_add(
+                    1, std::memory_order_relaxed);
+              }
+              return reinterpret_cast<uint64_t>(
+                  backend->frame_chain_resume_helper());
+            }
+            uint32_t sync_depth = 0;
+            if (cvars::a64_longjmp_resume_live_frame) {
+              // hakuX-Boosted: see FindLandingStackpointDepth.
+              sync_depth = FindLandingStackpointDepth(
+                  backend_context->stackpoints,
+                  backend_context->current_stackpoint_depth,
+                  static_cast<uint32_t>(guest_context->r[1]),
+                  afunc->address(), afunc->end_address());
+              if (sync_depth != 0) {
+                compiler::translation_stats.longjmp_landing_frames.fetch_add(
+                    1, std::memory_order_relaxed);
+              }
+            }
+            if (chain == 2) {
+              // hakuX-Boosted: a64_frame_chain_verify. The array's
+              // confirmed answer and the chain's have to be the same frame
+              // (or both none).
+              const uint64_t array_landing =
+                  sync_depth ? backend_context->stackpoints[sync_depth - 1]
+                                   .host_stack_
+                             : 0;
+              if (array_landing != chain_landing) {
+                compiler::translation_stats.frame_chain_mismatches.fetch_add(
+                    1, std::memory_order_relaxed);
+                XELOGE(
+                    "a64_frame_chain_verify: return to {:08X} in {:08X}, "
+                    "r1 {:08X}: the array says frame {:016X}, the chain "
+                    "{:016X}",
+                    static_cast<uint32_t>(target_address), afunc->address(),
+                    static_cast<uint32_t>(guest_context->r[1]),
+                    array_landing, chain_landing);
+              }
+            }
+            if (sync_depth == 0) {
+              sync_depth = FindStackpointSyncDepth(
+                  backend_context->stackpoints,
+                  backend_context->current_stackpoint_depth,
+                  static_cast<uint32_t>(guest_context->r[1]));
+            }
             if (sync_depth != 0) {
               backend_context->pending_stackpoint_sync_depth = sync_depth;
               if (afunc->has_pinned_guest_registers()) {  // hakuX-Boosted
@@ -994,6 +1234,11 @@ bool A64Backend::Initialize(Processor* processor) {
   // once, before the thunks below are generated: they and every function's
   // code have to agree on it.
   A64Emitter::SetExtendedGprPool(cvars::a64_extended_gpr_pool);
+  // hakuX-Boosted: likewise where the call records are kept.
+  A64Emitter::SetFrameChain(
+      !cvars::a64_enable_host_guest_stack_synchronization
+          ? 0
+          : cvars::a64_frame_chain_verify ? 2 : cvars::a64_frame_chain ? 1 : 0);
   gpr_set.count = A64Emitter::gpr_count();
   // VEC set: v4-v15, v16-v31 (28 registers, v0-v3 scratch)
   auto& vec_set = machine_info_.register_sets[1];
@@ -1024,6 +1269,9 @@ bool A64Backend::Initialize(Processor* processor) {
   if (cvars::a64_enable_host_guest_stack_synchronization) {
     synchronize_guest_and_host_stack_helper_ =
         thunk_emitter.EmitGuestAndHostSynchronizeStackHelper();
+    if (A64Emitter::frame_chain()) {  // hakuX-Boosted
+      frame_chain_resume_helper_ = thunk_emitter.EmitFrameChainResumeHelper();
+    }
   }
 
   // Wire up reservation helpers used by RESERVED_LOAD/STORE codegen.
@@ -1126,7 +1374,10 @@ void A64Backend::InitializeBackendContext(void* ctx) {
   a64_ctx->guest_tick_count = Clock::GetGuestTickCountPointer();
 
   // Allocate stackpoints for longjmp detection.
-  if (cvars::a64_enable_host_guest_stack_synchronization) {
+  // hakuX-Boosted: not with a64_frame_chain alone, which keeps no array
+  // (a megabyte a thread at the default size).
+  if (cvars::a64_enable_host_guest_stack_synchronization &&
+      A64Emitter::frame_chain() != 1) {
     uint64_t max_stackpoints = cvars::a64_max_stackpoints;
     if (max_stackpoints > 0) {
       a64_ctx->stackpoints = new A64BackendStackpoint[max_stackpoints]();

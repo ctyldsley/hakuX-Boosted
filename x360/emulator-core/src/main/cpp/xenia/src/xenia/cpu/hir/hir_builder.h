@@ -84,6 +84,14 @@ class HIRBuilder {
     return pinned_context_slots_;
   }
 
+  // hakuX-Boosted: the guest address of the function being built (0 when
+  // the front end did not say), for passes that keep facts about functions
+  // by address (DeadContextStorePass's guard).
+  uint32_t guest_function_address() const { return guest_function_address_; }
+  void set_guest_function_address(uint32_t address) {
+    guest_function_address_ = address;
+  }
+
   // hakuX-Boosted: with pin_guest_registers_wide, where each pinned register
   // has to be written back to the context and read again is decided per
   // instruction by a data-flow analysis (GuestRegisterPinningPass) instead of
@@ -421,6 +429,7 @@ class HIRBuilder {
   std::vector<Value*> locals_;
   // hakuX-Boosted
   std::vector<PinnedContextSlot> pinned_context_slots_;
+  uint32_t guest_function_address_ = 0;  // hakuX-Boosted
   PinSyncState pin_sync_;
   std::unordered_map<const Value*, PinHomeVerify> pin_home_verify_;
   std::unordered_set<const Instr*> elided_truncates_;
