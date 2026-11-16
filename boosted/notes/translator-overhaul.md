@@ -751,7 +751,9 @@ Outside the core: `boosted/bench/core/bench_xlat.cc` (the counting mode),
   (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43903306476).
   Actions run 142
   (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43903307406):
-  "Xbox core" green; the translator tests and the APK job were still running when this was written (the tests take over two hours with the new lines): read their result on that page.
+  **green, all three jobs**: "Xbox core", "APK (both cores)" and the
+  translator tests with every line of the matrix, the new ones included
+  (2 hours 25 minutes for that job).
 
 In the container before the push (x86-64, tests cross-compiled for ARM64
 and run under qemu-aarch64 8.2), on the tree of `0293269`: every new line
