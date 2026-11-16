@@ -695,8 +695,9 @@ None is needed for this branch to work. Two would help:
   run 139, https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43653241496:
   "Xbox core" and "APK (both cores)" green**, so the APK to test is this
   run's artifact `hakuX-Boosted-debug-apk` (check its sha256 against the
-  run's digest). Its "Translator tests" job takes about 100 minutes and was
-  still running when this was written: read its result on that page. This
-  branch changes one translator pass, behind `park_pause_poll_loops`, which
-  those tests do not switch on. The commits after `9d9b8e0` change these
+  run's digest). Its "Translator tests" job finished green as well (116
+  minutes), so all three jobs of run 139 are green. This branch changes one
+  translator pass, behind `park_pause_poll_loops`, which those tests do not
+  switch on: they show the defaults still translate correctly, not that the
+  pass's new rules do. The commits after `9d9b8e0` change these
   notes only and are marked `[skip ci]`.
