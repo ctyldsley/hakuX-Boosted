@@ -791,6 +791,11 @@ shared** (5.9% fewer; 39% below the defaults' 626,383); 380,826 with 6.
 So four is the number I would use: r1, r3, r31, r30. Float and vector
 loops do not change.
 
+At 16 KiB pages (the phone's; same script with qemu's `-p 16384`): calls
+4.852 at the defaults, 2.926 with row 12's settings, 2.593 with eighteen
+registers and four shared (47% below the defaults); copy 8.481, 3.669,
+3.666; kernel calls 18.5, 8.5, 9.33.
+
 What it costs: a kernel call stores and loads each shared register (the
 "host calls" column: 8.50 to 9.33 with four). A kernel call runs hundreds
 of host instructions of its own, so I expect that to be noise, but it is
