@@ -86,6 +86,19 @@ DEFINE_bool(
     "0xE0000000+'); anything but 0 means the setting is wrong for the title.",
     "a64");
 
+// hakuX-Boosted: see A64Emitter::CallIndirect.
+DEFINE_bool(
+    a64_indirect_call_range_check, false,
+    "An indirect guest call (bctrl, bctr, blr to a computed address) whose "
+    "target is outside 0x80000000..0x9FFFFFFF, where all translatable guest "
+    "code lives, traps at the call site (brk 0xF0C1) instead of reading past "
+    "the indirection table, which faults at an unrelated host address or, "
+    "if the stray word allows, jumps to an arbitrary one. The crash report "
+    "then names the guest PC of the call, with the target in CTR or LR. "
+    "Four instructions per indirect call. Takes effect for functions "
+    "translated after it is set.",
+    "a64");
+
 // hakuX-Boosted: see A64Emitter::EmitCompareResult.
 DEFINE_bool(
     a64_fuse_compare_branch, false,
@@ -1678,6 +1691,20 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
       // Encoded path: see A64CodeCache for the entry format.
       Label external_target;
       Label indirection_ready;
+
+      // hakuX-Boosted: a64_indirect_call_range_check. The table covers
+      // 0x80000000..0x9FFFFFFF only (target >> 29 == 4); a target outside
+      // it is a bad guest pointer (Gears of War, 2026-11-14: CTR
+      // 0x40360000) and the read below would be past the table.
+      if (cvars::a64_indirect_call_range_check) {
+        Label target_in_range;
+        lsr(w15, w16, 29);
+        mov(w14, 4);
+        cmp(w15, w14);
+        b(EQ, target_in_range);
+        brk(0xF0C1);
+        L(target_in_range);
+      }
 
       mov(x14, code_cache_->indirection_table_base_bias());
       add(x14, x14, w16, UXTW);

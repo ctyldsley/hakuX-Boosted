@@ -171,6 +171,17 @@ DEFINE_bool(
     "and one after which the wait was over opens them again. False is the "
     "first gate: no park at all if any event happened since the last look.",
     "Kernel");
+// hakuX-Boosted: the gap was a constant (20). Gears of War's menu yields
+// 9 to 18 us apart on a cool phone and further apart once it throttles, so
+// its two spinning threads sat at the edge of it (2026-11-14).
+DEFINE_uint32(
+    guest_scheduler_yield_spin_gap_us, 20,
+    "How close together a thread's empty yields must come, in microseconds, "
+    "for it to count as spinning and be parked (with "
+    "guest_scheduler_park_waits or guest_scheduler_park_yield_spinners). A "
+    "thread that works for longer than this between its yields is never "
+    "parked. Clamped to 5..500. Read once at start-up.",
+    "Kernel");
 DEFINE_uint32(
     guest_scheduler_park_wait_after_us, 200,
     "With guest_scheduler_park_waits: how long one burst of busy waiting "
@@ -594,7 +605,12 @@ void GuestScheduler::EnsureStarted() {
       ticks_per_us * (cvars::guest_scheduler_yield_park_after_us
                           ? cvars::guest_scheduler_yield_park_after_us
                           : kYieldParkAfterUs));
-  yield_gap_ticks_ = uint64_t(ticks_per_us * kYieldSpinGapUs);
+  // hakuX-Boosted: guest_scheduler_yield_spin_gap_us, 20 by default as the
+  // constant was.
+  const uint32_t yield_spin_gap_us =
+      std::clamp<uint32_t>(cvars::guest_scheduler_yield_spin_gap_us, 5, 500);
+  (void)kYieldSpinGapUs;
+  yield_gap_ticks_ = uint64_t(ticks_per_us * yield_spin_gap_us);
   poll_park_after_ticks_ = uint64_t(ticks_per_us * kPollParkAfterUs);
   // hakuX-Boosted: guest_scheduler_park_waits, read once, before any
   // dispatch thread exists. It needs the counter (0 = did not calibrate).
