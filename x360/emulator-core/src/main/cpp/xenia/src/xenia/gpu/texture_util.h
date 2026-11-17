@@ -315,7 +315,9 @@ inline uint64_t GetTiledAddressLowerBound3D(uint32_t left, uint32_t top,
   return uint64_t(texture_address::Tiled3D(
       int32_t(left & ~(xenos::kTextureTileWidthHeight - 1)),
       int32_t(top & ~(xenos::kTextureTileWidthHeight - 1)),
-      int32_t(front & ~(xenos::kTextureTileDepth)), pitch_aligned,
+      // hakuX-Boosted: the mask was ~kTextureTileDepth, which cleared only
+      // bit 2, so the bound for slices 1-3 and 5-7 lay inside the tile.
+      int32_t(front & ~(xenos::kTextureTileDepth - 1)), pitch_aligned,
       height_aligned, bytes_per_block_log2));
 }
 // Supporting the right > pitch and bottom > height (in tiles) cases also, for
