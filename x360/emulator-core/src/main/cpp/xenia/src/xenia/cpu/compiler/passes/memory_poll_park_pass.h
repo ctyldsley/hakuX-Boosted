@@ -26,6 +26,14 @@ namespace passes {
 // unit count every other reader takes). The backend then calls the
 // scheduler on every pass of the loop (a64_seq_memory.cc).
 constexpr uint16_t kSpinBackoffPollSite = 1;
+// hakuX-Boosted (park-hot-loops): the same, in a one-block counted sled of
+// pause hints that loads nothing (park_delay_sleds). Its registers change on
+// every pass by design (the counter), so the scheduler judges it by how
+// much of the thread's time it takes, not by its registers.
+constexpr uint16_t kSpinBackoffDelaySite = 2;
+// What the backend passes the scheduler beside the guest address, so the
+// two kinds of site can share one handler.
+constexpr uint64_t kSpinSiteDelayKind = uint64_t(1) << 32;
 
 // Injects an adaptive backoff into indefinite guest memory-poll self-loops
 // (load, test, branch back) so a long wait parks instead of burning a core.
@@ -42,6 +50,11 @@ class MemoryPollParkPass : public CompilerPass {
   bool TryInstrumentLoop(hir::HIRBuilder* builder, hir::Block* block);
   // hakuX-Boosted: park_pause_poll_loops, see the .cc file.
   void MarkPausePollLoops(hir::HIRBuilder* builder);
+  // hakuX-Boosted (park-hot-loops): park_one_block_poll_loops and
+  // park_delay_sleds, the flag TryInstrumentLoop gives its backoff site
+  // (0: a plain backoff as before).
+  uint16_t OneBlockSiteKind(hir::Block* block, hir::Instr* loop_branch,
+                            bool saw_load, bool is_delay_loop);
   // The blocks of the loops it marked in the function being compiled.
   std::vector<hir::Block*> marked_blocks_;
 };

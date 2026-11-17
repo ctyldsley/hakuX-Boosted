@@ -441,6 +441,13 @@ typedef struct alignas(64) PPCContext_s {
   // this names a block it provably reached.
   uint32_t last_safepoint_pc;
 
+  // hakuX-Boosted (park-hot-loops, park_poll_site_backoff): how many of the
+  // next visits to a poll or delay site in translated code need not call the
+  // scheduler. Written by the scheduler on the thread's own fiber and by the
+  // site's inline code; 0 (the zeroed context) is a call on the next visit.
+  // After thread_id, so it is not one of the registers the scheduler hashes.
+  uint32_t poll_site_skip;
+
   template <typename T = uint8_t*>
   inline T TranslateVirtual(uint32_t guest_address) XE_RESTRICT const {
     static_assert(std::is_pointer_v<T>);

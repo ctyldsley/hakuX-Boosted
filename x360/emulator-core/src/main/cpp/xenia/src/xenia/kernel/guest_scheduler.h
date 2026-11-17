@@ -231,6 +231,10 @@ class GuestScheduler {
   // A visit to a recognised pause-and-poll loop's backoff site in translated
   // code (MemoryPollParkPass, a64_seq_memory.cc), on the fiber.
   void PollSiteVisit(XThread* self, void* raw_context, uint32_t site);
+  // hakuX-Boosted (park-hot-loops, park_delay_sleds): a visit to a delay
+  // sled's site (a one-block counted loop of pause hints that loads
+  // nothing), every 64th pass of it.
+  void DelaySiteVisit(XThread* self, void* raw_context, uint32_t site);
 
   // Parks the running guest fiber on its CPU's blocked list and yields. Returns
   // once the dispatcher re-readies it so the wait can re-poll. A single-object
@@ -513,6 +517,13 @@ class GuestScheduler {
   uint64_t wait_park_max_ticks_ = 0;
   uint64_t wait_arm_window_ticks_ = 0;
   uint64_t poll_gap_ticks_ = 0;
+  // hakuX-Boosted (park-hot-loops): park_poll_site_backoff, read once; and
+  // the longest time 64 passes of a delay sled may take for the thread to
+  // count as spending its time in sleds.
+  bool poll_site_backoff_ = false;
+  uint64_t delay_gap_ticks_ = 0;
+  // The guest address of the last site that backed off (for the stats line).
+  std::atomic<uint32_t> poll_backoff_site_{0};
   // Raw tick until which some thread is between arming and parking; 0 until
   // the first arming, so the hooks cost one load with the setting off.
   std::atomic<uint64_t> wait_armed_until_{0};
@@ -757,6 +768,10 @@ class GuestScheduler {
     std::atomic<uint64_t> wait_wakes_polled{0};  // the polled object signalled
     std::atomic<uint64_t> poll_visits{0};       // poll site visits looked at
     std::atomic<uint64_t> poll_changed{0};      // registers differed
+    // hakuX-Boosted (park-hot-loops).
+    std::atomic<uint64_t> poll_backoffs{0};  // a site backed off further
+    std::atomic<uint64_t> delay_looks{0};    // delay site looks
+    std::atomic<uint64_t> delay_parks{0};    // of wait_parks_poll, in a sled
     std::atomic<uint64_t> apc_pokes{0};
     std::atomic<uint64_t> lock_acquisitions{0};
     std::atomic<uint64_t> lock_wait_ticks{0};

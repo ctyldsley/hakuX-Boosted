@@ -63,6 +63,20 @@ BENCH_BUSY_WAITS=1 run bench_core sched "park_waits + poll sites, max 500 us" $w
   park_pause_poll_loops=true guest_scheduler_park_wait_max_us=500
 BENCH_BUSY_WAITS=1 run bench_core sched "park_waits + poll sites + skew bound" $waits \
   park_pause_poll_loops=true $skew
+# claude/park-hot-loops (boosted/notes/park-hot-loops.md). The rows above
+# now run with park_poll_site_backoff (default true) and
+# park_poll_loops_fixed_addresses (default true); these two put each back
+# as it was, to compare. The last two are the new opt-in sites: the
+# delay_sled waiter is the shape run 146 named in Fable II's 3D Engine
+# thread, and it is parked only with park_delay_sleds.
+BENCH_BUSY_WAITS=1 run bench_core sched "park_waits + poll sites, no site backoff" $waits \
+  park_pause_poll_loops=true park_poll_site_backoff=false
+BENCH_BUSY_WAITS=1 run bench_core sched "park_waits + poll sites, stateless as before" $waits \
+  park_pause_poll_loops=true park_poll_loops_fixed_addresses=false
+BENCH_BUSY_WAITS=1 run bench_core sched "park_waits + poll sites + delay sleds + one-block sites" \
+  $waits park_pause_poll_loops=true park_delay_sleds=true park_one_block_poll_loops=true
+BENCH_BUSY_WAITS=1 run bench_core sched "park_waits + delay sleds, no site backoff" $waits \
+  park_delay_sleds=true park_poll_site_backoff=false
 run bench_core sched "a64_thunk_fpcr_compare" a64_thunk_fpcr_compare=true
 run bench_core sched "a64_lean_extern_thunk" a64_lean_extern_thunk=true
 run bench_core_static sched "static TLS (not Android's)"

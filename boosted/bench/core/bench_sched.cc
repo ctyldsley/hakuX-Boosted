@@ -120,6 +120,10 @@ enum class Body {
   kSpinPollPlain,  // ... load, compare, branch and nothing else
   kSpinPollClock,  // ... with a time-base read each pass (a deadline loop)
   kSpinLock,       // ... a lwarx/stwcx. lock with a pause-and-load wait loop
+  // hakuX-Boosted (park-hot-loops): ... calling a delay function on every
+  // pass: a counted one-block loop of four pause hints that loads nothing,
+  // the shape run 146's log names in Fable II's sub_82B9BF90.
+  kSpinDelaySled,
   kNoise,          // sets an event nobody waits on, several thousand a second
   kProducer,       // after a known delay makes the flag true (a plain store)
   kProducerSignal, // the same, and then sets an event nobody waits on
@@ -299,7 +303,30 @@ void HostConsume(PPCContext* context, xe::kernel::KernelState*) {
 // passes on purpose: a wait that counts its passes is not one that can be
 // parked on "nothing of its own changes" (the retry loop of a spin count is
 // the case that must be left alone).
+// hakuX-Boosted (park-hot-loops): the delay a kSpinDelaySled waiter calls.
+// A leaf: r10 counts BENCH_DELAY_SLED_PASSES passes of four db16cyc hints
+// (or r31,r31,r31) down to nought in a block of its own, which loads
+// nothing; the counter is a general register, not CTR, so neither collapse
+// pass takes it and park_memory_poll_loops marks it as a delay sled.
+uint32_t BuildDelaySled(Env& env) {
+  Asm d(env.NextCodeAddress());
+  Asm::Label sled;
+  d.li(10, int(EnvUs("BENCH_DELAY_SLED_PASSES", 64)));
+  d.Bind(sled);
+  d.or_(31, 31, 31);
+  d.or_(31, 31, 31);
+  d.or_(31, 31, 31);
+  d.or_(31, 31, 31);
+  d.addi(10, 10, -1);
+  d.cmpwi(6, 10, 0);
+  d.bne(6, sled);
+  d.blr();
+  return env.PlaceCode(d);
+}
+
 uint32_t BuildWaiter(Env& env, const Thunks& t, Body body) {
+  const uint32_t delay_fn =
+      body == Body::kSpinDelaySled ? BuildDelaySled(env) : 0;
   Asm a(env.NextCodeAddress());
   Asm::Label loop, pause, got, out, retry;
   Prologue(a);
@@ -366,6 +393,18 @@ uint32_t BuildWaiter(Env& env, const Thunks& t, Body body) {
       a.cmpwi(6, 9, 0);
       a.beq(6, loop);
       a.b(out);
+      break;
+    case Body::kSpinDelaySled:
+      // Test the flag, then call the delay, and round again: the call keeps
+      // this loop from being a pause-and-poll loop, as in the title.
+      a.lwz(9, kFlag, 30);
+      a.cmpwi(6, 9, 0);
+      a.bne(6, got);
+      a.lwz(9, kStop, 31);
+      a.cmpwi(6, 9, 0);
+      a.bne(6, out);
+      a.bl_abs(delay_fn);
+      a.b(loop);
       break;
     case Body::kSpinPollHint:
       a.or_(31, 31, 31);  // db16cyc, the console's pause hint
@@ -875,6 +914,7 @@ int RunSchedSuite(const std::string& label, void* slot_address) {
       {"poll_plain", Body::kSpinPollPlain},
       {"poll_clock", Body::kSpinPollClock},
       {"spin_lock", Body::kSpinLock},
+      {"delay_sled", Body::kSpinDelaySled},  // hakuX-Boosted (park-hot-loops)
   };
   const uint32_t f_noise = BuildHelper(*env, t, Body::kNoise);
   const uint32_t f_produce = BuildHelper(*env, t, Body::kProducer);
