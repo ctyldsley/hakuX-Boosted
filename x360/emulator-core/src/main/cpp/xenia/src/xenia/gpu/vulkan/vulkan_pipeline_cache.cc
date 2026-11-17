@@ -387,6 +387,28 @@ DEFINE_bool(
     "shader, and no placeholder is compiled from a translated vertex shader "
     "(such a draw is skipped until its real pipeline is ready).",
     "Vulkan");
+// hakuX-Boosted: boosted/notes/standin-device-lost.md. Settings to find
+// which part of the shared stand-ins lost the device on the phone; all off
+// (0, and -1 for the forms) keep the build as it was.
+DEFINE_int32(
+    vulkan_standin_dynamic_state_mask, 0,
+    "With vulkan_standin_precompile: the pieces of dynamic state the shared "
+    "stand-in pipelines bake in instead (a debugging aid; more distinct "
+    "stand-ins). Bits: 1 depth clamp, 2 polygon mode, 4 colour blend "
+    "enable, 8 colour blend equation, 16 colour write mask, 32 primitive "
+    "topology and primitive restart, 64 cull mode, front face, depth test, "
+    "depth write, depth compare and stencil test and ops. 127 is all of them. "
+    "Real pipelines keep all their dynamic state. Needs a restart.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_standin_shared_forms, -1,
+    "With vulkan_standin_precompile: which forms of placeholder use a shared "
+    "stand-in pipeline (a debugging aid). A form not in it gets a placeholder "
+    "of its own, made as without vulkan_standin_precompile. Bits: 1 no pixel "
+    "shader (no-op), 2 debug colour, 4 float24 depth, 8 the pixel "
+    "interpreter, 16 flat, 32 2D texture, 64 cube texture stand-in. -1 is "
+    "all of them, 0 none.",
+    "Vulkan");
 
 DEFINE_bool(
     vulkan_dynamic_pipeline_state, true,
@@ -583,6 +605,31 @@ bool VulkanPipelineCache::Initialize() {
           device_properties
               .extendedDynamicState3PrimitiveTopologyUnrestricted;
     }
+    // hakuX-Boosted: boosted/notes/standin-device-lost.md. What the shared
+    // stand-ins bake in instead of taking it as dynamic state: only pieces
+    // that are dynamic on this device at all.
+    uint32_t supported_static = 0;
+    if (caps.extended_dynamic_state) {
+      supported_static |= kStandInStaticTopology |
+                          kStandInStaticRasterDepthStencil;
+      if (caps.depth_clamp_enable) {
+        supported_static |= kStandInStaticDepthClamp;
+      }
+      if (caps.polygon_mode) {
+        supported_static |= kStandInStaticPolygonMode;
+      }
+      if (caps.color_blend_enable) {
+        supported_static |= kStandInStaticBlendEnable;
+      }
+      if (caps.color_blend_equation) {
+        supported_static |= kStandInStaticBlendEquation;
+      }
+      if (caps.color_write_mask) {
+        supported_static |= kStandInStaticWriteMask;
+      }
+    }
+    standin_static_mask_ =
+        uint32_t(cvars::vulkan_standin_dynamic_state_mask) & supported_static;
   }
 
   if (!guest_shader_cache_.Initialize()) {
@@ -1258,6 +1305,12 @@ bool VulkanPipelineCache::ConfigurePipeline(
   // the description so draws differing only in dynamic state share one pipeline.
   DynamicState dynamic_state;
   FillDynamicState(description, dynamic_state);
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md. Kept for a shared
+  // stand-in that bakes in some of the state this draw has as dynamic.
+  standin_source_description_valid_ = standin_static_mask_ != 0;
+  if (standin_source_description_valid_) {
+    standin_source_description_ = description;
+  }
   CanonicalizePipelineDescription(description);
   if (last_pipeline_ && last_pipeline_->first == description) {
     last_pipeline_->second.dynamic_state = dynamic_state;
@@ -1935,10 +1988,13 @@ void VulkanPipelineCache::MakePlaceholder(
   // shared stand-in pipeline of its recipe, which a creation thread makes
   // (or made earlier). Nothing is compiled here.
   bool placeholder_shared = false;
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md. The pixel form is
+  // worked out first so that vulkan_standin_shared_forms can send a form to
+  // the per-slot placeholder below instead.
+  StandInPixelForm pixel_form = StandInPixelForm::kNoOp;
+  uint32_t fallback_inputs = 0;
   if (placeholder_possible && use_program && IsStandInPrecompileActive()) {
     placeholder_shared = true;
-    StandInPixelForm pixel_form = StandInPixelForm::kNoOp;
-    uint32_t fallback_inputs = 0;
     if (use_stand_in) {
       if (stand_in.shader == StandInPixelShader::kProgram) {
         pixel_form = StandInPixelForm::kProgram;
@@ -1971,8 +2027,18 @@ void VulkanPipelineCache::MakePlaceholder(
                        ? StandInPixelForm::kDebugColor
                        : StandInPixelForm::kFloat24;
     }
+    if (!((uint32_t(cvars::vulkan_standin_shared_forms) >>
+           uint32_t(pixel_form)) &
+          1)) {
+      placeholder_shared = false;
+    }
+  }
+  if (placeholder_shared) {
     StandInRecipe recipe;
-    BuildStandInRecipe(description, pixel_form, fallback_inputs, recipe);
+    BuildStandInRecipe(description, pixel_form, fallback_inputs, recipe,
+                       standin_source_description_valid_
+                           ? &standin_source_description_
+                           : nullptr);
     Pipeline& slot = pipeline_pair.second;
     SharedStandIn* shared =
         GetSharedStandIn(recipe, kStandInOriginDraw, true);
@@ -2149,9 +2215,62 @@ bool VulkanPipelineCache::IsStandInPrecompileActive() const {
 
 void VulkanPipelineCache::BuildStandInRecipe(
     const PipelineDescription& slot_description, StandInPixelForm pixel_form,
-    uint32_t fallback_inputs, StandInRecipe& recipe_out) const {
+    uint32_t fallback_inputs, StandInRecipe& recipe_out,
+    const PipelineDescription* source_description) const {
   StandInRecipe recipe;
   PipelineDescription description(slot_description);
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md. The pieces of state
+  // the shared stand-ins bake in (vulkan_standin_dynamic_state_mask) are put
+  // back from the draw's description before canonicalisation, so that the
+  // stand-in is made with this draw's values and a draw with other values
+  // gets another one. Only if that description is this slot's.
+  if (standin_static_mask_ && source_description) {
+    PipelineDescription source_canonical(*source_description);
+    CanonicalizePipelineDescription(source_canonical);
+    if (source_canonical == slot_description) {
+      const PipelineDescription& source = *source_description;
+      const uint32_t mask = standin_static_mask_;
+      if (mask & kStandInStaticDepthClamp) {
+        description.depth_clamp_enable = source.depth_clamp_enable;
+      }
+      if (mask & kStandInStaticPolygonMode) {
+        description.polygon_mode = source.polygon_mode;
+      }
+      if (mask & (kStandInStaticBlendEnable | kStandInStaticBlendEquation |
+                  kStandInStaticWriteMask)) {
+        const uint32_t color_rts_used =
+            description.render_pass_key.depth_and_color_used >> 1;
+        for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+          if (color_rts_used & (uint32_t(1) << i)) {
+            description.render_targets[i] = source.render_targets[i];
+          }
+        }
+      }
+      if (mask & kStandInStaticTopology) {
+        description.primitive_topology = source.primitive_topology;
+        description.primitive_restart = source.primitive_restart;
+        description.topology_class = source.topology_class;
+      }
+      if (mask & kStandInStaticRasterDepthStencil) {
+        description.cull_front = source.cull_front;
+        description.cull_back = source.cull_back;
+        description.front_face_clockwise = source.front_face_clockwise;
+        description.depth_write_enable = source.depth_write_enable;
+        description.depth_compare_op = source.depth_compare_op;
+        description.stencil_test_enable = source.stencil_test_enable;
+        description.stencil_front_fail_op = source.stencil_front_fail_op;
+        description.stencil_front_pass_op = source.stencil_front_pass_op;
+        description.stencil_front_depth_fail_op =
+            source.stencil_front_depth_fail_op;
+        description.stencil_front_compare_op = source.stencil_front_compare_op;
+        description.stencil_back_fail_op = source.stencil_back_fail_op;
+        description.stencil_back_pass_op = source.stencil_back_pass_op;
+        description.stencil_back_depth_fail_op =
+            source.stencil_back_depth_fail_op;
+        description.stencil_back_compare_op = source.stencil_back_compare_op;
+      }
+    }
+  }
   // What is left of the modifications is what EnsurePipelineCreated reads
   // from them for a pipeline whose stages are not the guest's: which stage
   // the vertex side is and how many control points a patch has (the host
@@ -2380,6 +2499,9 @@ bool VulkanPipelineCache::TryAdoptSharedStandIn(
   slot.placeholder_stand_in.store(slot.stand_in_pending_packed,
                                   std::memory_order_release);
   slot.placeholder_shared.store(true, std::memory_order_release);
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md (the draw time check).
+  slot.placeholder_render_pass_key =
+      shared->recipe.description.render_pass_key.key;
   slot.placeholder_pipeline.store(stand_in_pipeline, std::memory_order_release);
   VkPipeline expected_pipeline = VK_NULL_HANDLE;
   if (!slot.pipeline.compare_exchange_strong(expected_pipeline,
@@ -3578,7 +3700,7 @@ void VulkanPipelineCache::LogStatsIfDue() {
         "within the wait), that took it at a later draw {}, that never did "
         "(the real pipeline came first) {}; draws skipped while a stand-in "
         "was being made {}; render pass keys seen {}; recipes taken from the "
-        "record {}",
+        "record {}{}",
         IsStandInPrecompileActive() ? "on" : "off",
         caps.extended_dynamic_state, caps.depth_clamp_enable,
         caps.polygon_mode, caps.color_blend_enable, caps.color_blend_equation,
@@ -3599,7 +3721,15 @@ void VulkanPipelineCache::LogStatsIfDue() {
         stand_in_slots_wait_worst_ms_, stand_in_slots_waited_in_time_,
         stand_in_slots_later_, stand_in_slots_never_,
         skipped_placeholder_compiling_, stand_in_render_passes_.size(),
-        stand_in_record_loaded_);
+        stand_in_record_loaded_,
+        // hakuX-Boosted: boosted/notes/standin-device-lost.md; only when one
+        // of its settings is not at its default.
+        (standin_static_mask_ || cvars::vulkan_standin_shared_forms != -1)
+            ? fmt::format("; baked into the stand-ins {:#x}, shared forms "
+                          "{:#x}",
+                          standin_static_mask_,
+                          uint32_t(cvars::vulkan_standin_shared_forms))
+            : std::string());
   }
 }
 
@@ -5817,17 +5947,30 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   // Extended dynamic state - must exactly match the fields canonicalized out of
   // the pipeline key (see CanonicalizePipelineDescription) and emitted per draw
   // by VulkanCommandProcessor::UpdateDynamicState.
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md. A shared stand-in
+  // bakes in the pieces in standin_static_mask_ (its recipe has the draw's
+  // values for them, BuildStandInRecipe), and the draw does not set them
+  // (VulkanCommandProcessor::UpdateDynamicState).
+  const uint32_t standin_static =
+      creation_arguments.kind == PipelineCreationArguments::Kind::kStandIn
+          ? standin_static_mask_
+          : 0;
   if (dyn_caps.extended_dynamic_state) {
     // EDS1 / EDS2 (core in Vulkan 1.3).
-    dynamic_states[dynamic_state.dynamicStateCount++] =
-        VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY;
-    dynamic_states[dynamic_state.dynamicStateCount++] =
-        VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE;
-    dynamic_states[dynamic_state.dynamicStateCount++] =
-        VK_DYNAMIC_STATE_CULL_MODE;
-    dynamic_states[dynamic_state.dynamicStateCount++] =
-        VK_DYNAMIC_STATE_FRONT_FACE;
-    if (!edram_fragment_shader_interlock) {
+    if (!(standin_static & kStandInStaticTopology)) {
+      dynamic_states[dynamic_state.dynamicStateCount++] =
+          VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY;
+      dynamic_states[dynamic_state.dynamicStateCount++] =
+          VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE;
+    }
+    if (!(standin_static & kStandInStaticRasterDepthStencil)) {
+      dynamic_states[dynamic_state.dynamicStateCount++] =
+          VK_DYNAMIC_STATE_CULL_MODE;
+      dynamic_states[dynamic_state.dynamicStateCount++] =
+          VK_DYNAMIC_STATE_FRONT_FACE;
+    }
+    if (!edram_fragment_shader_interlock &&
+        !(standin_static & kStandInStaticRasterDepthStencil)) {
       dynamic_states[dynamic_state.dynamicStateCount++] =
           VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE;
       dynamic_states[dynamic_state.dynamicStateCount++] =
@@ -5840,24 +5983,29 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
           VK_DYNAMIC_STATE_STENCIL_OP;
     }
     // EDS3 sub-features (each gated separately).
-    if (dyn_caps.depth_clamp_enable) {
+    if (dyn_caps.depth_clamp_enable &&
+        !(standin_static & kStandInStaticDepthClamp)) {
       dynamic_states[dynamic_state.dynamicStateCount++] =
           VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT;
     }
-    if (dyn_caps.polygon_mode) {
+    if (dyn_caps.polygon_mode &&
+        !(standin_static & kStandInStaticPolygonMode)) {
       dynamic_states[dynamic_state.dynamicStateCount++] =
           VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
     }
     if (!edram_fragment_shader_interlock) {
-      if (dyn_caps.color_blend_enable) {
+      if (dyn_caps.color_blend_enable &&
+          !(standin_static & kStandInStaticBlendEnable)) {
         dynamic_states[dynamic_state.dynamicStateCount++] =
             VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT;
       }
-      if (dyn_caps.color_blend_equation) {
+      if (dyn_caps.color_blend_equation &&
+          !(standin_static & kStandInStaticBlendEquation)) {
         dynamic_states[dynamic_state.dynamicStateCount++] =
             VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT;
       }
-      if (dyn_caps.color_write_mask) {
+      if (dyn_caps.color_write_mask &&
+          !(standin_static & kStandInStaticWriteMask)) {
         dynamic_states[dynamic_state.dynamicStateCount++] =
             VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT;
       }
