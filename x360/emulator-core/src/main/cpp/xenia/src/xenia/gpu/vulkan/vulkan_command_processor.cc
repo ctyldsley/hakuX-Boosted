@@ -1785,6 +1785,13 @@ void VulkanCommandProcessor::ShutdownContext() {
         device, pipeline_layout_pair.second.GetPipelineLayout(), nullptr);
   }
   pipeline_layouts_.clear();
+  // hakuX-Boosted: the pipeline libraries' layouts.
+  for (auto& library_pipeline_layouts : library_pipeline_layouts_) {
+    for (const auto& library_layout_pair : library_pipeline_layouts) {
+      dfn.vkDestroyPipelineLayout(device, library_layout_pair.second, nullptr);
+    }
+    library_pipeline_layouts.clear();
+  }
   for (const auto& descriptor_set_layout_pair :
        descriptor_set_layouts_textures_) {
     dfn.vkDestroyDescriptorSetLayout(device, descriptor_set_layout_pair.second,
@@ -3599,7 +3606,18 @@ VulkanCommandProcessor::GetPipelineLayout(size_t texture_count_pixel,
   pipeline_layout_create_info.sType =
       VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   pipeline_layout_create_info.pNext = nullptr;
-  pipeline_layout_create_info.flags = 0;
+  // hakuX-Boosted: with vulkan_pipeline_libraries and independent sets,
+  // every guest pipeline layout has the independent sets flag: a pipeline
+  // linked from libraries whose layouts have it must be given a layout that
+  // has it, and the descriptor sets of a draw are bound with this layout,
+  // which is only compatible with the pipeline's if both have the flag or
+  // neither (boosted/notes/pipeline-libraries.md). Otherwise 0, as before.
+  const bool library_layouts_independent =
+      VulkanPipelineCache::ArePipelineLibraryLayoutsIndependent(vulkan_device);
+  pipeline_layout_create_info.flags =
+      library_layouts_independent
+          ? VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT
+          : 0;
   pipeline_layout_create_info.setLayoutCount =
       uint32_t(xe::countof(descriptor_set_layouts));
   pipeline_layout_create_info.pSetLayouts = descriptor_set_layouts;
@@ -3621,8 +3639,70 @@ VulkanCommandProcessor::GetPipelineLayout(size_t texture_count_pixel,
           descriptor_set_layout_textures_pixel, uint32_t(texture_count_vertex),
           uint32_t(sampler_count_vertex), uint32_t(texture_count_pixel),
           uint32_t(sampler_count_pixel)));
+  // hakuX-Boosted: the layouts of this layout's shader libraries. If one
+  // could not be made the library is created with the whole layout.
+  if (library_layouts_independent) {
+    emplaced_pair.first->second.SetLibraryPipelineLayouts(
+        GetLibraryPipelineLayoutLocked(false,
+                                       descriptor_set_layout_textures_vertex),
+        GetLibraryPipelineLayoutLocked(true,
+                                       descriptor_set_layout_textures_pixel));
+  }
   // unordered_map insertion doesn't invalidate element references.
   return &emplaced_pair.first->second;
+}
+
+// hakuX-Boosted: boosted/notes/pipeline-libraries.md. Called with
+// pipeline_layouts_mutex_ held.
+VkPipelineLayout VulkanCommandProcessor::GetLibraryPipelineLayoutLocked(
+    bool fragment, VkDescriptorSetLayout descriptor_set_layout_textures) {
+  auto& library_pipeline_layouts = library_pipeline_layouts_[fragment ? 1 : 0];
+  auto it = library_pipeline_layouts.find(descriptor_set_layout_textures);
+  if (it != library_pipeline_layouts.end()) {
+    return it->second;
+  }
+  // The sets a stage does not use are left out (null), which the independent
+  // sets flag allows: the vertex side's library then does not depend on the
+  // pixel shader's textures, nor the fragment shader's on the vertex
+  // shader's.
+  VkDescriptorSetLayout
+      descriptor_set_layouts[SpirvShaderTranslator::kDescriptorSetCount] = {};
+  descriptor_set_layouts
+      [SpirvShaderTranslator::kDescriptorSetSharedMemoryAndEdram] =
+          descriptor_set_layout_shared_memory_and_edram_;
+  descriptor_set_layouts[SpirvShaderTranslator::kDescriptorSetConstants] =
+      descriptor_set_layout_constants_;
+  descriptor_set_layouts[fragment
+                             ? SpirvShaderTranslator::kDescriptorSetTexturesPixel
+                             : SpirvShaderTranslator::
+                                   kDescriptorSetTexturesVertex] =
+      descriptor_set_layout_textures;
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  VkPipelineLayoutCreateInfo pipeline_layout_create_info;
+  pipeline_layout_create_info.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  pipeline_layout_create_info.pNext = nullptr;
+  pipeline_layout_create_info.flags =
+      VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT;
+  pipeline_layout_create_info.setLayoutCount =
+      uint32_t(xe::countof(descriptor_set_layouts));
+  pipeline_layout_create_info.pSetLayouts = descriptor_set_layouts;
+  pipeline_layout_create_info.pushConstantRangeCount = 0;
+  pipeline_layout_create_info.pPushConstantRanges = nullptr;
+  VkPipelineLayout library_pipeline_layout = VK_NULL_HANDLE;
+  if (dfn.vkCreatePipelineLayout(device, &pipeline_layout_create_info, nullptr,
+                                 &library_pipeline_layout) != VK_SUCCESS) {
+    XELOGE(
+        "pipeline libraries: failed to create the pipeline layout of the {} "
+        "libraries; they are created with the whole layout",
+        fragment ? "fragment shader's" : "vertex side's");
+    return VK_NULL_HANDLE;
+  }
+  library_pipeline_layouts.emplace(descriptor_set_layout_textures,
+                                   library_pipeline_layout);
+  return library_pipeline_layout;
 }
 
 VulkanCommandProcessor::ScratchBufferAcquisition

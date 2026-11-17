@@ -14,17 +14,23 @@ the base commit.
 
 Done:
 
-1. Feasibility (this file, sections 1a to 1f), committed before any code.
+1. Feasibility (sections 1a to 1f), committed before any code.
+2. The start-up log line `pipeline libraries:` that answers 1a on a device,
+   printed whatever is set (`ui/vulkan/vulkan_device.cc`).
+3. The design of 1f, behind `vulkan_pipeline_libraries` (default off): the
+   four kinds of library, made on whichever thread first needs them (the
+   creation threads, in the asynchronous models), real pipelines linked from
+   them, links on the GPU command thread behind a second setting, the third
+   `placeholder cover:` line. With the setting off the device, the layouts
+   and the pipelines are made exactly as before ("What changes with the
+   setting off" below says what was checked by reading).
 
-In progress:
+In progress: nothing.
 
-2. The start-up log line that answers 1a on a device (`ui/vulkan/vulkan_device.cc`).
-3. The design of 1f behind `vulkan_pipeline_libraries` (default off).
+Next, in this order: the device runs under "Device test order"; then "Not
+built" (libraries made ahead of need first).
 
-Next: see "Device test order" and "Not built".
-
-The last section says what Actions built. This list is brought up to date by
-the last commit of the branch.
+The last section says what Actions built.
 
 ## The evidence this starts from
 
@@ -533,24 +539,212 @@ the new branch. Nothing else changes.
 4. Dropping the placeholder for a slot whose libraries will be ready within
    the frame.
 
+## What was built
+
+All in `gpu/vulkan/vulkan_pipeline_cache.{h,cc}` except where said.
+
+- **The device** (`ui/vulkan/vulkan_device.cc`): the two extensions are
+  looked for in the device's list without being requested; the feature and
+  the properties are asked for in a chain of their own. Only with
+  `vulkan_pipeline_libraries` are `VK_KHR_pipeline_library` and
+  `VK_EXT_graphics_pipeline_library` added to the enabled extensions and the
+  feature to the device's chain;
+  `VulkanDevice::Properties::graphicsPipelineLibrary` (and the two
+  properties) are true only then.
+- **Whether it is used**: `ArePipelineLibrariesUsable`: the setting, the
+  feature enabled, and independent interpolation decoration (without it the
+  interpolation decorations of a vertex shader's outputs and a pixel
+  shader's inputs would have to agree for a link, which the translator does
+  not promise; DXVK requires it too). Resolved once in `Initialize`, with a
+  line that says which way it went when the setting is on.
+- **The libraries**: `GetOrCreatePipelineLibrary`. One map
+  (`pipeline_libraries_`) of `PipelineLibraryKey` (the part, up to four
+  module handles, the layout handle, the render pass handle, and the static
+  values as words in a fixed order) to a handle and a state. Made once; a
+  thread that finds one being made waits on a condition variable; a failed
+  one stays failed. Destroyed in `Shutdown` after the pipelines.
+- **The link**: `CreatePipelineFromLibraries`, called from
+  `EnsurePipelineCreated` in place of its `vkCreateGraphicsPipelines` for a
+  real pipeline (kind `kReal`, no module or layout override). It splits the
+  create info the function has just filled, so the libraries are given
+  exactly the state the whole pipeline would have been, and returns false
+  for anything it cannot do; the caller then makes the whole pipeline as
+  before. Everything after the call is unchanged, including the count by
+  "shaders the driver had compiled before".
+- **The layouts** (`vulkan_command_processor.{h,cc}`): with
+  `vulkan_pipeline_libraries_independent_sets`,
+  `VulkanCommandProcessor::GetPipelineLayout` creates every guest layout
+  with the independent sets flag and gives each two more layouts for its
+  libraries (`GetLibraryPipelineLayoutLocked`: shared memory, constants and
+  one stage's texture set, the other stage's left null), kept by the texture
+  set's layout so that every pair with the same vertex texture counts shares
+  the vertex side's. `PipelineLayoutProvider::GetLibraryPipelineLayout`
+  returns them (the whole layout without the setting).
+- **Links on the GPU command thread**: `TryLinkPipelineInline`, called from
+  `ConfigurePipeline` for a new slot before either asynchronous model, only
+  with `vulkan_pipeline_libraries_inline_link` and a driver that reports
+  fast linking. It asks `EnsurePipelineCreated` for a link only
+  (`PipelineCreationArguments::link_only`): nothing is compiled or waited
+  for; if a shader's library is missing or being made, the slot goes the
+  usual way. The time of each is taken from the frame's budget
+  (`NoteFrameBoundary` refills it).
+- **The log**: `LogStatsIfDue` prints the third `placeholder cover:` line
+  with `shader_profiling`, and now prints `pipeline compiles by shaders the
+  driver had compiled before` when either the placeholder model or the
+  libraries are on (it used to need the placeholder model). With
+  `shader_profiling` each shader library also gets a line,
+  `shader_profiling: pipeline library (vertex side|fragment) created in N
+  ms`.
+
+### What changes with the setting off
+
+Checked by reading the diff, not by running:
+
+- `vulkan_device.cc`: three more queries of the physical device (features
+  and properties of the pipeline library extension, features of shader
+  object, each only if the extension is in the device's list) and one log
+  line. The enabled extensions, the feature chain and the properties used
+  elsewhere are the same.
+- `GetPipelineLayout`: one call that returns false, `flags` 0 as before, no
+  library layout made.
+- `EnsurePipelineCreated`: `pipeline_libraries_active_` is false, so the one
+  `vkCreateGraphicsPipelines` call is made with the same arguments; `link_only`
+  is never set. `ConfigurePipeline` and `LogStatsIfDue`: one false test each.
+- The placeholder path and `vulkan_standin_precompile` are not touched by
+  the setting in either state, except that with independent sets their
+  layouts carry the flag too (they come from the same function).
+
 ## Device test order
 
-To be filled in with the exact lines by the last commit.
+Each run with `shader_profiling = true`, a cold cache for the title (delete
+`<cache>/shaders/local/TITLEID.vk.bin`; keep the record), the same title and
+the same minutes of play. Banjo-Kazooie and Fable II have the baseline
+numbers above.
 
-## Upstream files changed
+1. **Nothing new set** (any build of this branch). Read one line near the
+   top of the log:
 
-To be filled in by the last commit.
+       pipeline libraries: VK_EXT_graphics_pipeline_library offered ... (VK_KHR_pipeline_library ...), graphicsPipelineLibrary ..., fast linking ..., independent interpolation decoration ...; enabled on this device no (vulkan_pipeline_libraries no); VK_EXT_shader_object offered ..., shaderObject ...; VK_EXT_extended_dynamic_state3 offered ... (enabled ...): depth clamp enable ..., polygon mode ..., colour blend enable ..., colour blend equation ..., colour write mask ..., rasterisation samples ..., sample mask ..., alpha to coverage enable ..., depth clip enable ..., logic op enable ..., any topology ...; instance has VK_KHR_get_physical_device_properties2 ...
+
+   Expected with the bundled Turnip: the first five "yes", shader object
+   "no". Do it once more with an empty `vulkan_lib_path` (the phone's own
+   driver): that is the answer 1a could not give. If "offered" is "no" on
+   Turnip, stop: the reading of the source was wrong for the bundled binary.
+2. **`vulkan_pipeline_libraries = true`**, the stand-in settings as in the
+   last good run. First the line from `Initialize`:
+
+       pipeline libraries: vulkan_pipeline_libraries is set: real pipelines are linked from libraries (independent sets yes, links on the GPU command thread no)
+
+   Then compare with run 1, in this order:
+   - the picture: anything drawn differently is a fault of the split (the
+     libraries are given the same state as the whole pipeline) or of the
+     driver's link; note where. No device loss; no `Failed to create`.
+   - `pipeline compiles by shaders the driver had compiled before`: the
+     "both" mean was 188.7 ms (Banjo) and 120.0 ms (Fable II). It should be
+     near zero. "one of the two" was 368.9 and 137.5: about half is what the
+     estimate assumed.
+   - `placeholder cover: pipeline libraries:`: `vertex side N (... mean)` and
+     `fragment N (... mean)` are what a library costs (assumption 1 of 1e);
+     `pipelines linked N (... mean ..., slowest ...)` is what a link costs
+     (assumption 2); `of those with every library found ready` against the
+     old "both" count says how much sharing the keys allow (assumption 3);
+     `pipelines that fell back to a whole compile` should be 0, and `failed`
+     0 for each kind.
+   - the seconds with a frame over 100 ms in the first two minutes, and
+     `draws skipped`, against run 1.
+3. **Warm run of 2** (start the title again, same settings): frame time and
+   the GPU's clock against a warm run with the setting off. This is the
+   run-time cost of pipelines that were not optimised across stages. If it
+   is visible, the background optimised pipeline of 1f becomes worth
+   building; if not, it is not.
+4. **`vulkan_pipeline_libraries_independent_sets = false`**, cold: the same
+   lines. More vertex side libraries and fewer "found ready" is expected; it
+   is the mode to fall back to if 2 shows wrong pictures or a crash that this
+   run does not (then the fault is in the independent layouts).
+5. **`vulkan_pipeline_libraries_inline_link = true`** (with 2's settings),
+   cold: `of those on the GPU command thread N (N ms, slowest N)` and the
+   three `refused` counts; `draws skipped` and stand-in draws should fall by
+   about the number linked there. `slowest` is the bound to look at: if it is
+   over a millisecond, lower `vulkan_pipeline_libraries_inline_link_frame_us`
+   or leave the setting off.
+6. The phone's own driver, if run 1 said it offers the extension with
+   independent interpolation decoration: run 2 again there.
+
+It becomes the default when runs 2 and 3 are clean on the three titles of
+the smoke test.
+
+## Upstream files changed (each change marked `hakuX-Boosted`)
+
+| File | Why |
+|---|---|
+| `ui/vulkan/vulkan_device.cc` | the setting `vulkan_pipeline_libraries`; the two extensions noted in the device's list; enabled, with the feature, only with the setting; the `pipeline libraries:` line |
+| `ui/vulkan/vulkan_device.h` | three fields of `Properties` |
+| `gpu/vulkan/vulkan_pipeline_cache.h` | `PipelineLayoutProvider::GetLibraryPipelineLayout`; `link_only`; the library key, map, functions and counters |
+| `gpu/vulkan/vulkan_pipeline_cache.cc` | the three other settings; `Initialize` (resolve once), `Shutdown` (destroy), `ConfigurePipeline` (the link at the draw), `NoteFrameBoundary` (the budget), `LogStatsIfDue` (the line), `EnsurePipelineCreated` (the branch at the create call), and the new functions before `ProcessDeferredDestructions` |
+| `gpu/vulkan/vulkan_command_processor.h` | `PipelineLayout`'s two library layouts; the map of them |
+| `gpu/vulkan/vulkan_command_processor.cc` | `GetPipelineLayout`: the flag and the library layouts, only with the setting; `GetLibraryPipelineLayoutLocked`; their destruction |
 
 ## For `boosted/HANDOFF.md` and `boosted/docs/ARCHITECTURE.md` (not edited here)
 
-To be filled in by the last commit.
+`HANDOFF.md`, "Right now": the branch, its base, "nothing run on a device",
+the device test order above (run 1 needs no setting and can ride on any
+session), and the finding of 1b in one sentence: Turnip keys a compiled
+stage by a hash of the whole pipeline, which is why a pipeline of two known
+shaders costs 120 to 190 ms, and libraries are the driver's own way round
+it. "Settings this fork added (360 side)": the four settings of 1f.
+"Findings that should not be rediscovered": Turnip has no
+`VK_EXT_shader_object`; on Turnip a link with link time optimisation is a
+full compile; freedesktop's GitLab cannot be read by a session, the mirror
+https://github.com/sailfishos-mirror/mesa can.
+
+`ARCHITECTURE.md`: the six rows of the table above.
+
+For the app (Kotlin, not touched): a row for `vulkan_pipeline_libraries`
+once a device run says it is worth showing.
+
+## Limits and risks
+
+- **A split that draws differently.** The libraries get the same structures
+  the whole pipeline would; what can differ is what the driver does with
+  state it sees in parts (Turnip decides some things, LRZ and the primitive
+  order among them, when it first sees the fragment shader and the output
+  state together). Run 2 is the check.
+- **A draw without a pixel shader** has a fragment shader library with no
+  stage (it holds the depth and stencil state). The specification allows it
+  and Turnip has a path for it (`tu_pipeline.cc` 2084, an empty fragment
+  shader); another driver may not like it. It would show as `failed:
+  fragment N` and those pipelines would be compiled whole.
+- **The independent sets flag on every guest layout**, placeholders'
+  included, when the setting and its sub-setting are on. Turnip does not
+  read the flag. On another driver this is the first thing to turn off.
+- **Memory.** Libraries are never destroyed while a title runs, and a linked
+  pipeline keeps its libraries' shaders alive. On Turnip the binaries are
+  shared by reference, so the total should be below today's (each stage
+  compiled once instead of once for each pair); not measured. The driver's
+  stored cache will hold libraries as well as whatever pipelines it held.
+- **The GPU command thread waiting for a creation thread's library** in the
+  synchronous path (a draw that cannot be asynchronous): it waits for the
+  compile instead of doing it. Same time, another thread's work.
+- **`of those with every library found ready` is approximate** when several
+  threads link at once.
+- **Shader libraries are not shared across render passes without dynamic
+  rendering** (1c). With `vulkan_dynamic_rendering = false` expect far less
+  from this.
+- The key is the driver's handles. A module handle is never reused while the
+  cache lives (modules are destroyed with their shaders, after `Shutdown`),
+  so a stale match is not possible as the code stands; a future change that
+  frees modules early would have to drop their libraries.
 
 ## What is unverified
 
-Everything about behaviour: see the first paragraph. In particular, from the
-research: that the bundled binary matches upstream Turnip's source in this
-respect; the cost of a fast link on the phone; the run-time cost of
-fast-linked pipelines; anything about the Qualcomm proprietary driver.
+Everything about behaviour: see the first paragraph. In particular: that the
+bundled binary matches upstream Turnip's source in this respect; the cost of
+a library and of a fast link on the phone; the run-time cost of fast-linked
+pipelines; that the split draws the same picture; anything about the
+Qualcomm proprietary driver; that my reading of valid usage 06729 and 06730
+(which link may drop the independent sets flag) is right, which decides
+whether the flag on every guest layout is needed at all (Turnip would work
+without it).
 
 ## Builds
 
