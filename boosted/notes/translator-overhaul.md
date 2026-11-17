@@ -859,7 +859,8 @@ The table below is the first round's and does not have that row; section
 Third round: with eighteen host registers and four guest registers shared
 by all code (section 1.16) the compiled-C corpus is at 380,803 host
 instructions, 39% below the defaults with exact settings (it was 31%
-after the first round), and the bench's calls at 2.26, 43% below.
+after the first round), and the bench's calls at 2.26, 43% below. With
+the ABI flag level as well the corpus is at 339,896, 46% below.
 
 Host instructions run per guest instruction on the bench loops, counted in
 the session's container under qemu ("How it is measured"). Each numbered
@@ -1113,6 +1114,32 @@ counters, which stood here after the first round, are done: sections 1.13,
   registers are not shared at all: f1 (argument and result) would be the
   first, in a register a host function preserves the low half of (v8 to
   v15), which the vector pool would have to give up.
+- **What the corpus still spends, measured after the third round**
+  (`seq_cc_int`, 380,803 host instructions with eighteen registers, four
+  shared, exact settings; each line is a share of that, and none is large):
+  - 2.7%: stores of cr0's three bytes by record forms and compares in
+    functions whose flags are not pinned. The ABI flag level removes most
+    (339,896 in all with it: 46% below the defaults).
+  - 2.9%: `mov wN, wM` that is not an address. About a quarter are the
+    zero extension after a load into a pin (`rev w26, w26; mov w25, w26`,
+    the item below); about a third are `mov wN, wN` after an instruction
+    that had already written the 32-bit register (`and w28, w28, #1; mov
+    w28, w28`): the zero extension of a 32-bit result that shares its
+    operand's register. `IsElidableCopy` lets loads, byte swaps and
+    rotates through; every 32-bit operation whose sequence always ends by
+    writing the W register could join them, and each has to be read for
+    the case where it emits nothing (an identity), which would pass an
+    elided truncation's dirty upper half on.
+  - 1.1%: loads and stores of the link register (`mflr`, `mtlr`, and the
+    store before a call). It could be a shared register: the list is of
+    general registers today.
+  - 1.1% (on 4 KiB pages only): `mov w0, wN` to form an address. An
+    extended-register operand (`[x21, wN, uxtw]`) would do without it,
+    but on the phone's 16 KiB pages the fix-up needs the copy anyway.
+  - 1.8%: `mov xN, xM` between pins, which are the guest's own moves.
+  - r26 to r29 saved and restored by prologues and epilogues (about 3%
+    in loads and stores): what a fifth and sixth shared register take,
+    at the cost of pins in loops.
 - **A kernel call stores and loads every shared register.** Narrowing
   that to what a host function can read (not r28 to r31, unless it
   captures or unwinds a context) would take most of the cost back; it
