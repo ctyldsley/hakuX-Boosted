@@ -44,7 +44,9 @@ else()
   message(WARNING "bench: libc++ is not available, building against the "
                   "compiler's default C++ library; the scheduler's timed "
                   "waits will not behave as the app's do")
-  add_compile_definitions(BENCH_CXX_LIBRARY="NOT libc++ (the app uses libc++)")
+  # (No brackets in the value: CMake drops a definition that has them, and
+  # the report then lost this line and bench_sched.cc did not compile.)
+  add_compile_definitions(BENCH_CXX_LIBRARY="NOT libc++, which the app uses")
 endif()
 
 # The tree whose core is measured. The default is the tree this directory is

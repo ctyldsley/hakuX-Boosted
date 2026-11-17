@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/cpu/compiler/translation_stats.h"
 #include "xenia/cpu/hir/hir_builder.h"
@@ -35,9 +36,10 @@ DEFINE_bool(
 DEFINE_int32(
     pin_guest_registers_max_int, 2,
     "With pin_guest_registers: the most integer guest registers one function "
-    "may pin. Each takes one of the seven host registers the allocator has "
-    "for integer values, so more pins mean more spills in busy blocks. "
-    "Clamped to 0..3.",
+    "may pin. Each takes one of the host registers the allocator has for "
+    "integer values, so more pins mean more spills in busy blocks. Clamped "
+    "to 0..3, or to 0..10 with a64_extended_gpr_pool (and "
+    "pin_guest_registers_wide).",
     "CPU");
 
 DEFINE_int32(
@@ -127,6 +129,11 @@ constexpr int64_t kMinimumNetBenefit = 8;
 //   lr   read by the prologue and written by the host around callbacks;
 //   everything that is not a general, float or vector register (condition
 //   and XER bytes, FPSCR, the reservation and scheduler fields).
+// hakuX-Boosted: bit n: guest register n is one every function keeps in a
+// host register (a64_shared_guest_registers; the same for the whole
+// process, set when the pass is made).
+uint32_t shared_gpr_mask = 0;
+
 bool ClassifySlot(uint32_t offset, TypeName type, uint8_t* out_reg_set,
                   int* out_gpr_index) {
   *out_gpr_index = -1;
@@ -136,6 +143,10 @@ bool ClassifySlot(uint32_t offset, TypeName type, uint8_t* out_reg_set,
         (offset - gpr_base) % 8 == 0) {
       const int n = static_cast<int>((offset - gpr_base) / 8);
       if (n == 1 || n == 2 || n == 13) {
+        return false;
+      }
+      // hakuX-Boosted: a64_shared_guest_registers has it already.
+      if ((shared_gpr_mask >> n) & 1) {
         return false;
       }
       *out_reg_set = 0;
@@ -202,14 +213,101 @@ GuestRegisterPinningPass::GuestRegisterPinningPass(
       vec_register_count_ = set.count;
     }
   }
+  shared_gpr_count_ = machine_info->shared_gpr_count;
+  for (uint32_t n = 0; n < shared_gpr_count_ && n < 8; ++n) {
+    shared_gprs_[n] = machine_info->shared_gprs[n];
+    shared_gpr_mask |= uint32_t(1) << shared_gprs_[n];
+  }
+}
+
+bool GuestRegisterPinningPass::IsSharedGpr(int gpr) const {
+  for (uint32_t n = 0; n < shared_gpr_count_; ++n) {
+    if (shared_gprs_[n] == gpr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// hakuX-Boosted: a64_shared_guest_registers. Every function gets the shared
+// registers as pinned slots, after its own (whose numbers the masks of
+// pin_guest_registers_wide use), in the first registers of the integer
+// set. The backend never loads or stores them; the context accesses of
+// such a slot become register moves like any pin's. The front end reads
+// and writes a general register as one 64-bit value at its own offset; an
+// access of another shape to one of these would read or write the context
+// copy, which is stale, so it is counted with the self-check mismatches
+// and logged.
+void GuestRegisterPinningPass::AddShared(HIRBuilder* builder) {
+  if (!shared_gpr_count_) {
+    return;
+  }
+  auto& pinned = builder->pinned_context_slots();
+  const uint32_t gpr_base = static_cast<uint32_t>(offsetof(PPCContext, r));
+  for (auto block = builder->first_block(); block; block = block->next) {
+    for (auto i = block->instr_head; i; i = i->next) {
+      uint32_t size = 0;
+      TypeName type = INT64_TYPE;
+      if (i->opcode == &OPCODE_LOAD_CONTEXT_info) {
+        type = i->dest->type;
+      } else if (i->opcode == &OPCODE_STORE_CONTEXT_info) {
+        type = i->src2.value->type;
+      } else {
+        continue;
+      }
+      size = static_cast<uint32_t>(GetTypeSize(type));
+      const uint32_t offset = static_cast<uint32_t>(i->src1.offset);
+      if (offset + size <= gpr_base || offset >= gpr_base + 32 * 8) {
+        continue;
+      }
+      const bool whole = type == INT64_TYPE && (offset - gpr_base) % 8 == 0;
+      const int first = static_cast<int>((offset - gpr_base) / 8);
+      const int last = static_cast<int>((offset + size - 1 - gpr_base) / 8);
+      for (int gpr = first; gpr <= last && gpr < 32; ++gpr) {
+        if (IsSharedGpr(gpr) && !whole) {
+          translation_stats.shared_gpr_odd_accesses.fetch_add(
+              1, std::memory_order_relaxed);
+          XELOGE(
+              "a64_shared_guest_registers: {:08X} accesses r{} as {} bytes "
+              "at context offset {:X}; the context copy is stale",
+              builder->guest_function_address(), gpr, size, offset);
+        }
+      }
+    }
+  }
+  if (pinned.empty()) {
+    // No pins of the function's own: the per-instruction sets (all empty)
+    // are what holds, which is also what lets the allocator keep values in
+    // the shared registers (pin_guest_registers_coalesce).
+    builder->pin_sync().by_liveness = true;
+  }
+  for (uint32_t n = 0; n < shared_gpr_count_; ++n) {
+    HIRBuilder::PinnedContextSlot slot;
+    slot.offset = gpr_base + 8 * shared_gprs_[n];
+    slot.type = INT64_TYPE;
+    slot.reg_set = 0;
+    slot.reg_index = static_cast<uint8_t>(n);
+    slot.written = true;
+    slot.shared = true;
+    pinned.push_back(slot);
+  }
 }
 
 GuestRegisterPinningPass::~GuestRegisterPinningPass() = default;
 
 bool GuestRegisterPinningPass::Run(HIRBuilder* builder) {
+  const bool ok = RunOwn(builder);
+  if (ok) {
+    AddShared(builder);
+  }
+  return ok;
+}
+
+bool GuestRegisterPinningPass::RunOwn(HIRBuilder* builder) {
   auto& pinned = builder->pinned_context_slots();
   pinned.clear();
   builder->pin_sync().Clear();
+  builder->pin_home_verify().clear();
   // The debugger reads and writes guest registers through the context.
   if (!cvars::pin_guest_registers || cvars::debug) {
     return true;
@@ -223,6 +321,9 @@ bool GuestRegisterPinningPass::Run(HIRBuilder* builder) {
   // How many host registers may be given up. The allocator always keeps at
   // least four integer and sixteen vector registers for its own values.
   int max_int = std::clamp(cvars::pin_guest_registers_max_int, 0, 3);
+  // hakuX-Boosted: less what a64_shared_guest_registers has taken.
+  max_int = std::min(max_int, std::max(0, int(int_register_count_) - 4 -
+                                              int(shared_gpr_count_)));
   int max_vec = std::clamp(cvars::pin_guest_registers_max_vec, 0, 12);
   if (int_register_count_ < 7) {
     max_int = 0;
@@ -557,7 +658,16 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
   auto& stats = translation_stats;
   stats.pin_functions_considered.fetch_add(1, std::memory_order_relaxed);
 
-  int max_int = std::clamp(cvars::pin_guest_registers_max_int, 0, 3);
+  // hakuX-Boosted: the allocator keeps at least four integer registers for
+  // its own values: three pins of seven, ten of the fourteen that
+  // a64_extended_gpr_pool gives.
+  int max_int = std::clamp(cvars::pin_guest_registers_max_int, 0,
+                           int_register_count_ >= 18
+                               ? 14
+                               : int_register_count_ >= 14 ? 10 : 3);
+  // hakuX-Boosted: less what a64_shared_guest_registers has taken.
+  max_int = std::min(max_int, std::max(0, int(int_register_count_) - 4 -
+                                              int(shared_gpr_count_)));
   int max_vec = std::clamp(cvars::pin_guest_registers_max_vec, 0, 16);
   if (int_register_count_ < 7) {
     max_int = 0;
@@ -587,6 +697,12 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
   std::vector<bool> slot_is_flag;
   std::unordered_map<uint64_t, size_t> slot_index;
   std::vector<uint32_t> loop_end(block_count, UINT32_MAX);
+  // hakuX-Boosted: and the instruction in that block that is the loop's
+  // last back-edge. What follows it in the same block is outside the loop
+  // (a loop's exit code is usually in the block that holds its branch: a
+  // PowerPC conditional branch does not end a HIR block), and weighing it
+  // as loop code made a return after a loop look like a call inside it.
+  std::vector<uint32_t> loop_end_index(block_count, 0);
   bool any_loop = false;
   struct Access {
     uint32_t block;
@@ -681,10 +797,11 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
           }
           w.target = static_cast<int32_t>(it->second);
           if (it->second <= b) {
-            if (loop_end[it->second] == UINT32_MAX ||
-                loop_end[it->second] < b) {
-              loop_end[it->second] = b;
-            }
+            // (Blocks are visited in order and instructions in order, so the
+            // last back-edge seen is the furthest.)
+            loop_end[it->second] = b;
+            loop_end_index[it->second] =
+                static_cast<uint32_t>(code[b].size());
             any_loop = true;
           }
         }
@@ -843,11 +960,14 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
   // loads and stores, weighted by loop depth as in Run. Benefit: its
   // accesses, which become register moves. Cost: the loads and stores the
   // backend will emit to keep it in step.
+  // A loop covers its head block's first instruction to its last
+  // back-edge, inclusive.
   std::vector<int32_t> depth_delta(block_count + 1, 0);
+  std::vector<std::vector<uint32_t>> loop_ends_in(block_count);
   for (uint32_t head = 0; head < block_count; ++head) {
     if (loop_end[head] != UINT32_MAX) {
       depth_delta[head] += 1;
-      depth_delta[loop_end[head] + 1] -= 1;
+      loop_ends_in[loop_end[head]].push_back(loop_end_index[head]);
     }
   }
   std::vector<uint64_t> benefit(candidates.size(), 0);
@@ -865,9 +985,10 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
   int32_t depth = 0;
   for (uint32_t b = 0; b < block_count; ++b) {
     depth += depth_delta[b];
-    const uint64_t weight =
-        WeightForDepth(static_cast<uint32_t>(std::max(depth, 0)));
-    for (const auto& w : code[b]) {
+    for (uint32_t index = 0; index < code[b].size(); ++index) {
+      const auto& w = code[b][index];
+      const uint64_t weight =
+          WeightForDepth(static_cast<uint32_t>(std::max(depth, 0)));
       switch (w.kind) {
         case WideKind::kLoad:
         case WideKind::kStore:
@@ -883,6 +1004,11 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
           break;
         default:
           break;
+      }
+      for (uint32_t end_index : loop_ends_in[b]) {
+        if (end_index == index) {
+          depth -= 1;
+        }
       }
     }
   }

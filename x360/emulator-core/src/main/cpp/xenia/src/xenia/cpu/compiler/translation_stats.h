@@ -40,6 +40,37 @@ struct TranslationStats {
   // Run time: a longjmp-style return into the middle of a function with
   // pinned registers went through its resume stub.
   std::atomic<uint64_t> pin_resume_entries{0};
+  // hakuX-Boosted: run time: non-local returns that resumed on the landing
+  // function's own host frame (a64_longjmp_resume_live_frame).
+  std::atomic<uint64_t> longjmp_landing_frames{0};
+  // hakuX-Boosted: a64_shared_guest_registers (static): context accesses
+  // of a shared register that are not the whole register.
+  std::atomic<uint64_t> shared_gpr_odd_accesses{0};
+  // hakuX-Boosted: a64_fpcr_known_block_entry. Loads and writes of FPCR
+  // emitted (static, with or without the setting); blocks that started in
+  // a known mode (static); what the verify mode found (run time; a plain
+  // counter the emitted code adds to).
+  std::atomic<uint64_t> fpcr_sets_emitted{0};
+  std::atomic<uint64_t> fpcr_known_entries{0};
+  uint64_t fpcr_entry_mismatches = 0;
+  // hakuX-Boosted: dead_context_stores_abi_guard (static). Functions whose
+  // flags are kept at their returns because a caller reads them; call
+  // sites whose flags are kept because the callee reads them at entry;
+  // callees found to return a flag after they were translated without
+  // (the guard came too late for them: use level 2 for the title); callers
+  // reading a flag after a call through a pointer (which keeps every
+  // function's flags from then on); functions that read a flag at entry.
+  std::atomic<uint64_t> abi_guard_returns_kept{0};
+  std::atomic<uint64_t> abi_guard_calls_kept{0};
+  std::atomic<uint64_t> abi_guard_late{0};
+  std::atomic<uint64_t> abi_guard_indirect{0};
+  std::atomic<uint64_t> abi_guard_entry_readers{0};
+  // hakuX-Boosted: run time: returns to a return site with no landing
+  // frame confirmed (taken through the general path).
+  std::atomic<uint64_t> longjmp_unconfirmed{0};
+  // hakuX-Boosted: run time: a64_frame_chain_verify found the array and
+  // the chain naming different frames.
+  std::atomic<uint64_t> frame_chain_mismatches{0};
   // Run time: mismatches reported by a64_pin_verify.
   std::atomic<uint64_t> pin_verify_mismatches{0};
   // Which guest register each pinned integer slot was (r0..r31, 32 = ctr,
@@ -92,6 +123,19 @@ struct TranslationStats {
   // pin_loads and pin_stores.
   std::atomic<uint64_t> pin_sync_loads{0};
   std::atomic<uint64_t> pin_sync_stores{0};
+  // pin_guest_registers_coalesce (static): loads of a pinned register that
+  // became no instruction at all, and values computed straight into one.
+  // a64_fuse_compare_branch (static): compares that reused the flags of
+  // the compare before them, and branches taken on the flags of a compare
+  // whose result has other uses.
+  std::atomic<uint64_t> compares_reused_flags{0};
+  std::atomic<uint64_t> branches_on_flags{0};
+  // register_allocation_elide_copies (static): copies that took their
+  // operand's register (those of values living in a pin are counted with
+  // the pin's loads).
+  std::atomic<uint64_t> copies_elided{0};
+  std::atomic<uint64_t> pin_coalesced_loads{0};
+  std::atomic<uint64_t> pin_coalesced_defs{0};
   // Static: blocks translated in functions with and without pinned
   // registers.
   std::atomic<uint64_t> blocks_pinned{0};

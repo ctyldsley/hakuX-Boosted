@@ -27,6 +27,7 @@
 #include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/cpu/raw_module.h"
 #include "xenia/cpu/xex_module.h"
 DEFINE_bool(
     break_on_unimplemented_instructions, true,
@@ -62,6 +63,16 @@ DEFINE_bool(
     "title that patched its own import table before the caller was "
     "translated keeps its patch. Takes effect for functions translated after "
     "it is set.",
+    "CPU");
+
+// hakuX-Boosted: see PPCHIRBuilder::TryInlineLeafCall.
+DEFINE_bool(
+    inline_leaf_keeps_lr_writers_out, true,
+    "A small function that writes the link register (mtlr) before its blr "
+    "is not folded into its callers by inline_leaf_calls: its blr is a jump "
+    "to wherever it put there, not a return to the call site, and inlining "
+    "it dropped the jump. On by default because the old behaviour is a "
+    "mistranslation; false gives it back, for comparison only.",
     "CPU");
 
 namespace xe {
@@ -119,6 +130,7 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
 
   function_ = function;
   start_address_ = function_->address();
+  set_guest_function_address(function_->address());  // hakuX-Boosted
   // chrispy: i've seen this one happen, not sure why but i think from trying to
   // precompile twice i've also seen ones with a start and end address that are
   // the same...
@@ -277,6 +289,16 @@ bool PPCHIRBuilder::TryInlineLeafCall(uint32_t target_address,
       uint32_t code = xe::load_and_swap<uint32_t>(ptr);
       if (code == kBlr) {
         break;  // terminal return, and the end of the body
+      }
+      // hakuX-Boosted: a body that writes the link register (mtlr) does not
+      // end in a plain return: its blr goes wherever it put there (a
+      // longjmp is the textbook case, a computed tail jump another).
+      // Inlined, that jump became a fall-through into the caller. Found by
+      // the first longjmp test (seq_longjmp.s), whose nine-instruction
+      // longjmp was inlined and never jumped.
+      if (cvars::inline_leaf_keeps_lr_writers_out &&
+          (code & 0xFC1FFFFF) == 0x7C0803A6) {
+        return false;
       }
       auto opcode = LookupOpcode(code);
       if (opcode == PPCOpcode::kInvalid) {
@@ -798,6 +820,9 @@ void PPCHIRBuilder::SetReturnAddress(Value* value) {
           bits.is_return_site = true;
           AtomicSetInfoCacheFlags(flags, bits);
         }
+      } else if (auto* rawmod = dynamic_cast<RawModule*>(mod)) {
+        // hakuX-Boosted: see RawModule::MarkReturnSite.
+        rawmod->MarkReturnSite(value->AsUint32());
       }
     }
   }

@@ -13,12 +13,15 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
 
 #include "xenia/base/byte_order.h"
+#include "xenia/cpu/backend/backend.h"
+#include "xenia/cpu/backend/code_cache.h"
 #if BENCH_HAVE_TRANSLATION_STATS
 #include "xenia/cpu/compiler/translation_stats.h"
 #endif
@@ -411,9 +414,75 @@ Program BuildHostCalls(Env& env) {
   return p;
 }
 
+// --- 7. The same, with a host function that reads and writes registers ------
+// What a kernel export does: arguments from the context, the result back in
+// r3. The host function also looks at a register the guest keeps for itself
+// over the call (r31) and at the stack pointer. With
+// a64_shared_guest_registers those live in host registers and are in the
+// context only because the thunk put them there, and the result reaches the
+// guest only because the thunk reads it back: check() fails if either half
+// is missing.
+uint64_t g_host_args_calls = 0;
+uint64_t g_host_args_wrong = 0;
+void HostArgs(PPCContext* context, xe::kernel::KernelState*) {
+  ++g_host_args_calls;
+  if (context->r[3] != context->r[31] || context->r[4] != 7 ||
+      context->r[1] == 0 || context->r[30] > (uint64_t(1) << 40)) {
+    ++g_host_args_wrong;
+  }
+  context->r[3] = context->r[3] + context->r[4] + 1;
+}
+
+Program BuildHostArgs(Env& env) {
+  uint32_t thunk = env.ImportThunk("BenchHostArgs", HostArgs);
+  Asm a(env.NextCodeAddress());
+  Asm::Label loop;
+  a.mflr(0);
+  a.stw(0, -8, 1);
+  a.stwu(1, -96, 1);
+  a.stw(31, 84, 1);
+  a.stw(30, 80, 1);
+  a.mr(31, 3);
+  a.li(30, 0);
+  a.Bind(loop);
+  a.mr(3, 31);
+  a.li(4, 7);
+  a.bl_abs(thunk);
+  a.add(30, 30, 3);
+  a.addi(31, 31, -1);
+  a.cmpwi(6, 31, 0);
+  a.bgt(6, loop);
+  a.mr(3, 30);
+  a.lwz(30, 80, 1);
+  a.lwz(31, 84, 1);
+  a.addi(1, 1, 96);
+  a.lwz(0, -8, 1);
+  a.mtlr(0);
+  a.blr();
+  Program p;
+  p.name = "host_args";
+  p.entry = env.PlaceCode(a);
+  p.functions = {thunk, p.entry};
+  p.guest_words = uint32_t(a.count()) + 2;
+  p.guest_insns = [](uint32_t iterations) {
+    return 7 + uint64_t(iterations) * (7 + 2) + 7;
+  };
+  p.prepare = [](PPCContext*) {
+    g_host_args_calls = 0;
+    g_host_args_wrong = 0;
+  };
+  p.check = [](PPCContext* context, uint32_t iterations) {
+    const uint64_t n = iterations;
+    return g_host_args_calls == n && g_host_args_wrong == 0 &&
+           context->r[3] == n * (n + 1) / 2 + 8 * n;
+  };
+  return p;
+}
+
 using Builder = Program (*)(Env&);
-const Builder kBuilders[] = {BuildInteger, BuildFloat, BuildVector,
-                             BuildCalls,   BuildCopy,  BuildHostCalls};
+const Builder kBuilders[] = {BuildInteger, BuildFloat,     BuildVector,
+                             BuildCalls,   BuildCopy,      BuildHostCalls,
+                             BuildHostArgs};
 
 }  // namespace
 
@@ -432,6 +501,67 @@ int RunXlatSuite(const std::string& label) {
   PinToCurrentCpu();
 
   int status = 0;
+  // The counting mode, for a machine whose kernel gives no instruction
+  // counter (qemu-user, most virtual machines): BENCH_XLAT_TRACE=name:n
+  // translates one program, runs it once with n passes and stops. The
+  // script tools/xlat-count-qemu.sh runs that under qemu's execution log,
+  // limited to the code cache's addresses, at two values of n, and so
+  // counts the host instructions translated code runs per guest
+  // instruction. BENCH_XLAT_DUMP=dir also writes each function's machine
+  // code to dir/<program>-<guest address>.bin for a disassembler.
+  if (const char* trace = std::getenv("BENCH_XLAT_TRACE")) {
+    const std::string spec(trace);
+    const size_t colon = spec.find(':');
+    const std::string want = spec.substr(0, colon);
+    const uint32_t iterations = colon == std::string::npos
+                                    ? 64
+                                    : uint32_t(std::stoul(spec.substr(colon + 1)));
+    auto* cache = env->processor->backend()->code_cache();
+    std::printf("xlat-trace code_cache=0x%llx..0x%llx\n",
+                (unsigned long long)cache->execute_base_address(),
+                (unsigned long long)(cache->execute_base_address() +
+                                     cache->total_size()));
+    for (Builder build : kBuilders) {
+      Program program = build(*env);
+      if (program.name != want) {
+        continue;
+      }
+      for (uint32_t address : program.functions) {
+        auto* fn = env->processor->ResolveFunction(address);
+        if (!fn) {
+          std::printf("xlat-trace %s NOT TRANSLATED\n", want.c_str());
+          return 1;
+        }
+        const char* dump = std::getenv("BENCH_XLAT_DUMP");
+        if (dump && *dump && fn->is_guest()) {
+          auto* guest = static_cast<xe::cpu::GuestFunction*>(fn);
+          char path[512];
+          std::snprintf(path, sizeof(path), "%s/%s-%08X.bin", dump,
+                        want.c_str(), address);
+          if (FILE* file = std::fopen(path, "wb")) {
+            std::fwrite(guest->machine_code(), 1,
+                        guest->machine_code_length(), file);
+            std::fclose(file);
+          }
+        }
+      }
+      auto* fn = env->processor->ResolveFunction(program.entry);
+      program.prepare(ctx);
+      ctx->r[1] = stack_top;
+      ctx->r[3] = iterations;
+      ctx->lr = 0xBCBCBCBC;
+      fn->Call(thread_state, uint32_t(ctx->lr));
+      const bool ok = program.check(ctx, iterations);
+      std::printf("xlat-trace %s iterations=%u guest_insns=%llu ok=%d\n",
+                  want.c_str(), iterations,
+                  (unsigned long long)program.guest_insns(iterations),
+                  ok ? 1 : 0);
+      std::fflush(stdout);
+      return ok ? 0 : 1;
+    }
+    std::printf("xlat-trace %s NO SUCH PROGRAM\n", want.c_str());
+    return 1;
+  }
   for (Builder build : kBuilders) {
     // Translation time: several copies of the program at different
     // addresses, each translated once. The last copy is the one run.

@@ -177,10 +177,11 @@ cr_returning_callee:
   blr
 
 # The same from a callee that cannot be inlined into its caller (it has a
-# branch). This is the pattern eliminate_dead_context_stores=3 gets wrong by
-# design: it takes cr0 for undefined at a return, as the ABI says, and this
-# hand-written callee returns its answer there. The test is skipped at that
-# level (ci/known-failures.txt), where dead_context_store_verify reports it.
+# branch). This is the pattern eliminate_dead_context_stores=3 gets wrong on
+# its own: it takes cr0 for undefined at a return, as the ABI says, and this
+# hand-written callee returns its answer there. dead_context_stores_abi_guard
+# (on by default) sees the caller read the flag and keeps the callee's; with
+# the guard off the test fails and is skipped (ci/known-failures.txt).
 test_cr_returned_by_callee_with_branch:
   #_ REGISTER_IN r3 20
   FRAME_IN
@@ -451,3 +452,95 @@ vec_cmp_5:
   blr
   #_ REGISTER_OUT r5 7
   #_ REGISTER_OUT r7 0
+
+# hakuX-Boosted: the same through a pointer. The caller cannot name its
+# callee, so every function translated from then on keeps its flags at
+# returns: run only by the matrix line made for it (ci/known-failures.txt),
+# because it would take the ABI level's work away from every test after it
+# in the same process.
+test_cr_returned_by_callee_indirect:
+  #_ REGISTER_IN r3 20
+  FRAME_IN
+  li r5, 0
+  lis r12, cr_pointer_callee@h
+  ori r12, r12, cr_pointer_callee@l
+  mtctr r12
+  bctrl
+  bne cr_pointer_skip
+  addi r5, r5, 1
+cr_pointer_skip:
+  FRAME_OUT
+  blr
+  #_ REGISTER_OUT r5 1
+cr_pointer_callee:
+  cmpwi cr7, r3, 100
+  blt cr7, cr_pointer_1
+  addi r3, r3, 1
+cr_pointer_1:
+  andi. r0, r3, 3
+  blr
+
+# The callee takes a flag as an argument: it branches on cr6 before
+# setting it. The compare before the call is dead by the ABI and must stay.
+test_cr_argument_to_callee:
+  #_ REGISTER_IN r3 5
+  FRAME_IN
+  li r5, 0
+  cmpwi cr6, r3, 5
+  bl cr_argument_callee
+  FRAME_OUT
+  blr
+  #_ REGISTER_OUT r5 7
+cr_argument_callee:
+  bne cr6, cr_argument_1
+  addi r5, r5, 7
+cr_argument_1:
+  blr
+
+# The same, reached through a jump stub and after instructions that set
+# other fields.
+test_cr_argument_through_stub:
+  #_ REGISTER_IN r3 5
+  FRAME_IN
+  li r5, 0
+  cmplwi cr1, r3, 9
+  bl cr_argument_stub
+  FRAME_OUT
+  blr
+  #_ REGISTER_OUT r5 0x21
+cr_argument_stub:
+  b cr_argument_callee2
+cr_argument_callee2:
+  cmpwi cr7, r3, 0
+  addi r5, r5, 1
+  bge cr1, cr_argument_2
+  addi r5, r5, 0x20
+cr_argument_2:
+  blr
+
+# A callee that returns its answer in cr0 by jumping to another function
+# that sets it.
+test_cr_returned_through_jump:
+  #_ REGISTER_IN r3 20
+  FRAME_IN
+  li r5, 0
+  bl cr_jumping_callee
+  bne cr_jumping_skip
+  addi r5, r5, 1
+cr_jumping_skip:
+  FRAME_OUT
+  blr
+  #_ REGISTER_OUT r5 1
+cr_jumping_callee:
+  cmpwi cr7, r3, 100
+  blt cr7, cr_jumping_1
+  addi r3, r3, 1
+cr_jumping_1:
+  b cr_jumped_to
+  nop
+cr_jumped_to:
+  cmpwi cr7, r3, 100
+  bge cr7, cr_jumped_1
+  andi. r0, r3, 3
+cr_jumped_1:
+  blr

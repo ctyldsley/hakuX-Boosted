@@ -76,6 +76,58 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // Scratch: x0-x18 (caller-saved), v0-v3
   // Available GPRs for register allocator: x22-x28
   static constexpr int GPR_COUNT = 7;
+  // hakuX-Boosted: a64_extended_gpr_pool. With the setting on (read once,
+  // when the backend starts) x9-x15 join x22-x28 as registers for HIR values
+  // and pinned guest registers, and the scratch registers a sequence may use
+  // freely are x0-x8, x16 and x17 only. gpr_count() is what the register
+  // allocator and the pinning pass are told.
+  static constexpr int GPR_COUNT_EXTENDED = 14;
+  static int gpr_count() { return gpr_count_; }
+  static bool extended_gpr_pool() { return gpr_count_ >= GPR_COUNT_EXTENDED; }
+  // hakuX-Boosted: a64_scratch_gpr_pool. x4-x7 as well, eighteen in all:
+  // no sequence uses them (three did, as temporaries, and use x8, x16 and
+  // x17 now), and the saves round host calls cover them like x9-x15.
+  static constexpr int GPR_COUNT_SCRATCH = 18;
+  static bool scratch_gpr_pool() { return gpr_count_ == GPR_COUNT_SCRATCH; }
+  // Called once by the backend before any code is emitted.
+  static void SetExtendedGprPool(bool extended, bool scratch = false) {
+    gpr_count_ = !extended ? GPR_COUNT
+                           : scratch ? GPR_COUNT_SCRATCH : GPR_COUNT_EXTENDED;
+  }
+  // hakuX-Boosted: a64_frame_chain. 0 = call records in the per-thread
+  // array (PushStackpoint and the rest), 1 = in the host frames themselves,
+  // linked through x29, 2 = both, the array deciding and the two compared
+  // at every non-local return. Set once by the backend before any code is
+  // emitted: the thunks and every function have to agree.
+  static int frame_chain() { return frame_chain_; }
+  static void SetFrameChain(int mode) { frame_chain_ = mode; }
+  // hakuX-Boosted: a64_shared_guest_registers. The guest general registers
+  // that live in fixed host registers in all translated code (entry n in
+  // x22 + n, which a host function preserves), and so are in the context
+  // only while host code runs: the thunks between the two write them there
+  // and read them back. Set once by the backend before any code is
+  // emitted.
+  static constexpr int kMaxSharedGprs = 6;
+  static int shared_gpr_count() { return shared_gpr_count_; }
+  static int shared_gpr(int n) { return shared_gprs_[n]; }
+  static void SetSharedGprs(int count);
+  // The host register of guest register |gpr|, or -1.
+  static int SharedHostReg(int gpr) {
+    for (int n = 0; n < shared_gpr_count_; ++n) {
+      if (shared_gprs_[n] == gpr) {
+        return 22 + n;
+      }
+    }
+    return -1;
+  }
+  // All of them to the context, and back from it. Nothing else is touched.
+  void EmitSharedGprsToContext();
+  void EmitSharedGprsFromContext();
+  // Where a frame keeps the guest stack pointer it was entered with: the
+  // upper half of the guest return address's slot (the address is 32 bits).
+  static constexpr size_t kFrameGuestStackOffset = 48 + 4;
+  // Where it keeps the caller's x29: next to the host return address.
+  static constexpr size_t kFramePreviousOffset = 72;
   // Available VEC regs: v4-v15, v16-v31
   static constexpr int VEC_COUNT = 28;
   static constexpr size_t kStashOffset = 32;
@@ -87,10 +139,10 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
                          const char* set_name);
 
   static void SetupReg(const hir::Value* v, Xbyak_aarch64::WReg& r) {
-    r = Xbyak_aarch64::WReg(MapReg(v, gpr_reg_map_, GPR_COUNT, "gpr"));
+    r = Xbyak_aarch64::WReg(MapReg(v, gpr_reg_map_, gpr_count_, "gpr"));
   }
   static void SetupReg(const hir::Value* v, Xbyak_aarch64::XReg& r) {
-    r = Xbyak_aarch64::XReg(MapReg(v, gpr_reg_map_, GPR_COUNT, "gpr"));
+    r = Xbyak_aarch64::XReg(MapReg(v, gpr_reg_map_, gpr_count_, "gpr"));
   }
   static void SetupReg(const hir::Value* v, Xbyak_aarch64::SReg& r) {
     r = Xbyak_aarch64::SReg(MapReg(v, vec_reg_map_, VEC_COUNT, "vec"));
@@ -121,7 +173,29 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   void CallExtern(const hir::Instr* instr, const Function* function);
   void CallNative(void* fn);
   void CallNativeSafe(void* fn);
+  // hakuX-Boosted: the register a call site puts a thunk's or a host
+  // function's address in. x9 as it always was; x16 with the extended pool,
+  // where x9 may hold a value.
+  Xbyak_aarch64::XReg HostCallReg() const {
+    return extended_gpr_pool() ? Xbyak_aarch64::XReg(16)
+                               : Xbyak_aarch64::XReg(9);
+  }
+  // hakuX-Boosted: round a host function called with a bare blr (no thunk)
+  // from the middle of a sequence. With the extended pool the values and
+  // pinned registers held in x9-x15 are saved on the stack: the first
+  // returns how far sp moved (0 or 64), which the caller adds to its own
+  // sp-relative offsets until it has called the second.
+  uint32_t EmitSaveExtendedGprsForBareCall();
+  void EmitRestoreExtendedGprsAfterBareCall();
   void SetReturnAddress(uint64_t value);
+  // hakuX-Boosted: a64_lean_calls. A sequence that has just left this
+  // constant in x0 says so; a call emitted straight after that needs the
+  // same constant in x0 (the return address, which the front end also
+  // stores to the link register) does not load it again.
+  void NoteX0Constant(uint64_t value) {
+    x0_const_ = value;
+    x0_const_noted_ = true;
+  }
 
   // Backend context register = x19.
   // Points to A64BackendContext (immediately before PPCContext in memory).
@@ -198,7 +272,8 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
     hir::TypeName type;  // INT64_TYPE, INT8_TYPE, FLOAT64_TYPE or VEC128_TYPE
     uint32_t host_reg;  // x or v register number
     bool written;       // the function stores to it
-    uint32_t bit;       // its bit in the masks below
+    uint32_t bit;       // its bit in the masks below (0 for a shared one)
+    bool shared = false;  // hakuX-Boosted: a64_shared_guest_registers
   };
   // The pinned register for a context access of exactly this offset and
   // type, or null. Always null when nothing is pinned.
@@ -227,12 +302,47 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
     cset(dest, cond);
   }
   bool TakeFusedCompare(const hir::Instr* branch, Xbyak_aarch64::Cond* cond) {
-    if (!fused_cond_valid_ || fused_branch_ != branch) {
+    if (!fused_cond_valid_ || fused_branch_ != branch || fused_zero_test_) {
       return false;
     }
     fused_cond_valid_ = false;
     *cond = fused_cond_;
     return true;
+  }
+  // hakuX-Boosted: a64_fuse_compare_branch, two further forms.
+  //
+  // A compare with zero for equality whose only use is the branch after it,
+  // with nothing between the two that defines a value or writes a pinned
+  // register, emits nothing at all: the branch tests the register itself
+  // (cbz or cbnz). TakeFusedZeroTest gives the branch the register (its
+  // number and width) and whether "true" means zero.
+  bool TakeFusedZeroTest(const hir::Instr* branch, uint32_t* reg, bool* is64,
+                         bool* true_if_zero) {
+    if (!fused_cond_valid_ || fused_branch_ != branch || !fused_zero_test_) {
+      return false;
+    }
+    fused_cond_valid_ = false;
+    fused_zero_test_ = false;
+    *reg = fused_zero_reg_;
+    *is64 = fused_zero_is64_;
+    *true_if_zero = fused_cond_ == Xbyak_aarch64::EQ;
+    return true;
+  }
+  // A branch on a compare's result while the host flags still hold that
+  // compare (the compare's result may have other uses, such as the store
+  // of a condition register bit): the condition to branch on, without
+  // testing the result's register.
+  bool FlagsHoldCompare(const hir::Value* result, Xbyak_aarch64::Cond* cond);
+  // The compare sequences call e.cmp(...): when the flags already hold the
+  // very compare being emitted (the three compares of one PowerPC compare
+  // instruction share their operands), the instruction is left out.
+  template <typename... Args>
+  void cmp(Args&&... args) {
+    if (skip_next_cmp_) {
+      skip_next_cmp_ = false;
+      return;
+    }
+    Xbyak_aarch64::CodeGenerator::cmp(std::forward<Args>(args)...);
   }
 
   // a64_pin_verify: stores to pinned registers also go to the context, and
@@ -262,6 +372,21 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // a64_pin_verify: compare the pinned register with the context copy and
   // report a difference. Clobbers x0, x1, v0 and nothing else.
   void EmitPinnedVerify(const PinnedGuestRegister& pin);
+  // hakuX-Boosted: pin_guest_registers_coalesce_verify. Compare a value
+  // that pin_guest_registers_coalesce would have kept in a pin's host
+  // register with that register, and report a difference. Clobbers x0 to
+  // x2, v0 and no flag.
+  void EmitPinHomeVerify(const hir::Value* value,
+                         const PinnedGuestRegister& pin, bool low32);
+  const std::unordered_map<const hir::Value*,
+                           hir::HIRBuilder::PinHomeVerify>* pin_home_verify_ =
+      nullptr;
+  // hakuX-Boosted: register_allocation_elide_copies, see
+  // HIRBuilder::elided_truncates.
+  bool IsElidedTruncate(const hir::Instr* instr) const {
+    return elided_truncates_ && elided_truncates_->count(instr) != 0;
+  }
+  const std::unordered_set<const hir::Instr*>* elided_truncates_ = nullptr;
   // hakuX-Boosted: context_constant_verify. After a context load the
   // cross-block constant pass has an expectation for: report if the loaded
   // value differs. Clobbers x0 to x2 and x17; no flag.
@@ -310,7 +435,11 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   size_t stack_size_ = 0;
 
-  static const uint32_t gpr_reg_map_[GPR_COUNT];
+  static const uint32_t gpr_reg_map_[GPR_COUNT_SCRATCH];
+  static int gpr_count_;
+  static int frame_chain_;  // hakuX-Boosted
+  static int shared_gpr_count_;
+  static int shared_gprs_[kMaxSharedGprs];
   static const uint32_t vec_reg_map_[VEC_COUNT];
 
   std::vector<TailEmitter> tail_code_;
@@ -342,12 +471,31 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // for the second attempt at a function too large for a literal load to
   // be certain to reach its literal.
   struct CallLiteral {
-    uint32_t guest_target;
+    uint32_t guest_target;  // 0: |fixed| is the value, nothing links it
     Xbyak_aarch64::Label* label;
     uint32_t code_offset;
+    uint64_t fixed = 0;
   };
   std::vector<CallLiteral> call_literals_;
   bool linked_calls_ok_ = false;
+  // hakuX-Boosted: a64_lean_calls for the function being emitted (the
+  // setting, and every call in the function preceded in its own block by
+  // the instruction that names its return address: see Emit). The return
+  // address then never goes through the frame's GUEST_CALL_RET_ADDR slot.
+  bool lean_calls_ = false;
+  bool pending_return_address_valid_ = false;
+  uint64_t pending_return_address_ = 0;
+  uint64_t x0_const_ = 0;
+  bool x0_const_valid_ = false;
+  bool x0_const_noted_ = false;
+  // Cleared for the second attempt at a function too large for a literal
+  // load to be certain to reach.
+  bool call_literals_allowed_ = false;
+  // x0 <- the return address for the call being emitted.
+  void EmitCallReturnAddress();
+  // x9 <- the host address of a function that has code: three instructions
+  // of immediate, or one load from a literal with a64_lean_calls.
+  void EmitLoadCallTarget(uint64_t host_address);
   // The locals' stack offsets are assigned once per function (see Emit).
   bool locals_laid_out_ = false;
   size_t locals_stack_size_ = 0;
@@ -386,11 +534,39 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   bool fused_cond_valid_ = false;
   Xbyak_aarch64::Cond fused_cond_ = Xbyak_aarch64::EQ;
   const hir::Instr* fused_branch_ = nullptr;
-  // The branch a compare may be fused with, or null.
-  const hir::Instr* FindFusableBranch(const hir::Instr* compare) const;
+  // The branch a compare may be fused with, or null. |nothing_written| is
+  // set if no instruction between the two defines a value or writes a
+  // pinned register.
+  const hir::Instr* FindFusableBranch(const hir::Instr* compare,
+                                      bool* nothing_written) const;
+  bool fused_zero_test_ = false;
+  uint32_t fused_zero_reg_ = 0;
+  bool fused_zero_is64_ = false;
+  // What the host flags hold: the compare of these two operands at this
+  // width, or nothing known.
+  struct FlagsKey {
+    bool valid = false;
+    hir::TypeName type = hir::INT32_TYPE;
+    const hir::Value* value[2] = {nullptr, nullptr};
+    uint64_t constant[2] = {0, 0};
+    bool operator==(const FlagsKey& other) const {
+      return valid && other.valid && type == other.type &&
+             value[0] == other.value[0] && value[1] == other.value[1] &&
+             constant[0] == other.constant[0] &&
+             constant[1] == other.constant[1];
+    }
+  };
+  static FlagsKey MakeFlagsKey(const hir::Instr* compare);
+  FlagsKey flags_key_;
+  bool skip_next_cmp_ = false;
 
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;
   bool synchronize_stack_on_next_instruction_ = false;
+  // hakuX-Boosted: a64_frame_chain. The host return address (and the
+  // caller's x29) back from the frame, and the guest return address into
+  // x0 for a tail call.
+  void EmitRestoreHostReturn();
+  void EmitLoadGuestReturnAddress();
 };
 
 }  // namespace a64

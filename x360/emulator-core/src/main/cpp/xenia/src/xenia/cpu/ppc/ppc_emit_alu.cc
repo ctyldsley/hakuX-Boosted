@@ -10,8 +10,19 @@
 #include "xenia/cpu/ppc/ppc_emit-private.h"
 
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
+
+// hakuX-Boosted: see NarrowRotate32 below.
+DEFINE_bool(
+    ppc_rlw_narrow_rotate, false,
+    "rlwinm, rlwimi and rlwnm whose mask does not wrap round (MB <= ME, the "
+    "usual case: the result fits in 32 bits) rotate the low word as a "
+    "32-bit value, one host instruction, instead of building the doubled "
+    "64-bit value PowerPC defines the rotate on and rotating that (five). "
+    "Same results. Takes effect for functions translated after it is set.",
+    "CPU");
 
 namespace xe {
 namespace cpu {
@@ -1007,22 +1018,44 @@ int InstrEmit_rldimix(PPCHIRBuilder& f, const InstrData& i) {
   return 0;
 }
 
+// hakuX-Boosted: ppc_rlw_narrow_rotate. ROTL32 of the low word of |value|
+// by a constant or a register amount, zero-extended to 64 bits. PowerPC
+// defines the rotated value as the word doubled into both halves; with a
+// mask that lies in the low word (MASK(MB + 32, ME + 32) with MB <= ME) only
+// the low half survives the AND that follows, which is the 32-bit rotate.
+static Value* NarrowRotate32(PPCHIRBuilder& f, Value* value, Value* amount) {
+  Value* low = f.Truncate(value, INT32_TYPE);
+  if (amount) {
+    low = f.RotateLeft(low, amount);
+  }
+  return f.ZeroExtend(low, INT64_TYPE);
+}
+
 int InstrEmit_rlwimix(PPCHIRBuilder& f, const InstrData& i) {
   // n <- SH
   // r <- ROTL32((RS)[32:63], n)
   // m <- MASK(MB+32, ME+32)
   // RA <- r&m | (RA)&¬m
   Value* v = f.LoadGPR(i.M.RT);
-  // (x||x)
-  v = f.Or(f.Shl(v, 32), f.ZeroExtend(f.Truncate(v, INT32_TYPE), INT64_TYPE));
-  if (i.M.SH) {
-    v = f.RotateLeft(v, f.LoadConstantInt8(i.M.SH));
-  }
-  // Compiler sometimes masks with 0xFFFFFFFF (identity) - avoid the work here
-  // as our truncation/zero-extend does it for us.
   uint64_t m = XEMASK(i.M.MB + 32, i.M.ME + 32);
-  if (m != 0xFFFFFFFFFFFFFFFFull) {
-    v = f.And(v, f.LoadConstantUint64(m));
+  if (cvars::ppc_rlw_narrow_rotate && m < (1ULL << 32)) {
+    // hakuX-Boosted: see NarrowRotate32.
+    v = NarrowRotate32(f, v, i.M.SH ? f.LoadConstantInt8(i.M.SH) : nullptr);
+    if (m != 0xFFFFFFFFull) {
+      v = f.And(v, f.LoadConstantUint64(m));
+    }
+  } else {
+    // (x||x)
+    v = f.Or(f.Shl(v, 32),
+             f.ZeroExtend(f.Truncate(v, INT32_TYPE), INT64_TYPE));
+    if (i.M.SH) {
+      v = f.RotateLeft(v, f.LoadConstantInt8(i.M.SH));
+    }
+    // Compiler sometimes masks with 0xFFFFFFFF (identity) - avoid the work
+    // here as our truncation/zero-extend does it for us.
+    if (m != 0xFFFFFFFFFFFFFFFFull) {
+      v = f.And(v, f.LoadConstantUint64(m));
+    }
   }
   v = f.Or(v, f.And(f.LoadGPR(i.M.RA), f.LoadConstantUint64(~m)));
   f.StoreGPR(i.M.RA, v);
@@ -1068,6 +1101,15 @@ int InstrEmit_rlwinmx(PPCHIRBuilder& f, const InstrData& i) {
     v = f.And(f.Shl(v, rotation), f.LoadConstantUint64(0xFFFFFFFF));
   }
 
+  else if (cvars::ppc_rlw_narrow_rotate && m < (1ULL << 32)) {
+    // hakuX-Boosted: see NarrowRotate32. (rotation is not 0 here: the first
+    // branch took that case.)
+    v = NarrowRotate32(f, v, f.LoadConstantInt8(rotation));
+    if (m != 0xFFFFFFFFull) {
+      v = f.And(v, f.LoadConstantUint64(m));
+    }
+  }
+
   else {
     // (x||x)
     // cs: changed this to mask with UINT32_MAX instead of doing the
@@ -1106,10 +1148,20 @@ int InstrEmit_rlwnmx(PPCHIRBuilder& f, const InstrData& i) {
   Value* sh =
       f.And(f.Truncate(f.LoadGPR(i.M.SH), INT8_TYPE), f.LoadConstantInt8(0x1F));
   Value* v = f.LoadGPR(i.M.RT);
-  // (x||x)
-  v = f.Or(f.Shl(v, 32), f.ZeroExtend(f.Truncate(v, INT32_TYPE), INT64_TYPE));
-  v = f.RotateLeft(v, sh);
-  v = f.And(v, f.LoadConstantUint64(XEMASK(i.M.MB + 32, i.M.ME + 32)));
+  const uint64_t nm_mask = XEMASK(i.M.MB + 32, i.M.ME + 32);
+  if (cvars::ppc_rlw_narrow_rotate && nm_mask < (1ULL << 32)) {
+    // hakuX-Boosted: see NarrowRotate32.
+    v = NarrowRotate32(f, v, sh);
+    if (nm_mask != 0xFFFFFFFFull) {
+      v = f.And(v, f.LoadConstantUint64(nm_mask));
+    }
+  } else {
+    // (x||x)
+    v = f.Or(f.Shl(v, 32),
+             f.ZeroExtend(f.Truncate(v, INT32_TYPE), INT64_TYPE));
+    v = f.RotateLeft(v, sh);
+    v = f.And(v, f.LoadConstantUint64(nm_mask));
+  }
   f.StoreGPR(i.M.RA, v);
   if (i.M.Rc) {
     f.UpdateCR(0, v);

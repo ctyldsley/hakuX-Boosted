@@ -86,6 +86,13 @@ struct A64BackendContext {
   uint64_t cached_reserve_value_;
   uint64_t* guest_tick_count;
   A64BackendStackpoint* stackpoints;
+  // hakuX-Boosted: a64_frame_chain. x29 when ResolveFunction was last
+  // asked (the frame a non-local return was made from, or 0), and what the
+  // resume helper is to do: the landing function's frame and the host
+  // address of the return site.
+  uint64_t resolve_frame;
+  uint64_t pending_resume_frame;
+  uint64_t pending_resume_address;
   // address of the live reservation, and its granule generation when taken
   uint32_t reserve_address;
   uint32_t reserve_generation;
@@ -129,6 +136,9 @@ class A64Backend : public Backend {
   }
   void* synchronize_guest_and_host_stack_helper() const {
     return synchronize_guest_and_host_stack_helper_;
+  }
+  void* frame_chain_resume_helper() const {  // hakuX-Boosted
+    return frame_chain_resume_helper_;
   }
 
   bool Initialize(Processor* processor) override;
@@ -194,6 +204,7 @@ class A64Backend : public Backend {
   GuestToHostThunk guest_to_host_lean_thunk_ = nullptr;  // hakuX-Boosted
   ResolveFunctionThunk resolve_function_thunk_ = nullptr;
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
+  void* frame_chain_resume_helper_ = nullptr;  // hakuX-Boosted
 
  public:
   void* try_acquire_reservation_helper_ = nullptr;

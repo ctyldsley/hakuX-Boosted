@@ -99,12 +99,26 @@ for shard in "$work"/shard.*; do
   slice=${shard##*.s}
   slice=${slice/of//}
   (
-    # shellcheck disable=SC2086
-    ${WRAPPER:-} "$runner" --test_path="$tests" --test_bin_path="$bins" \
-      --test_skip_file="$work/skip" --log_file="$shard.xe.log" \
-      --test_state_dump="$shard.state" --test_slice="$slice" "$@" \
-      $(cat "$shard") > "$shard.out" 2>&1
-    echo $? > "$shard.status"
+    # A process that dies of glibc's sysmalloc assertion is run again, up to
+    # twice. That abort is qemu's doing at a page size that is not the
+    # host's, not the translator's (boosted/notes/translator-overhaul.md,
+    # section 0); the runner's own measure against it (ci/stubs.cc) cannot
+    # cover what the C library allocates before any of the program's code
+    # runs, so a rare one can still get through. Nothing else is retried.
+    for attempt in 1 2 3; do
+      # shellcheck disable=SC2086
+      ${WRAPPER:-} "$runner" --test_path="$tests" --test_bin_path="$bins" \
+        --test_skip_file="$work/skip" --log_file="$shard.xe.log" \
+        --test_state_dump="$shard.state" --test_slice="$slice" "$@" \
+        $(cat "$shard") > "$shard.out" 2>&1
+      status=$?
+      if [ "$status" = 0 ] || ! grep -q 'sysmalloc.*assertion failed' "$shard.out"; then
+        break
+      fi
+      echo "::warning::a test process hit qemu's allocator abort (attempt $attempt); running it again" >&2
+      rm -f "$shard.state"
+    done
+    echo $status > "$shard.status"
   ) &
   pids+=($!)
   # At most $jobs at a time.

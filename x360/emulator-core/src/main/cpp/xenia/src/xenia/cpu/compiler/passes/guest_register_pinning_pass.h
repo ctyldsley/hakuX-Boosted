@@ -40,6 +40,14 @@ class GuestRegisterPinningPass : public CompilerPass {
 
   uint32_t int_register_count_ = 0;
   uint32_t vec_register_count_ = 0;
+  // hakuX-Boosted: a64_shared_guest_registers (MachineInfo::shared_gprs).
+  uint32_t shared_gpr_count_ = 0;
+  uint8_t shared_gprs_[8] = {};
+  bool IsSharedGpr(int gpr) const;
+  // The existing choice of a function's own pins.
+  bool RunOwn(hir::HIRBuilder* builder);
+  // The shared registers, added to every function after its own.
+  void AddShared(hir::HIRBuilder* builder);
 };
 
 }  // namespace passes

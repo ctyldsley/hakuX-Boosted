@@ -79,4 +79,48 @@ run bench_core xlat "translator-wide together" $wide \
   eliminate_dead_context_stores=2 a64_fuse_compare_branch=true \
   propagate_context_constants=true
 
+# claude/translator-overhaul's settings (boosted/notes/translator-overhaul.md).
+# Each row adds to the one before it, in the order the notes give for the
+# phone, so the table reads as a staircase; compare every row with this
+# branch's own "defaults" row. The last three are the whole set with the
+# flag stores the ABI leaves undefined taken for dead, then also without
+# the exact choice of NaN in VMX float operations (a setting that existed
+# before this branch), then with kernel calls made from the caller.
+pool="a64_extended_gpr_pool=true"
+pins="$wide pin_guest_registers_flags=true pin_guest_registers_max_int=10 pin_guest_registers_max_vec=16"
+run bench_core xlat "overhaul 1: tight sequences" a64_tight_sequences=true
+run bench_core xlat "overhaul 2: + fused compares, short branches" \
+  a64_tight_sequences=true a64_fuse_compare_branch=true $short
+o3="a64_tight_sequences=true a64_fuse_compare_branch=true $short ppc_rlw_narrow_rotate=true register_allocation_elide_copies=true"
+run bench_core xlat "overhaul 3: + narrow rotate, copies" $o3
+o4="$o3 a64_lean_calls=true a64_linked_calls=true a64_lean_extern_thunk=true a64_address_fixup_bit_tests=true"
+run bench_core xlat "overhaul 4: + lean calls, lean extern thunk" $o4
+o5="$o4 $pool $pins"
+run bench_core xlat "overhaul 5: + 14 registers, 10 pins" $o5
+o6="$o5 pin_guest_registers_coalesce=true"
+run bench_core xlat "overhaul 6: + values live in their pins" $o6
+o7="$o6 eliminate_dead_context_stores=2 dead_context_stores_over_preempt_checks=true"
+run bench_core xlat "overhaul 7: + dead stores 2, over preempt checks" $o7
+o8="$o6 eliminate_dead_context_stores=3 dead_context_stores_over_preempt_checks=true"
+run bench_core xlat "overhaul 8: 6 + dead stores 3 (ABI flags)" $o8
+run bench_core xlat "overhaul 9: 8 + a64_vmx_nan_fixup off" $o8 a64_vmx_nan_fixup=false
+run bench_core xlat "overhaul 10: 8 + inline_extern_calls" $o8 inline_extern_calls=true
+# The call records kept in the host frames (a64_frame_chain): alone, on top
+# of row 7, and on top of row 8.
+run bench_core xlat "overhaul 11: frame chain alone" a64_frame_chain=true
+run bench_core xlat "overhaul 12: 7 + frame chain" $o7 a64_frame_chain=true
+run bench_core xlat "overhaul 13: 8 + frame chain" $o8 a64_frame_chain=true
+# Eighteen host registers (a64_scratch_gpr_pool) and guest registers kept in
+# the same host register by all translated code
+# (a64_shared_guest_registers): on top of row 12, with up to fourteen pins.
+o14="${o7/pin_guest_registers_max_int=10/pin_guest_registers_max_int=14} a64_frame_chain=true a64_scratch_gpr_pool=true"
+run bench_core xlat "overhaul 14: 12 with 18 registers" $o14
+run bench_core xlat "overhaul 15: 14 + 2 shared registers" $o14 a64_shared_guest_registers=2
+run bench_core xlat "overhaul 16: 14 + 4 shared registers" $o14 a64_shared_guest_registers=4
+run bench_core xlat "overhaul 17: 14 + 6 shared registers" $o14 a64_shared_guest_registers=6
+# The scheduler's kernel call path with the lean thunk now that it applies
+# to import thunks.
+run bench_core sched "overhaul: lean calls, lean extern thunk" \
+  a64_lean_calls=true a64_linked_calls=true a64_lean_extern_thunk=true
+
 exit $status

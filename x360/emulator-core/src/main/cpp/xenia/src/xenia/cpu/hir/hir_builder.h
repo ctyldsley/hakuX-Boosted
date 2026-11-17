@@ -11,6 +11,7 @@
 #define XENIA_CPU_HIR_HIR_BUILDER_H_
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "third_party/fmt/include/fmt/format.h"
@@ -78,9 +79,21 @@ class HIRBuilder {
     uint8_t reg_set;    // 0: the integer register set, 1: float/vector set
     uint8_t reg_index;  // index within that register set
     bool written;       // the function stores to the slot
+    // hakuX-Boosted: a64_shared_guest_registers. Held in this host register
+    // by all translated code: never read from the context or written to it
+    // by a function, and no part of the sets below.
+    bool shared = false;
   };
   std::vector<PinnedContextSlot>& pinned_context_slots() {
     return pinned_context_slots_;
+  }
+
+  // hakuX-Boosted: the guest address of the function being built (0 when
+  // the front end did not say), for passes that keep facts about functions
+  // by address (DeadContextStorePass's guard).
+  uint32_t guest_function_address() const { return guest_function_address_; }
+  void set_guest_function_address(uint32_t address) {
+    guest_function_address_ = address;
   }
 
   // hakuX-Boosted: with pin_guest_registers_wide, where each pinned register
@@ -113,6 +126,26 @@ class HIRBuilder {
     }
   };
   PinSyncState& pin_sync() { return pin_sync_; }
+
+  // hakuX-Boosted: pin_guest_registers_coalesce_verify. The values the
+  // register allocator would have kept in a pinned register's host register
+  // (RegisterAllocationPass::PlanPinHomes), which in that mode have a
+  // register of their own for the backend to compare with the pin.
+  struct PinHomeVerify {
+    uint8_t slot;  // index into pinned_context_slots()
+    bool is_def;   // computed into the pin, not loaded from it
+    bool low32;    // a truncation of the pin: only its low half is compared
+  };
+  std::unordered_map<const Value*, PinHomeVerify>& pin_home_verify() {
+    return pin_home_verify_;
+  }
+  // hakuX-Boosted: register_allocation_elide_copies. Truncations whose
+  // result the allocator put in the operand's own register because every
+  // use of the result reads only its low 32 bits: the backend emits nothing
+  // for them (it would otherwise clear the register's upper half).
+  std::unordered_set<const Instr*>& elided_truncates() {
+    return elided_truncates_;
+  }
 
   // hakuX-Boosted: context_constant_verify. Context loads the cross-block
   // constant pass would have replaced, with the constant it expects; the
@@ -400,7 +433,10 @@ class HIRBuilder {
   std::vector<Value*> locals_;
   // hakuX-Boosted
   std::vector<PinnedContextSlot> pinned_context_slots_;
+  uint32_t guest_function_address_ = 0;  // hakuX-Boosted
   PinSyncState pin_sync_;
+  std::unordered_map<const Value*, PinHomeVerify> pin_home_verify_;
+  std::unordered_set<const Instr*> elided_truncates_;
   std::unordered_map<const Instr*, uint64_t> context_load_expectations_;
   uint32_t pass_stamp_ = 0;
   uint32_t pass_stamp_floor_ = UINT32_MAX;
