@@ -145,14 +145,17 @@ class PixelRunner {
     }
 
     // The interpreter's side is the same for every test.
-    VkDescriptorSetLayoutBinding slot_bindings[24];
-    for (uint32_t i = 0; i < 24; ++i) {
+    // Two textures and a sampler for each of the interpreter's slots.
+    constexpr uint32_t kSlotTextures = ucode_program::kMaxTextures * 2;
+    constexpr uint32_t kSlotBindings = ucode_program::kMaxTextures * 3;
+    VkDescriptorSetLayoutBinding slot_bindings[kSlotBindings];
+    for (uint32_t i = 0; i < kSlotBindings; ++i) {
       slot_bindings[i] = {i,
-                          i < 16 ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+                          i < kSlotTextures ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
                                  : VK_DESCRIPTOR_TYPE_SAMPLER,
                           1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     }
-    interpreter_texture_layout_ = MakeSetLayout(slot_bindings, 24);
+    interpreter_texture_layout_ = MakeSetLayout(slot_bindings, kSlotBindings);
     interpreter_layout_ = MakePipelineLayout(interpreter_texture_layout_);
     interpreter_texture_set_ = AllocateSet(interpreter_texture_layout_);
     std::vector<uint32_t> vertex_words =
@@ -282,7 +285,8 @@ class PixelRunner {
                    is_cube, false);
       WriteTexture(interpreter_texture_set_, i * 2 + 1, slot.fetch_constant,
                    is_cube, true);
-      WriteSampler(interpreter_texture_set_, 16 + i, slot.fetch_constant);
+      WriteSampler(interpreter_texture_set_,
+                   ucode_program::kMaxTextures * 2 + i, slot.fetch_constant);
     }
 
     // Upload.

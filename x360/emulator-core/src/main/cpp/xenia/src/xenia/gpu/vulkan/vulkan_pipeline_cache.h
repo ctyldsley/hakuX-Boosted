@@ -214,7 +214,18 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     // it is in guest memory. Written with uses_interpreter, before the
     // placeholder is published.
     std::atomic<bool> placeholder_program{false};
+    // hakuX-Boosted: the placeholder handle is a shared stand-in pipeline's
+    // (vulkan_standin_precompile, boosted/notes/standin-precompile.md): it
+    // belongs to the cache, not to this slot, and is never destroyed when
+    // the real pipeline replaces it or with the slot. Written before the
+    // handle is published.
+    std::atomic<bool> placeholder_shared{false};
     // The rest is the GPU command thread's alone.
+    // hakuX-Boosted: the shared stand-in (a SharedStandIn) this slot is
+    // waiting for, and the StandIn::Pack it will be drawn with; null once the
+    // slot has taken its handle or given up.
+    void* stand_in_pending = nullptr;
+    uint32_t stand_in_pending_packed = 0;
     // A placeholder was asked for once, made or not: not asked for again.
     bool placeholder_attempted = false;
     // A wait for this slot's real pipeline ran out
@@ -498,6 +509,13 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // The pixel stage's per-draw word (shaders/ucode_program_pixel.glsli).
   static uint32_t GetProgramPixelWord(uint64_t pixel_shader_modification);
 
+  // hakuX-Boosted: boosted/notes/standin-precompile.md. Whether the
+  // placeholders of draws the interpreter's version 2 takes are shared
+  // stand-in pipelines made on the creation threads
+  // (vulkan_standin_precompile, with the placeholder model and that
+  // interpreter). Any thread.
+  bool IsStandInPrecompileActive() const;
+
   // True while this draw must be fed the ucode interpreter's inputs (full float
   // constants + ucode location). False once hot-swapped to the real VS.
   static bool IsInterpreterPlaceholder(const Pipeline* pipeline) {
@@ -684,6 +702,10 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
       // Only the translation of the shaders given (either may be null);
       // `pipeline` is null.
       kTranslate,
+      // hakuX-Boosted: a shared stand-in pipeline (`stand_in`), which has no
+      // guest shaders: `vertex_shader` and `pixel_shader` are null and
+      // `pipeline` is the stand-in's own slot.
+      kStandIn,
     };
     Kind kind = Kind::kReal;
     // Dropped if another job has already taken the slot's real pipeline.
@@ -695,6 +717,8 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     VkShaderModule placeholder_fragment_shader = VK_NULL_HANDLE;
     VkShaderModule placeholder_vertex_shader = VK_NULL_HANDLE;
     const PipelineLayoutProvider* placeholder_layout = nullptr;
+    // hakuX-Boosted: for Kind::kStandIn, a SharedStandIn.
+    void* stand_in = nullptr;
   };
 
   // hakuX-Boosted: priorities of the jobs this fork adds, above every real
@@ -704,6 +728,10 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   static constexpr uint8_t kPriorityWaitedFor = 254;
   static constexpr uint8_t kPriorityTranslateForPlaceholder = 253;
   static constexpr uint8_t kPriorityTranslateAhead = 4;
+  // hakuX-Boosted: a shared stand-in made before a draw asks for it: ahead of
+  // every real pipeline (it is what will cover their compiles), behind what a
+  // draw is waiting for now.
+  static constexpr uint8_t kPriorityStandInAhead = 250;
 
   // hakuX-Boosted: which prediction made a speculative pipeline.
   enum SpeculationRule : uint8_t {
@@ -917,6 +945,148 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   bool EnsurePipelineCreatedWithInterpreterPlaceholder(
       const PipelineCreationArguments& creation_arguments,
       bool depth_only = false);
+
+  // hakuX-Boosted: shared stand-in pipelines, made ahead
+  // (vulkan_standin_precompile, boosted/notes/standin-precompile.md).
+  // GPU command thread only unless said otherwise.
+
+  // What the pixel stage of a shared stand-in is.
+  enum class StandInPixelForm : uint32_t {
+    // The no-op pixel shader: depth only.
+    kNoOp,
+    // The flat grey of async_shader_vs_interpreter_debug_color.
+    kDebugColor,
+    // The float24 depth conversion of a draw without a pixel shader.
+    kFloat24,
+    // The pixel interpreter.
+    kProgram,
+    // The stand-in pixel shaders, for what the pixel interpreter refuses.
+    kFlat,
+    k2D,
+    kCube,
+    kCount,
+  };
+  // Everything a shared stand-in pipeline is made from, with nothing of a
+  // guest shader or of the device's handles in it, so that it can be kept in
+  // a file. `description` is a slot's canonical description with the shader
+  // hashes removed and the modifications cut down to the host vertex shader
+  // type and the two blend factors a MIN or MAX blend premultiplies by.
+  XEPACKEDSTRUCT(StandInRecipe, {
+    PipelineDescription description;
+    StandInPixelForm pixel_form;
+    // For kFlat, k2D and kCube: 0 for the module with every interpolator as
+    // an input; otherwise (that module could not be made) the location of
+    // the texture coordinate input, of the colour input << 8, and whether
+    // there is a colour input << 16, which is never 0. 0 for the other
+    // forms.
+    uint32_t fallback_inputs;
+
+    StandInRecipe() { std::memset(this, 0, sizeof(*this)); }
+    StandInRecipe(const StandInRecipe& recipe) {
+      std::memcpy(this, &recipe, sizeof(*this));
+    }
+    StandInRecipe& operator=(const StandInRecipe& recipe) {
+      std::memcpy(this, &recipe, sizeof(*this));
+      return *this;
+    }
+    bool operator==(const StandInRecipe& recipe) const {
+      return std::memcmp(this, &recipe, sizeof(*this)) == 0;
+    }
+    struct Hasher {
+      size_t operator()(const StandInRecipe& recipe) const {
+        return size_t(XXH3_64bits(&recipe, sizeof(recipe)));
+      }
+    };
+  });
+  // Why a shared stand-in was queued.
+  enum StandInOrigin : uint32_t {
+    // The warm-up set at a title's start.
+    kStandInOriginStartup,
+    // Kept in the title's record by an earlier run.
+    kStandInOriginRecord,
+    // A render pass key seen for the first time.
+    kStandInOriginRenderPass,
+    // A draw needed it and it was not there.
+    kStandInOriginDraw,
+    kStandInOriginCount,
+  };
+  struct SharedStandIn {
+    enum : uint32_t { kQueued, kReady, kFailed };
+    SharedStandIn(const StandInRecipe& stand_in_recipe,
+                  const PipelineLayoutProvider* pipeline_layout)
+        : slot(stand_in_recipe.description, Pipeline(pipeline_layout)),
+          recipe(stand_in_recipe),
+          layout(pipeline_layout) {}
+    // What EnsurePipelineCreated creates into: a slot of its own, with the
+    // recipe's description.
+    std::pair<const PipelineDescription, Pipeline> slot;
+    StandInRecipe recipe;
+    const PipelineLayoutProvider* layout;
+    // The job that makes it, kept to be queued again at a draw's priority.
+    PipelineCreationArguments arguments;
+    StandInOrigin origin = kStandInOriginDraw;
+    // A draw has asked for it (it is then kept in the record).
+    bool used = false;
+    // Queued a second time, at a draw's priority.
+    bool boosted = false;
+    // Set by the creation thread that takes it, so that a second job for it
+    // is dropped.
+    std::atomic<bool> claimed{false};
+    // Written by that creation thread, read by any.
+    std::atomic<uint32_t> state{kQueued};
+  };
+  // Cuts a slot's canonical description down to a recipe's.
+  void BuildStandInRecipe(const PipelineDescription& slot_description,
+                          StandInPixelForm pixel_form, uint32_t fallback_inputs,
+                          StandInRecipe& recipe_out) const;
+  // The shared stand-in of a recipe, queued for the creation threads if it
+  // is new. Null if it cannot be made on this device. from_draw: a draw is
+  // waiting for it, so it goes (or goes again) ahead of everything queued.
+  SharedStandIn* GetSharedStandIn(const StandInRecipe& recipe,
+                                  StandInOrigin origin, bool from_draw);
+  // Gives the slot the handle of the shared stand-in it is waiting for, if
+  // that is ready. True if the slot now draws with it.
+  bool TryAdoptSharedStandIn(
+      std::pair<const PipelineDescription, Pipeline>& pipeline_pair);
+  // Queues the stand-ins a render pass key is most likely to need, the first
+  // time the key is seen.
+  void NoteStandInRenderPass(VulkanRenderTargetCache::RenderPassKey key,
+                             StandInOrigin origin);
+  // At a title's start, once the driver's cache is the title's: the warm-up
+  // set and the recipes of the title's record.
+  void StartStandInPrecompile(const std::filesystem::path& cache_root);
+  void SaveStandInRecordIfDue(bool force);
+
+  // The stand-in pixel shaders with every interpolator as an input (flat,
+  // 2D, cube), which a shared stand-in uses where the pixel interpreter
+  // refuses a shader.
+  VkShaderModule stand_in_all_pixel_shaders_[3] = {};
+  std::unordered_map<StandInRecipe, std::unique_ptr<SharedStandIn>,
+                     StandInRecipe::Hasher>
+      shared_stand_ins_;
+  std::unordered_set<uint32_t> stand_in_render_passes_;
+  std::filesystem::path stand_in_record_path_;
+  bool stand_in_record_dirty_ = false;
+  uint64_t stand_in_record_saved_ms_ = 0;
+  // For the log. Queued, by origin; then what the creation threads made.
+  uint64_t stand_ins_queued_[kStandInOriginCount] = {};
+  std::atomic<uint64_t> stand_ins_created_[kStandInOriginCount] = {};
+  std::atomic<uint64_t> stand_ins_created_us_[kStandInOriginCount] = {};
+  std::atomic<uint64_t> stand_ins_slowest_us_{0};
+  std::atomic<uint64_t> stand_ins_failed_{0};
+  uint64_t stand_ins_unavailable_ = 0;
+  // Slots whose stand-in was ready when first drawn, that waited for it (and
+  // how many of those had it within the wait), that took it at a later draw,
+  // and that never did (the real pipeline came first).
+  uint64_t stand_in_slots_ready_ = 0;
+  uint64_t stand_in_slots_waited_ = 0;
+  uint64_t stand_in_slots_waited_in_time_ = 0;
+  double stand_in_slots_wait_ms_ = 0.0;
+  double stand_in_slots_wait_worst_ms_ = 0.0;
+  uint64_t stand_in_slots_later_ = 0;
+  uint64_t stand_in_slots_never_ = 0;
+  uint64_t stand_in_record_loaded_ = 0;
+  uint32_t stand_in_render_pass_last_ = UINT32_MAX;
 
   VulkanCommandProcessor& command_processor_;
   const RegisterFile& register_file_;

@@ -67,6 +67,11 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_color_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_ps.h"
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_interpreter_stand_in_vs.h"
+// hakuX-Boosted: and those with every interpolator as an input
+// (vulkan_standin_precompile).
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_2d_all_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_cube_all_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_stand_in_flat_all_ps.h"
 // hakuX-Boosted: the guest shader interpreter, version 2
 // (vulkan_placeholder_interpreter = 2, shaders/ucode_program.glsli).
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_program_point_strip_vs.h"
@@ -362,6 +367,25 @@ DEFINE_int32(
     "With vulkan_pipeline_creation_adaptive: how long a frame, or the time "
     "since the last one, must be for the pipeline creation threads to take "
     "every core. They step back when a frame takes under two thirds of it.",
+    "Vulkan");
+
+// hakuX-Boosted: boosted/notes/standin-precompile.md.
+DEFINE_bool(
+    vulkan_standin_precompile, false,
+    "With vulkan_placeholder_pipelines and vulkan_placeholder_interpreter = "
+    "2: a placeholder made of the interpreter's own modules is not created "
+    "for each new pair of guest shaders on the GPU command thread. It is one "
+    "of a small set of stand-in pipelines, shared by every pair of shaders "
+    "drawn to the same render targets in the same form, created on the "
+    "pipeline creation threads: a warm-up set when a title starts, those the "
+    "title's record lists from earlier runs, the usual ones when a render "
+    "target format combination is first seen, and any other when a draw "
+    "first needs it. A draw whose stand-in is not ready waits for what is "
+    "left of vulkan_placeholder_async_wait_ms in the frame and is otherwise "
+    "skipped until it is. With it the interpreter also stands in for vertex "
+    "shaders that are already translated and for draws without a pixel "
+    "shader, and no placeholder is compiled from a translated vertex shader "
+    "(such a draw is skipped until its real pipeline is ready).",
     "Vulkan");
 
 DEFINE_bool(
@@ -713,6 +737,19 @@ bool VulkanPipelineCache::Initialize() {
     }
   }
 
+  // hakuX-Boosted: the stand-in pixel shaders that take every interpolator
+  // (vulkan_standin_precompile). A failure only means the copies with moved
+  // inputs are used instead.
+  stand_in_all_pixel_shaders_[0] = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::placeholder_stand_in_flat_all_ps,
+      sizeof(shaders::placeholder_stand_in_flat_all_ps));
+  stand_in_all_pixel_shaders_[1] = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::placeholder_stand_in_2d_all_ps,
+      sizeof(shaders::placeholder_stand_in_2d_all_ps));
+  stand_in_all_pixel_shaders_[2] = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::placeholder_stand_in_cube_all_ps,
+      sizeof(shaders::placeholder_stand_in_cube_all_ps));
+
   // hakuX-Boosted: the modules of the interpreter's version 2
   // (vulkan_placeholder_interpreter = 2). Made whatever the setting says, as
   // the stand-in's are: a module costs nothing until a pipeline uses it. A
@@ -864,11 +901,33 @@ void VulkanPipelineCache::Shutdown() {
   // Destroy all pipelines.
   last_pipeline_ = nullptr;
   for (const auto& pipeline_pair : pipelines_) {
-    if (pipeline_pair.second.pipeline != VK_NULL_HANDLE) {
+    // hakuX-Boosted: not a shared stand-in a slot still has (destroyed once,
+    // below).
+    if (pipeline_pair.second.pipeline != VK_NULL_HANDLE &&
+        !(pipeline_pair.second.placeholder_shared.load(
+              std::memory_order_acquire) &&
+          pipeline_pair.second.pipeline.load(std::memory_order_acquire) ==
+              pipeline_pair.second.placeholder_pipeline.load(
+                  std::memory_order_acquire))) {
       dfn.vkDestroyPipeline(device, pipeline_pair.second.pipeline, nullptr);
     }
   }
   pipelines_.clear();
+  // hakuX-Boosted: the shared stand-in pipelines.
+  for (const auto& shared_pair : shared_stand_ins_) {
+    if (!shared_pair.second) {
+      continue;
+    }
+    VkPipeline stand_in_pipeline =
+        shared_pair.second->slot.second.pipeline.load(
+            std::memory_order_acquire);
+    if (stand_in_pipeline != VK_NULL_HANDLE) {
+      dfn.vkDestroyPipeline(device, stand_in_pipeline, nullptr);
+    }
+  }
+  shared_stand_ins_.clear();
+  stand_in_render_passes_.clear();
+  stand_in_render_pass_last_ = UINT32_MAX;
 
   // Destroy the pipeline cache.
   if (vk_pipeline_cache_ != VK_NULL_HANDLE) {
@@ -898,6 +957,10 @@ void VulkanPipelineCache::Shutdown() {
                                              stand_in_pixel_shaders_[i][j]);
     }
   }
+  for (uint32_t i = 0; i < 3; ++i) {
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                           stand_in_all_pixel_shaders_[i]);
+  }
   for (const auto& stand_in_pair : stand_in_pixel_shaders_moved_) {
     if (stand_in_pair.second != VK_NULL_HANDLE) {
       dfn.vkDestroyShaderModule(device, stand_in_pair.second, nullptr);
@@ -907,6 +970,8 @@ void VulkanPipelineCache::Shutdown() {
   // hakuX-Boosted: the modules of the interpreter's version 2.
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          ucode_program_vs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         ucode_program_ps_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          ucode_program_point_strip_vs_);
   for (uint32_t i = 0; i < 4; ++i) {
@@ -1076,10 +1141,13 @@ bool VulkanPipelineCache::CanCreatePipelineAsync(bool has_pixel_shader,
   // hakuX-Boosted: and with vulkan_placeholder_depth_only_async such a draw
   // is asynchronous whether or not the interpreter can stand in (without it
   // there is no placeholder: it is dropped until its pipeline is ready).
+  // hakuX-Boosted: and with vulkan_standin_precompile nothing is compiled on
+  // the GPU command thread, a draw without a pixel shader included.
   return cvars::async_shader_compilation && !creation_threads_.empty() &&
          (has_pixel_shader ||
           (cvars::vulkan_placeholder_pipelines &&
-           cvars::vulkan_placeholder_depth_only_async) ||
+           (cvars::vulkan_placeholder_depth_only_async ||
+            cvars::vulkan_standin_precompile)) ||
           (use_interpreter && cvars::vulkan_placeholder_pipelines &&
            cvars::vulkan_placeholder_depth_only_interpreter &&
            ucode_interpreter_vs_ != VK_NULL_HANDLE)) &&
@@ -1161,6 +1229,14 @@ bool VulkanPipelineCache::ConfigurePipeline(
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+
+  // hakuX-Boosted: the stand-ins of a render pass key are queued the first
+  // time the key is drawn to, whether or not this draw needs one
+  // (vulkan_standin_precompile).
+  if (render_pass_key.key != stand_in_render_pass_last_) {
+    stand_in_render_pass_last_ = render_pass_key.key;
+    NoteStandInRenderPass(render_pass_key, kStandInOriginRenderPass);
+  }
 
   PipelineDescription description;
   if (!GetCurrentStateDescription(
@@ -1354,11 +1430,16 @@ bool VulkanPipelineCache::ConfigurePipeline(
       // without a pixel shader (vulkan_placeholder_depth_only_async lets one
       // get here): that placeholder would be the real pipeline, compiled on
       // this thread.
+      // hakuX-Boosted: nor with vulkan_standin_precompile, for any draw:
+      // that mode compiles nothing on this thread, and such a placeholder
+      // made on a creation thread would arrive little before the real
+      // pipeline it delays.
       bool make_placeholder =
           !require_real &&
           (use_interpreter ||
            (vertex_shader->is_translated() && pixel_shader != nullptr &&
-            cvars::vulkan_placeholder_real_vs));
+            cvars::vulkan_placeholder_real_vs &&
+            !IsStandInPrecompileActive()));
       if (make_placeholder) {
         MakePlaceholder(creation_arguments, use_interpreter, false);
       } else if (!require_real && cvars::vulkan_placeholder_translate_first &&
@@ -1634,6 +1715,17 @@ uint32_t VulkanPipelineCache::GetProgramPixelRefusal(
     // the interpreter does not.
     reasons |= kPixelRefusalNoModule;
   }
+  // hakuX-Boosted: its layout has two textures and a sampler for each slot
+  // in the pixel stage, more than a device must allow.
+  if (command_processor_.GetVulkanDevice()
+              ->properties()
+              .maxPerStageDescriptorSampledImages <
+          ucode_program::kMaxTextures * 2 ||
+      command_processor_.GetVulkanDevice()
+              ->properties()
+              .maxPerStageDescriptorSamplers < ucode_program::kMaxTextures) {
+    reasons |= kPixelRefusalNoModule;
+  }
   if (cvars::texture_integer_num_format || cvars::texture_gradient_exp_bias) {
     reasons |= kPixelRefusalSetting;
   }
@@ -1837,7 +1929,107 @@ void VulkanPipelineCache::MakePlaceholder(
 
   bool placeholder_created = false;
   bool placeholder_queued = false;
-  if (!placeholder_possible) {
+  // hakuX-Boosted: vulkan_standin_precompile. A placeholder whose vertex
+  // stage is the interpreter's version 2 has nothing of the guest shaders in
+  // it, so it is not made for this slot: the slot takes the handle of the
+  // shared stand-in pipeline of its recipe, which a creation thread makes
+  // (or made earlier). Nothing is compiled here.
+  bool placeholder_shared = false;
+  if (placeholder_possible && use_program && IsStandInPrecompileActive()) {
+    placeholder_shared = true;
+    StandInPixelForm pixel_form = StandInPixelForm::kNoOp;
+    uint32_t fallback_inputs = 0;
+    if (use_stand_in) {
+      if (stand_in.shader == StandInPixelShader::kProgram) {
+        pixel_form = StandInPixelForm::kProgram;
+      } else {
+        pixel_form = stand_in.shader == StandInPixelShader::kCube
+                         ? StandInPixelForm::kCube
+                         : (stand_in.shader == StandInPixelShader::k2D
+                                ? StandInPixelForm::k2D
+                                : StandInPixelForm::kFlat);
+        // The module that takes every interpolator and is told for each
+        // draw which two to read (the draw path puts them in the stand-in's
+        // word whatever the vertex stage), so that the recipe has nothing of
+        // this pair of shaders in it. Without that module, the inputs'
+        // locations as GetStandIn asked for them: the interpreter's version
+        // 2 writes each interpolator at its index.
+        if (stand_in_all_pixel_shaders_[uint32_t(stand_in.shader) - 1] ==
+            VK_NULL_HANDLE) {
+          const bool fallback_has_texture =
+              stand_in.shader != StandInPixelShader::kFlat;
+          const bool fallback_has_color =
+              stand_in.color_interpolator != StandIn::kNoInterpolator;
+          fallback_inputs =
+              (fallback_has_texture ? stand_in.texcoord_interpolator : 0) |
+              ((fallback_has_color ? stand_in.color_interpolator : 1) << 8) |
+              (uint32_t(fallback_has_color) << 16);
+        }
+      }
+    } else if (fragment_shader_override != placeholder_pixel_shader_) {
+      pixel_form = fragment_shader_override == placeholder_color_pixel_shader_
+                       ? StandInPixelForm::kDebugColor
+                       : StandInPixelForm::kFloat24;
+    }
+    StandInRecipe recipe;
+    BuildStandInRecipe(description, pixel_form, fallback_inputs, recipe);
+    Pipeline& slot = pipeline_pair.second;
+    SharedStandIn* shared =
+        GetSharedStandIn(recipe, kStandInOriginDraw, true);
+    if (shared) {
+      slot.stand_in_pending = shared;
+      slot.stand_in_pending_packed = use_stand_in ? stand_in.Pack() : 0;
+      slot.placeholder_pending.store(true, std::memory_order_release);
+      if (TryAdoptSharedStandIn(pipeline_pair)) {
+        placeholder_created = true;
+        ++stand_in_slots_ready_;
+      } else if (slot.stand_in_pending) {
+        // Not made yet: this draw waits for it for what is left of the
+        // frame's allowance; a later draw of the slot takes it otherwise
+        // (OnPipelineReused).
+        placeholder_queued = true;
+        ++stand_in_slots_waited_;
+        if (placeholder_wait_left_ms_ > 0.0) {
+          const auto wait_start = std::chrono::steady_clock::now();
+          {
+            std::unique_lock<std::mutex> lock(creation_request_lock_);
+            creation_progress_cond_.wait_for(
+                lock,
+                std::chrono::duration<double, std::milli>(
+                    placeholder_wait_left_ms_),
+                [&slot, shared]() {
+                  return shared->state.load(std::memory_order_acquire) !=
+                             SharedStandIn::kQueued ||
+                         slot.pipeline.load(std::memory_order_acquire) !=
+                             VK_NULL_HANDLE;
+                });
+          }
+          double waited_ms = std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - wait_start)
+                                 .count();
+          placeholder_wait_left_ms_ -= waited_ms;
+          stand_in_slots_wait_ms_ += waited_ms;
+          stand_in_slots_wait_worst_ms_ =
+              std::max(stand_in_slots_wait_worst_ms_, waited_ms);
+          if (TryAdoptSharedStandIn(pipeline_pair)) {
+            placeholder_created = true;
+            ++stand_in_slots_waited_in_time_;
+          }
+          placeholder_queued = slot.stand_in_pending != nullptr;
+        }
+      }
+    }
+    if (!placeholder_created && !placeholder_queued &&
+        slot.pipeline.load(std::memory_order_acquire) != VK_NULL_HANDLE) {
+      // The real pipeline came first (a late placeholder): the flags set
+      // above are not this slot's any more.
+      slot.is_placeholder.store(false, std::memory_order_release);
+      slot.uses_interpreter.store(false, std::memory_order_release);
+    }
+  }
+  if (placeholder_shared) {
+    // Done above.
+  } else if (!placeholder_possible) {
     placeholder_created = false;
   } else if (cvars::vulkan_placeholder_async && !creation_threads_.empty()) {
     // A creation thread creates it, ahead of everything else queued, and
@@ -1941,6 +2133,497 @@ void VulkanPipelineCache::MakePlaceholder(
       pipeline_pair.second.uses_interpreter.store(false,
                                                   std::memory_order_release);
     }
+  }
+}
+
+// hakuX-Boosted: shared stand-in pipelines, made ahead
+// (vulkan_standin_precompile, boosted/notes/standin-precompile.md).
+
+bool VulkanPipelineCache::IsStandInPrecompileActive() const {
+  return cvars::vulkan_standin_precompile &&
+         cvars::vulkan_placeholder_pipelines &&
+         cvars::async_shader_compilation && !creation_threads_.empty() &&
+         placeholder_pixel_shader_ != VK_NULL_HANDLE &&
+         IsProgramInterpreterActive();
+}
+
+void VulkanPipelineCache::BuildStandInRecipe(
+    const PipelineDescription& slot_description, StandInPixelForm pixel_form,
+    uint32_t fallback_inputs, StandInRecipe& recipe_out) const {
+  StandInRecipe recipe;
+  PipelineDescription description(slot_description);
+  // What is left of the modifications is what EnsurePipelineCreated reads
+  // from them for a pipeline whose stages are not the guest's: which stage
+  // the vertex side is and how many control points a patch has (the host
+  // vertex shader type), and the blend factor a MIN or MAX blend bakes in.
+  SpirvShaderTranslator::Modification vertex_modification(0);
+  vertex_modification.vertex.host_vertex_shader_type =
+      SpirvShaderTranslator::Modification(
+          slot_description.vertex_shader_modification)
+          .vertex.host_vertex_shader_type;
+  SpirvShaderTranslator::Modification pixel_modification(0);
+  if (slot_description.pixel_shader_hash) {
+    SpirvShaderTranslator::Modification slot_pixel_modification(
+        slot_description.pixel_shader_modification);
+    pixel_modification.pixel.rt0_blend_rgb_factor_for_premult =
+        slot_pixel_modification.pixel.rt0_blend_rgb_factor_for_premult;
+    pixel_modification.pixel.rt0_blend_a_factor_for_premult =
+        slot_pixel_modification.pixel.rt0_blend_a_factor_for_premult;
+  }
+  description.vertex_shader_hash = 0;
+  description.vertex_shader_modification = vertex_modification.value;
+  description.pixel_shader_hash = 0;
+  description.pixel_shader_modification = pixel_modification.value;
+  recipe.description = description;
+  recipe.pixel_form = pixel_form;
+  recipe.fallback_inputs = fallback_inputs;
+  recipe_out = recipe;
+}
+
+VulkanPipelineCache::SharedStandIn* VulkanPipelineCache::GetSharedStandIn(
+    const StandInRecipe& recipe, StandInOrigin origin, bool from_draw) {
+  SharedStandIn* shared = nullptr;
+  auto found = shared_stand_ins_.find(recipe);
+  if (found != shared_stand_ins_.end()) {
+    shared = found->second.get();
+    if (!shared) {
+      // Known not to be possible on this device.
+      return nullptr;
+    }
+  } else {
+    // The modules, the layout and the render pass of the recipe.
+    const PipelineDescription description(recipe.description);
+    const StandInPixelForm pixel_form = recipe.pixel_form;
+    const uint32_t fallback_inputs = recipe.fallback_inputs;
+    const VulkanRenderTargetCache::RenderPassKey render_pass_key =
+        description.render_pass_key;
+    PipelineCreationArguments arguments;
+    arguments.pipeline = nullptr;
+    arguments.vertex_shader = nullptr;
+    arguments.pixel_shader = nullptr;
+    arguments.geometry_shader = VK_NULL_HANDLE;
+    arguments.tessellation_vertex_shader = VK_NULL_HANDLE;
+    arguments.tessellation_control_shader = VK_NULL_HANDLE;
+    arguments.render_pass = VK_NULL_HANDLE;
+    arguments.render_pass_key = render_pass_key;
+    arguments.kind = PipelineCreationArguments::Kind::kStandIn;
+    const PipelineLayoutProvider* layout = nullptr;
+    bool possible = render_target_cache_.GetPath() ==
+                        RenderTargetCache::Path::kHostRenderTargets &&
+                    ArePipelineRequirementsMet(description);
+    if (possible) {
+      arguments.placeholder_vertex_shader = GetProgramVertexShader(
+          SpirvShaderTranslator::Modification(
+              description.vertex_shader_modification)
+              .vertex.host_vertex_shader_type,
+          description.tessellation_mode != PipelineTessellationMode::kNone &&
+              description.tessellation_mode !=
+                  PipelineTessellationMode::kDiscrete);
+      size_t texture_count = 0, sampler_count = 0;
+      switch (pixel_form) {
+        case StandInPixelForm::kNoOp:
+          arguments.placeholder_fragment_shader = placeholder_pixel_shader_;
+          break;
+        case StandInPixelForm::kDebugColor:
+          arguments.placeholder_fragment_shader =
+              placeholder_color_pixel_shader_;
+          break;
+        case StandInPixelForm::kFloat24:
+          arguments.placeholder_fragment_shader =
+              render_target_cache_.depth_float24_round()
+                  ? float24_round_fragment_shader_
+                  : float24_truncate_fragment_shader_;
+          break;
+        case StandInPixelForm::kProgram:
+          arguments.placeholder_fragment_shader = ucode_program_ps_;
+          texture_count = ucode_program::kMaxTextures * 2;
+          sampler_count = ucode_program::kMaxTextures;
+          break;
+        case StandInPixelForm::kFlat:
+        case StandInPixelForm::k2D:
+        case StandInPixelForm::kCube: {
+          StandInPixelShader fallback_shader =
+              pixel_form == StandInPixelForm::kCube
+                  ? StandInPixelShader::kCube
+                  : (pixel_form == StandInPixelForm::k2D
+                         ? StandInPixelShader::k2D
+                         : StandInPixelShader::kFlat);
+          arguments.placeholder_fragment_shader =
+              fallback_inputs
+                  ? GetStandInPixelShader(
+                        fallback_shader, ((fallback_inputs >> 16) & 1) != 0,
+                        fallback_inputs & 0xFF, (fallback_inputs >> 8) & 0xFF)
+                  : stand_in_all_pixel_shaders_[uint32_t(fallback_shader) - 1];
+          if (pixel_form != StandInPixelForm::kFlat) {
+            texture_count = 1;
+            sampler_count = 1;
+          }
+        } break;
+        default:
+          break;
+      }
+      possible = arguments.placeholder_vertex_shader != VK_NULL_HANDLE &&
+                 arguments.placeholder_fragment_shader != VK_NULL_HANDLE;
+      if (possible) {
+        layout = command_processor_.GetPipelineLayout(texture_count,
+                                                      sampler_count, 0, 0);
+        possible = layout != nullptr;
+      }
+    }
+    if (possible &&
+        description.geometry_shader != PipelineGeometryShader::kNone) {
+      // As MakePlaceholder: the interpreter writes all sixteen interpolators.
+      GeometryShaderKey geometry_shader_key;
+      geometry_shader_key.type = description.geometry_shader;
+      geometry_shader_key.interpolator_count = xenos::kMaxInterpolators;
+      arguments.geometry_shader = GetGeometryShader(geometry_shader_key);
+      possible = arguments.geometry_shader != VK_NULL_HANDLE;
+    }
+    if (possible &&
+        description.tessellation_mode != PipelineTessellationMode::kNone) {
+      arguments.tessellation_vertex_shader =
+          GetTessellationVertexShader(description.tessellation_mode);
+      bool use_control_point_count =
+          (description.tessellation_mode ==
+           PipelineTessellationMode::kAdaptive) ||
+          IsTessellationControlPointIndexed(description);
+      arguments.tessellation_control_shader = GetTessellationControlShader(
+          description.tessellation_mode, description.tessellation_patch,
+          use_control_point_count);
+      possible = arguments.tessellation_vertex_shader != VK_NULL_HANDLE &&
+                 arguments.tessellation_control_shader != VK_NULL_HANDLE;
+    }
+    if (possible) {
+      arguments.render_pass =
+          render_target_cache_.GetHostRenderTargetsRenderPass(render_pass_key);
+      possible = arguments.render_pass != VK_NULL_HANDLE;
+    }
+    if (!possible) {
+      shared_stand_ins_.emplace(recipe, nullptr);
+      ++stand_ins_unavailable_;
+      return nullptr;
+    }
+    std::unique_ptr<SharedStandIn> owned =
+        std::make_unique<SharedStandIn>(recipe, layout);
+    shared = owned.get();
+    arguments.pipeline = &shared->slot;
+    arguments.placeholder_layout = layout;
+    arguments.stand_in = shared;
+    arguments.priority =
+        from_draw ? kPriorityPlaceholder : kPriorityStandInAhead;
+    shared->arguments = arguments;
+    shared->origin = origin;
+    shared->boosted = from_draw;
+    shared_stand_ins_.emplace(recipe, std::move(owned));
+    ++stand_ins_queued_[origin];
+    PushCreationJob(arguments);
+  }
+  if (from_draw) {
+    if (!shared->used) {
+      shared->used = true;
+      stand_in_record_dirty_ = true;
+    }
+    if (!shared->boosted &&
+        shared->state.load(std::memory_order_acquire) ==
+            SharedStandIn::kQueued &&
+        !shared->claimed.load(std::memory_order_acquire)) {
+      // Queued behind other jobs: once more, ahead of them. The creation
+      // thread that reaches it second drops it.
+      shared->boosted = true;
+      PipelineCreationArguments boosted_arguments = shared->arguments;
+      boosted_arguments.priority = kPriorityPlaceholder;
+      PushCreationJob(boosted_arguments);
+    }
+  }
+  return shared;
+}
+
+bool VulkanPipelineCache::TryAdoptSharedStandIn(
+    std::pair<const PipelineDescription, Pipeline>& pipeline_pair) {
+  Pipeline& slot = pipeline_pair.second;
+  SharedStandIn* shared = static_cast<SharedStandIn*>(slot.stand_in_pending);
+  if (!shared) {
+    return false;
+  }
+  if (slot.pipeline.load(std::memory_order_acquire) != VK_NULL_HANDLE) {
+    // The real pipeline came first.
+    slot.stand_in_pending = nullptr;
+    slot.placeholder_pending.store(false, std::memory_order_release);
+    ++stand_in_slots_never_;
+    return false;
+  }
+  uint32_t state = shared->state.load(std::memory_order_acquire);
+  if (state == SharedStandIn::kQueued) {
+    return false;
+  }
+  slot.stand_in_pending = nullptr;
+  slot.placeholder_pending.store(false, std::memory_order_release);
+  VkPipeline stand_in_pipeline =
+      state == SharedStandIn::kReady
+          ? shared->slot.second.pipeline.load(std::memory_order_acquire)
+          : VK_NULL_HANDLE;
+  if (stand_in_pipeline == VK_NULL_HANDLE) {
+    // It could not be created: the draws are dropped until the real
+    // pipeline is ready.
+    if (slot.pipeline.load(std::memory_order_acquire) == VK_NULL_HANDLE) {
+      slot.is_placeholder.store(false, std::memory_order_release);
+      slot.uses_interpreter.store(false, std::memory_order_release);
+    }
+    return false;
+  }
+  // Everything a draw reads of a placeholder, before the handle that makes
+  // it one is published. The layout is the stand-in's own whatever its pixel
+  // stage, so a draw binds its descriptor sets with the layout the pipeline
+  // was created with even after the slot's layout became the real shaders'.
+  slot.placeholder_pipeline_layout.store(shared->layout,
+                                         std::memory_order_release);
+  slot.placeholder_stand_in.store(slot.stand_in_pending_packed,
+                                  std::memory_order_release);
+  slot.placeholder_shared.store(true, std::memory_order_release);
+  slot.placeholder_pipeline.store(stand_in_pipeline, std::memory_order_release);
+  VkPipeline expected_pipeline = VK_NULL_HANDLE;
+  if (!slot.pipeline.compare_exchange_strong(expected_pipeline,
+                                             stand_in_pipeline,
+                                             std::memory_order_acq_rel)) {
+    // The real pipeline was published between the check above and here.
+    slot.placeholder_pipeline.store(VK_NULL_HANDLE, std::memory_order_release);
+    slot.placeholder_stand_in.store(0, std::memory_order_release);
+    slot.placeholder_pipeline_layout.store(nullptr, std::memory_order_release);
+    slot.is_placeholder.store(false, std::memory_order_release);
+    slot.uses_interpreter.store(false, std::memory_order_release);
+    ++stand_in_slots_never_;
+    return false;
+  }
+  return true;
+}
+
+void VulkanPipelineCache::NoteStandInRenderPass(
+    VulkanRenderTargetCache::RenderPassKey key, StandInOrigin origin) {
+  // Only where the state that varies from draw to draw is dynamic: without
+  // that a recipe has the draw's cull mode, depth test and the rest in it,
+  // and there is nothing to guess.
+  if (!dynamic_state_capabilities_.extended_dynamic_state ||
+      !IsStandInPrecompileActive()) {
+    return;
+  }
+  key = render_target_cache_.NormalizeKeyForCacheLookup(key);
+  if (stand_in_render_passes_.size() >= 1024 ||
+      !stand_in_render_passes_.insert(key.key).second) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice::Properties& device_properties =
+      command_processor_.GetVulkanDevice()->properties();
+  const uint32_t color_rts_used = key.depth_and_color_used >> 1;
+  // A plain draw's description as ConfigurePipeline leaves it.
+  auto make_description = [&](bool has_pixel_shader,
+                              PipelineGeometryShader geometry_shader) {
+    PipelineDescription description;
+    description.render_pass_key = key;
+    description.geometry_shader = geometry_shader;
+    description.primitive_topology = PipelinePrimitiveTopology::kTriangleList;
+    description.polygon_mode = PipelinePolygonMode::kFill;
+    // Where blending or the write mask is not dynamic: no blending, all
+    // channels, which is a guess.
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (!(color_rts_used & (uint32_t(1) << i))) {
+        continue;
+      }
+      PipelineRenderTarget render_target;
+      std::memset(&render_target, 0, sizeof(render_target));
+      render_target.src_color_blend_factor = PipelineBlendFactor::kOne;
+      render_target.dst_color_blend_factor = PipelineBlendFactor::kZero;
+      render_target.color_blend_op = xenos::BlendOp::kAdd;
+      render_target.src_alpha_blend_factor = PipelineBlendFactor::kOne;
+      render_target.dst_alpha_blend_factor = PipelineBlendFactor::kZero;
+      render_target.alpha_blend_op = xenos::BlendOp::kAdd;
+      render_target.color_write_mask = has_pixel_shader ? 0b1111 : 0;
+      description.render_targets[i] = render_target;
+    }
+    SpirvShaderTranslator::Modification vertex_modification(0);
+    vertex_modification.vertex.host_vertex_shader_type =
+        Shader::HostVertexShaderType::kVertex;
+    description.vertex_shader_modification = vertex_modification.value;
+    if (has_pixel_shader) {
+      // BuildStandInRecipe only looks at the hash to know there is one.
+      description.pixel_shader_hash = 1;
+      SpirvShaderTranslator::Modification pixel_modification(0);
+      pixel_modification.pixel.rt0_blend_rgb_factor_for_premult =
+          xenos::BlendFactor::kOne;
+      pixel_modification.pixel.rt0_blend_a_factor_for_premult =
+          xenos::BlendFactor::kOne;
+      description.pixel_shader_modification = pixel_modification.value;
+    }
+    CanonicalizePipelineDescription(description);
+    return description;
+  };
+  if (color_rts_used && cvars::vulkan_placeholder_ps_mode >= 3 &&
+      ucode_program_ps_ != VK_NULL_HANDLE) {
+    // The pixel interpreter, for a plain draw and, where the interpreter
+    // takes them, for a rectangle list (how full-screen passes are drawn).
+    StandInRecipe recipe;
+    BuildStandInRecipe(make_description(true, PipelineGeometryShader::kNone),
+                       StandInPixelForm::kProgram, 0, recipe);
+    GetSharedStandIn(recipe, origin, false);
+    if (cvars::vulkan_placeholder_interpreter_geometry &&
+        device_properties.geometryShader) {
+      BuildStandInRecipe(
+          make_description(true, PipelineGeometryShader::kRectangleList),
+          StandInPixelForm::kProgram, 0, recipe);
+      GetSharedStandIn(recipe, origin, false);
+    }
+  }
+  if (key.depth_and_color_used & 0b1) {
+    // A draw without a pixel shader: depth only, with the float24
+    // conversion where EnsurePipelineCreated would use it (the canonical
+    // description always has the depth test on).
+    StandInPixelForm depth_form = StandInPixelForm::kNoOp;
+    if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+        key.depth_format == xenos::DepthRenderTargetFormat::kD24FS8 &&
+        (render_target_cache_.depth_float24_round()
+             ? float24_round_fragment_shader_
+             : float24_truncate_fragment_shader_) != VK_NULL_HANDLE) {
+      depth_form = StandInPixelForm::kFloat24;
+    }
+    StandInRecipe recipe;
+    BuildStandInRecipe(make_description(false, PipelineGeometryShader::kNone),
+                       depth_form, 0, recipe);
+    GetSharedStandIn(recipe, origin, false);
+  }
+}
+
+namespace {
+// The file of a title's stand-in recipes, beside its shader record.
+struct StandInRecordHeader {
+  uint32_t magic;
+  uint32_t description_version;
+  uint32_t modification_version;
+  uint32_t recipe_size;
+  uint32_t recipe_count;
+};
+constexpr uint32_t kStandInRecordMagic = 0x31495358;  // 'XSI1'
+constexpr uint32_t kStandInRecordMaxRecipes = 4096;
+}  // namespace
+
+void VulkanPipelineCache::StartStandInPrecompile(
+    const std::filesystem::path& cache_root) {
+  stand_in_record_path_.clear();
+  stand_in_record_dirty_ = false;
+  if (!IsStandInPrecompileActive()) {
+    return;
+  }
+  // The warm-up set: the usual stand-ins for the most common targets of the
+  // console (8-bit colour, 24-bit depth and 8-bit stencil, one sample), so
+  // that the interpreter's modules have been through the driver's compiler
+  // before the title draws anything. Whether that helps a stand-in for
+  // other targets is the driver's cache's to say.
+  {
+    VulkanRenderTargetCache::RenderPassKey warm_up_key;
+    warm_up_key.msaa_samples = xenos::MsaaSamples::k1X;
+    warm_up_key.depth_and_color_used = 0b11;
+    warm_up_key.depth_format =
+        render_target_cache_.depth_unorm24_vulkan_format_supported()
+            ? xenos::DepthRenderTargetFormat::kD24S8
+            : xenos::DepthRenderTargetFormat::kD24FS8;
+    warm_up_key.color_0_view_format = xenos::ColorRenderTargetFormat::k_8_8_8_8;
+    NoteStandInRenderPass(warm_up_key, kStandInOriginStartup);
+  }
+  if (!shader_storage_title_id_ ||
+      !dynamic_state_capabilities_.extended_dynamic_state) {
+    return;
+  }
+  stand_in_record_path_ =
+      GetShaderStorageShareableRoot(cache_root) /
+      fmt::format("{:08X}.standin.vk.bin", shader_storage_title_id_);
+  FILE* record_file = xe::filesystem::OpenFile(stand_in_record_path_, "rb");
+  if (!record_file) {
+    return;
+  }
+  StandInRecordHeader header;
+  std::vector<StandInRecipe> recipes;
+  if (fread(&header, sizeof(header), 1, record_file) == 1 &&
+      header.magic == kStandInRecordMagic &&
+      header.description_version == PipelineDescription::kVersion &&
+      header.modification_version ==
+          SpirvShaderTranslator::Modification::kVersion &&
+      header.recipe_size == sizeof(StandInRecipe) &&
+      header.recipe_count <= kStandInRecordMaxRecipes) {
+    recipes.resize(header.recipe_count);
+    if (header.recipe_count &&
+        fread(recipes.data(), sizeof(StandInRecipe), header.recipe_count,
+              record_file) != header.recipe_count) {
+      recipes.clear();
+    }
+  }
+  fclose(record_file);
+  uint32_t taken = 0;
+  for (const StandInRecipe& stored_recipe : recipes) {
+    // Only a recipe this device would build itself: a known form, no guest
+    // shader in it, and a description that is already canonical for this
+    // device's dynamic state.
+    const StandInRecipe recipe(stored_recipe);
+    PipelineDescription canonical_description(recipe.description);
+    CanonicalizePipelineDescription(canonical_description);
+    StandInRecipe rebuilt_recipe;
+    BuildStandInRecipe(canonical_description, recipe.pixel_form,
+                       recipe.fallback_inputs, rebuilt_recipe);
+    if (uint32_t(recipe.pixel_form) >= uint32_t(StandInPixelForm::kCount) ||
+        !(rebuilt_recipe == recipe)) {
+      continue;
+    }
+    SharedStandIn* shared = GetSharedStandIn(recipe, kStandInOriginRecord, false);
+    if (shared) {
+      // Kept in the record for the next launch too.
+      shared->used = true;
+      ++taken;
+    }
+  }
+  stand_in_record_loaded_ += taken;
+  XELOGI(
+      "shader record: {} of {} stand-in pipeline recipe(s) of earlier runs "
+      "queued for the creation threads",
+      taken, recipes.size());
+}
+
+void VulkanPipelineCache::SaveStandInRecordIfDue(bool force) {
+  if (!stand_in_record_dirty_ || stand_in_record_path_.empty()) {
+    return;
+  }
+  uint64_t now_ms = xe::Clock::QueryHostUptimeMillis();
+  if (!force && now_ms - stand_in_record_saved_ms_ < 10000) {
+    return;
+  }
+  stand_in_record_saved_ms_ = now_ms;
+  stand_in_record_dirty_ = false;
+  std::vector<StandInRecipe> recipes;
+  for (const auto& shared_pair : shared_stand_ins_) {
+    if (shared_pair.second && shared_pair.second->used &&
+        recipes.size() < kStandInRecordMaxRecipes) {
+      recipes.push_back(shared_pair.first);
+    }
+  }
+  std::filesystem::path temporary_path = stand_in_record_path_;
+  temporary_path += ".tmp";
+  FILE* record_file = xe::filesystem::OpenFile(temporary_path, "wb");
+  if (!record_file) {
+    return;
+  }
+  StandInRecordHeader header;
+  header.magic = kStandInRecordMagic;
+  header.description_version = PipelineDescription::kVersion;
+  header.modification_version = SpirvShaderTranslator::Modification::kVersion;
+  header.recipe_size = uint32_t(sizeof(StandInRecipe));
+  header.recipe_count = uint32_t(recipes.size());
+  bool written =
+      fwrite(&header, sizeof(header), 1, record_file) == 1 &&
+      (recipes.empty() ||
+       fwrite(recipes.data(), sizeof(StandInRecipe), recipes.size(),
+              record_file) == recipes.size());
+  fclose(record_file);
+  std::error_code error_code;
+  if (written) {
+    std::filesystem::rename(temporary_path, stand_in_record_path_, error_code);
+  } else {
+    std::filesystem::remove(temporary_path, error_code);
   }
 }
 
@@ -2071,8 +2754,18 @@ void VulkanPipelineCache::OnPipelineReused(
     VulkanShader::VulkanTranslation* pixel_shader, bool use_interpreter,
     bool require_real) {
   Pipeline& slot = pipeline_pair.second;
+  // hakuX-Boosted: a slot whose shared stand-in was not ready when it was
+  // first drawn takes it now if it is (vulkan_standin_precompile).
+  if (slot.stand_in_pending && TryAdoptSharedStandIn(pipeline_pair)) {
+    ++stand_in_slots_later_;
+  }
+  const bool standin_precompile = IsStandInPrecompileActive();
   const bool was_speculative = slot.speculative != 0;
-  if (!was_speculative && !require_real && !cvars::vulkan_placeholder_late) {
+  // hakuX-Boosted: with vulkan_standin_precompile a slot without a
+  // placeholder is given the interpreter's when it can have it, as with
+  // vulkan_placeholder_late: it costs this thread nothing.
+  if (!was_speculative && !require_real && !cvars::vulkan_placeholder_late &&
+      !standin_precompile) {
     // Every slot with the default settings: nothing to do, as before.
     return;
   }
@@ -2154,10 +2847,11 @@ void VulkanPipelineCache::OnPipelineReused(
   bool interpreter = use_interpreter && ucode_interpreter_vs_ != VK_NULL_HANDLE;
   // hakuX-Boosted: as in ConfigurePipeline, none from the translated vertex
   // shader for a draw without a pixel shader.
+  // hakuX-Boosted: and none from it at all with vulkan_standin_precompile.
   bool make_placeholder =
       interpreter ||
       (vertex_shader->is_translated() && pixel_shader != nullptr &&
-       cvars::vulkan_placeholder_real_vs);
+       cvars::vulkan_placeholder_real_vs && !standin_precompile);
   if (!make_placeholder) {
     return;
   }
@@ -2758,6 +3452,16 @@ void VulkanPipelineCache::LogStatsIfDue() {
       placeholders_inline_ * 29 + placeholders_async_ * 31 +
       placeholders_late_ * 37 + fullscreen_waits_ * 41 +
       speculative_refused_budget_ * 43 + draw_thread_pipelines_ * 47;
+  // hakuX-Boosted: and the shared stand-ins.
+  uint64_t stand_ins_queued = 0, stand_ins_created = 0;
+  for (uint32_t i = 0; i < kStandInOriginCount; ++i) {
+    stand_ins_queued += stand_ins_queued_[i];
+    stand_ins_created += stand_ins_created_[i].load(std::memory_order_relaxed);
+  }
+  signature += stand_ins_queued * 53 + stand_ins_created * 59 +
+               stand_in_slots_ready_ * 61 + stand_in_slots_waited_ * 67 +
+               stand_in_slots_later_ * 71 + stand_in_slots_never_ * 73 +
+               stand_ins_failed_.load(std::memory_order_relaxed) * 79;
   if (signature == stats_logged_signature_) {
     return;
   }
@@ -2848,6 +3552,54 @@ void VulkanPipelineCache::LogStatsIfDue() {
         program_pixel_refusals_[8], program_pixel_refusals_[9],
         program_pixel_refusals_[10], program_pixel_refusals_[11],
         program_pixel_refusals_[12]);
+    // hakuX-Boosted: boosted/notes/standin-precompile.md. A second line with
+    // the same first words, so that what reads the first finds this too.
+    const DynamicStateCapabilities& caps = dynamic_state_capabilities_;
+    uint64_t created[kStandInOriginCount];
+    double created_ms[kStandInOriginCount];
+    for (uint32_t i = 0; i < kStandInOriginCount; ++i) {
+      created[i] = stand_ins_created_[i].load(std::memory_order_relaxed);
+      created_ms[i] =
+          double(stand_ins_created_us_[i].load(std::memory_order_relaxed)) /
+          1000.0;
+    }
+    XELOGI(
+        "placeholder cover: stand-ins: shared stand-in pipelines {} (dynamic "
+        "state: extended {}, depth clamp {}, polygon mode {}, blend enable "
+        "{}, blend equation {}, colour write mask {}, any topology {}); "
+        "distinct stand-in pipelines queued {} (the start-up warm-up {}, the "
+        "title's record {}, a render pass seen for the first time {}, a draw "
+        "that needed one {}); created on creation threads {} (warm-up {} in "
+        "{:.0f} ms, record {} in {:.0f} ms, new render pass {} in {:.0f} ms, "
+        "for a draw {} in {:.0f} ms; slowest {:.1f} ms), failed {}, not "
+        "possible on this device {}; placeholders created on the GPU command "
+        "thread {}; pipeline slots that found their stand-in ready {}, that "
+        "waited for it {} ({:.1f} ms in all, longest {:.1f} ms; {} had it "
+        "within the wait), that took it at a later draw {}, that never did "
+        "(the real pipeline came first) {}; draws skipped while a stand-in "
+        "was being made {}; render pass keys seen {}; recipes taken from the "
+        "record {}",
+        IsStandInPrecompileActive() ? "on" : "off",
+        caps.extended_dynamic_state, caps.depth_clamp_enable,
+        caps.polygon_mode, caps.color_blend_enable, caps.color_blend_equation,
+        caps.color_write_mask, caps.primitive_topology_unrestricted,
+        stand_ins_queued, stand_ins_queued_[kStandInOriginStartup],
+        stand_ins_queued_[kStandInOriginRecord],
+        stand_ins_queued_[kStandInOriginRenderPass],
+        stand_ins_queued_[kStandInOriginDraw], stand_ins_created,
+        created[kStandInOriginStartup], created_ms[kStandInOriginStartup],
+        created[kStandInOriginRecord], created_ms[kStandInOriginRecord],
+        created[kStandInOriginRenderPass],
+        created_ms[kStandInOriginRenderPass], created[kStandInOriginDraw],
+        created_ms[kStandInOriginDraw],
+        double(stand_ins_slowest_us_.load(std::memory_order_relaxed)) / 1000.0,
+        stand_ins_failed_.load(std::memory_order_relaxed),
+        stand_ins_unavailable_, placeholders_inline_, stand_in_slots_ready_,
+        stand_in_slots_waited_, stand_in_slots_wait_ms_,
+        stand_in_slots_wait_worst_ms_, stand_in_slots_waited_in_time_,
+        stand_in_slots_later_, stand_in_slots_never_,
+        skipped_placeholder_compiling_, stand_in_render_passes_.size(),
+        stand_in_record_loaded_);
   }
 }
 
@@ -2872,6 +3624,8 @@ void VulkanPipelineCache::MaybeSaveVkPipelineCache() {
 
 void VulkanPipelineCache::EndSubmission() {
   MaybeSaveVkPipelineCache();
+  // hakuX-Boosted: the stand-ins' recipes, at most every ten seconds.
+  SaveStandInRecordIfDue(false);
   // hakuX-Boosted: between frames too, so that a load with no frame at all
   // is noticed.
   UpdateCreationPolicy(false);
@@ -3103,6 +3857,44 @@ void VulkanPipelineCache::CreationThread() {
       }
       placeholder_slot.placeholder_pending.store(false,
                                                  std::memory_order_release);
+      job_skipped = true;
+    } else if (creation_arguments.kind ==
+               PipelineCreationArguments::Kind::kStandIn) {
+      // hakuX-Boosted: a shared stand-in pipeline (vulkan_standin_precompile):
+      // fixed modules, its own slot and layout, no guest shader.
+      SharedStandIn& shared =
+          *static_cast<SharedStandIn*>(creation_arguments.stand_in);
+      if (!shared.claimed.exchange(true, std::memory_order_acq_rel)) {
+        const auto stand_in_start = std::chrono::steady_clock::now();
+        bool stand_in_created = EnsurePipelineCreated(
+            creation_arguments, creation_arguments.placeholder_fragment_shader,
+            creation_arguments.placeholder_vertex_shader,
+            creation_arguments.placeholder_layout);
+        uint64_t stand_in_us =
+            uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                         std::chrono::steady_clock::now() - stand_in_start)
+                         .count());
+        if (stand_in_created) {
+          uint32_t origin = shared.origin < kStandInOriginCount
+                                ? uint32_t(shared.origin)
+                                : uint32_t(kStandInOriginDraw);
+          stand_ins_created_[origin].fetch_add(1, std::memory_order_relaxed);
+          stand_ins_created_us_[origin].fetch_add(stand_in_us,
+                                                  std::memory_order_relaxed);
+          uint64_t slowest_us =
+              stand_ins_slowest_us_.load(std::memory_order_relaxed);
+          while (stand_in_us > slowest_us &&
+                 !stand_ins_slowest_us_.compare_exchange_weak(
+                     slowest_us, stand_in_us, std::memory_order_relaxed)) {
+          }
+        } else {
+          stand_ins_failed_.fetch_add(1, std::memory_order_relaxed);
+        }
+        // Read by the GPU command thread, which is woken below.
+        shared.state.store(stand_in_created ? SharedStandIn::kReady
+                                            : SharedStandIn::kFailed,
+                           std::memory_order_release);
+      }
       job_skipped = true;
     } else if (creation_arguments.pipeline->second.creation_claimed.exchange(
                    true, std::memory_order_acq_rel) &&
@@ -4524,13 +5316,19 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   // unsupported behavior that may be dangerous/crashing because pipelines can
   // be created from the disk storage.
 
+  // hakuX-Boosted: a shared stand-in pipeline has no guest vertex shader;
+  // the log lines below then say 0.
+  const uint64_t log_vertex_shader_hash =
+      creation_arguments.vertex_shader
+          ? creation_arguments.vertex_shader->shader().ucode_data_hash()
+          : 0;
   if (creation_arguments.pixel_shader) {
     XELOGGPU("Creating graphics pipeline state with VS {:016X}, PS {:016X}",
-             creation_arguments.vertex_shader->shader().ucode_data_hash(),
+             log_vertex_shader_hash,
              creation_arguments.pixel_shader->shader().ucode_data_hash());
   } else {
     XELOGGPU("Creating graphics pipeline state with VS {:016X}",
-             creation_arguments.vertex_shader->shader().ucode_data_hash());
+             log_vertex_shader_hash);
   }
 
   const PipelineDescription& description = creation_arguments.pipeline->first;
@@ -5175,7 +5973,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
           "shader_profiling: pipeline create ({}) VS {:016X} PS {:016X} {:.3f} "
           "ms",
           creating_placeholder ? "placeholder" : "real",
-          creation_arguments.vertex_shader->shader().ucode_data_hash(),
+          log_vertex_shader_hash,
           creation_arguments.pixel_shader
               ? creation_arguments.pixel_shader->shader().ucode_data_hash()
               : 0,
@@ -5228,7 +6026,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
         XELOGI(
             "shader_profiling: placeholder detail: VS {:016X}: {} vertex "
             "shader, {} bytes of SPIR-V, {}{}{}",
-            creation_arguments.vertex_shader->shader().ucode_data_hash(),
+            log_vertex_shader_hash,
             program_vs ? "interpreter (version 2)"
                        : (interpreter_vs ? "interpreter" : "translated guest"),
             vertex_spirv_bytes,
@@ -5236,7 +6034,11 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
             creation_arguments.geometry_shader != VK_NULL_HANDLE
                 ? ", geometry shader"
                 : "",
-            creation_arguments.kind == PipelineCreationArguments::Kind::kPlaceholder
+            creation_arguments.kind ==
+                    PipelineCreationArguments::Kind::kStandIn
+                ? ", a shared stand-in made on a creation thread"
+                : creation_arguments.kind ==
+                          PipelineCreationArguments::Kind::kPlaceholder
                 ? ", made on a creation thread"
                 : (publish_if_empty ? ", made late on the GPU command thread"
                                     : ", made on the GPU command thread"));
@@ -5248,15 +6050,14 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
       XELOGE(
           "Failed to create graphics pipeline with VS {:016X}, PS {:016X} "
           "(tessellated={}, result={})",
-          creation_arguments.vertex_shader->shader().ucode_data_hash(),
+          log_vertex_shader_hash,
           creation_arguments.pixel_shader->shader().ucode_data_hash(),
           is_tessellated, static_cast<int>(result));
     } else {
       XELOGE(
           "Failed to create graphics pipeline with VS {:016X} "
           "(tessellated={}, result={})",
-          creation_arguments.vertex_shader->shader().ucode_data_hash(),
-          is_tessellated, static_cast<int>(result));
+          log_vertex_shader_hash, is_tessellated, static_cast<int>(result));
     }
     return false;
   }
@@ -5297,7 +6098,15 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   VkPipeline old_pipeline =
       creation_arguments.pipeline->second.pipeline.exchange(
           pipeline, std::memory_order_acq_rel);
-  if (old_pipeline != VK_NULL_HANDLE) {
+  // hakuX-Boosted: a shared stand-in pipeline the slot had borrowed
+  // (vulkan_standin_precompile) is the cache's and other slots draw with it:
+  // it is not destroyed with this slot's turn at it.
+  if (old_pipeline != VK_NULL_HANDLE &&
+      !(creation_arguments.pipeline->second.placeholder_shared.load(
+            std::memory_order_acquire) &&
+        old_pipeline ==
+            creation_arguments.pipeline->second.placeholder_pipeline.load(
+                std::memory_order_acquire))) {
     uint64_t current_submission = command_processor_.GetCurrentSubmission();
     {
       std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
@@ -5552,6 +6361,18 @@ void VulkanPipelineCache::InitializeShaderStorage(
     pipeline_cache_create_info.pInitialData = nullptr;
     dfn.vkCreatePipelineCache(device, &pipeline_cache_create_info, nullptr,
                               &vk_pipeline_cache_);
+  }
+
+  // hakuX-Boosted: the driver's cache is the title's from here on, so the
+  // stand-ins can go to the creation threads: the warm-up set, the recipes
+  // of earlier runs, and those of every render pass key the stored
+  // pipelines were drawn to (vulkan_standin_precompile).
+  StartStandInPrecompile(cache_root);
+  for (const PipelineStoredDescription& stored_description :
+       pipeline_stored_descriptions) {
+    const VulkanRenderTargetCache::RenderPassKey stored_render_pass_key =
+        stored_description.description.render_pass_key;
+    NoteStandInRenderPass(stored_render_pass_key, kStandInOriginRecord);
   }
 
   // Create pipelines from stored descriptions.
@@ -5938,6 +6759,9 @@ void VulkanPipelineCache::ShutdownShaderStorage() {
   // Save VkPipelineCache to disk before shutting down storage.
   SaveVkPipelineCache();
   vk_pipeline_cache_path_.clear();
+  // hakuX-Boosted: and the stand-ins' recipes.
+  SaveStandInRecordIfDue(true);
+  stand_in_record_path_.clear();
 
   // Shut down the storage writer (closes files, stops write thread).
   storage_writer_.ShutdownShaderStorage();

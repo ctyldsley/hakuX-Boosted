@@ -99,10 +99,16 @@ enum Feature : uint32_t {
 
 // A slot is a texture and the sampler it is fetched with. The first
 // kMaxTextures2D are for 1D and 2D textures, the rest for cube textures
-// (shaders/ucode_program_pixel.glsli declares them so).
-constexpr uint32_t kMaxTextures2D = 6;
+// (shaders/ucode_program_pixel.glsli declares them so). Twelve and two since
+// boosted/notes/standin-precompile.md (six and two before): "too many
+// textures" was the pixel interpreter's most frequent refusal on a device.
+// A slot's number is four bits of a fetch's fourth word and 15 is "none", so
+// fourteen is the most this encoding has.
+constexpr uint32_t kMaxTextures2D = 12;
 constexpr uint32_t kMaxTexturesCube = 2;
 constexpr uint32_t kMaxTextures = kMaxTextures2D + kMaxTexturesCube;
+static_assert(kMaxTextures < kFetchTextureNoSlot,
+              "a slot's number must fit the fetch word");
 
 struct Texture {
   bool used = false;

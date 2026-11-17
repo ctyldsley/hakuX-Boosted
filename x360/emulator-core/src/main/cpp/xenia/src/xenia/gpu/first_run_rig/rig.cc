@@ -963,6 +963,40 @@ void AddPixelTests(std::vector<Test>& tests) {
         SetSigns(environment, 1, 0x55);
         SetSigns(environment, 3, 0xAA);
       }));
+
+  // As many different textures as the interpreter has slots for: twelve 2D
+  // and two cube (six and two before boosted/notes/standin-precompile.md).
+  // Written without a machine to run the rig on: it has not been run.
+  tests.push_back(MakePixelTest(
+      "ps_tfetch_all_slots",
+      [](Asm& assembler) {
+        std::vector<Ins> instructions;
+        for (uint32_t i = 0; i < 12; ++i) {
+          instructions.push_back(
+              TextureFetch(4 + i, i % 3, i, 1, (i & 1) ? "yxz" : "xyz"));
+        }
+        for (uint32_t i = 0; i < 4; ++i) {
+          instructions.push_back(
+              Vec(0 /* add */, 4 + i, "xyzw", R(4 + i), R(8 + i)).Encode());
+          instructions.push_back(
+              Vec(0 /* add */, 4 + i, "xyzw", R(4 + i), R(12 + i)).Encode());
+        }
+        assembler.Exec(instructions);
+        std::vector<Ins> cube_instructions;
+        cube_instructions.push_back(TextureFetch(8, 0, 12, 3));
+        cube_instructions.push_back(TextureFetch(9, 0, 13, 3));
+        cube_instructions.push_back(
+            Vec(0 /* add */, 6, "xyzw", R(6), R(8)).Encode());
+        cube_instructions.push_back(
+            Vec(0 /* add */, 7, "xyzw", R(7), R(9)).Encode());
+        assembler.Exec(cube_instructions);
+        assembler.Exec(std::vector<Alu>{Export(0, R(4)), Export(1, R(5)),
+                                        Export(2, R(6)), Export(3, R(7))});
+      },
+      [](Environment& environment) {
+        SetSigns(environment, 5, 0x55);
+        SetSigns(environment, 10, 0xAA);
+      }));
 }
 
 // -----------------------------------------------------------------------------

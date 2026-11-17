@@ -13,7 +13,7 @@
 // render target path, and its texture fetch is ProcessTextureFetchInstruction,
 // with these differences, each of which keeps a shader or a draw from it
 // (VulkanPipelineCache::GetProgramPixelRefusal) unless noted:
-//   - no 1D, 3D or stacked textures, and at most six 2D and two cube
+//   - no 1D, 3D or stacked textures, and at most twelve 2D and two cube
 //     textures (a texture fetched with two different sets of filters counts
 //     twice);
 //   - no getBCF, getCompTexLOD, getGradients, getWeights;
@@ -36,9 +36,9 @@ layout(std140, set = 1, binding = 4) uniform xe_up_fetch_constants_block {
   uvec4 xe_up_fetch_constants[48];
 };
 
-// The slots (gpu/ucode_program.h): six 2D textures (guest 1D and 2D textures
-// are 2D array views on the host) and two cube textures, each as unsigned and
-// as signed data, then a sampler for each slot.
+// The slots (gpu/ucode_program.h): twelve 2D textures (guest 1D and 2D
+// textures are 2D array views on the host) and two cube textures, each as
+// unsigned and as signed data, then a sampler for each slot.
 layout(set = 3, binding = 0) uniform texture2DArray xe_up_texture_0_u;
 layout(set = 3, binding = 1) uniform texture2DArray xe_up_texture_0_s;
 layout(set = 3, binding = 2) uniform texture2DArray xe_up_texture_1_u;
@@ -51,18 +51,36 @@ layout(set = 3, binding = 8) uniform texture2DArray xe_up_texture_4_u;
 layout(set = 3, binding = 9) uniform texture2DArray xe_up_texture_4_s;
 layout(set = 3, binding = 10) uniform texture2DArray xe_up_texture_5_u;
 layout(set = 3, binding = 11) uniform texture2DArray xe_up_texture_5_s;
-layout(set = 3, binding = 12) uniform textureCube xe_up_texture_6_u;
-layout(set = 3, binding = 13) uniform textureCube xe_up_texture_6_s;
-layout(set = 3, binding = 14) uniform textureCube xe_up_texture_7_u;
-layout(set = 3, binding = 15) uniform textureCube xe_up_texture_7_s;
-layout(set = 3, binding = 16) uniform sampler xe_up_sampler_0;
-layout(set = 3, binding = 17) uniform sampler xe_up_sampler_1;
-layout(set = 3, binding = 18) uniform sampler xe_up_sampler_2;
-layout(set = 3, binding = 19) uniform sampler xe_up_sampler_3;
-layout(set = 3, binding = 20) uniform sampler xe_up_sampler_4;
-layout(set = 3, binding = 21) uniform sampler xe_up_sampler_5;
-layout(set = 3, binding = 22) uniform sampler xe_up_sampler_6;
-layout(set = 3, binding = 23) uniform sampler xe_up_sampler_7;
+layout(set = 3, binding = 12) uniform texture2DArray xe_up_texture_6_u;
+layout(set = 3, binding = 13) uniform texture2DArray xe_up_texture_6_s;
+layout(set = 3, binding = 14) uniform texture2DArray xe_up_texture_7_u;
+layout(set = 3, binding = 15) uniform texture2DArray xe_up_texture_7_s;
+layout(set = 3, binding = 16) uniform texture2DArray xe_up_texture_8_u;
+layout(set = 3, binding = 17) uniform texture2DArray xe_up_texture_8_s;
+layout(set = 3, binding = 18) uniform texture2DArray xe_up_texture_9_u;
+layout(set = 3, binding = 19) uniform texture2DArray xe_up_texture_9_s;
+layout(set = 3, binding = 20) uniform texture2DArray xe_up_texture_10_u;
+layout(set = 3, binding = 21) uniform texture2DArray xe_up_texture_10_s;
+layout(set = 3, binding = 22) uniform texture2DArray xe_up_texture_11_u;
+layout(set = 3, binding = 23) uniform texture2DArray xe_up_texture_11_s;
+layout(set = 3, binding = 24) uniform textureCube xe_up_texture_12_u;
+layout(set = 3, binding = 25) uniform textureCube xe_up_texture_12_s;
+layout(set = 3, binding = 26) uniform textureCube xe_up_texture_13_u;
+layout(set = 3, binding = 27) uniform textureCube xe_up_texture_13_s;
+layout(set = 3, binding = 28) uniform sampler xe_up_sampler_0;
+layout(set = 3, binding = 29) uniform sampler xe_up_sampler_1;
+layout(set = 3, binding = 30) uniform sampler xe_up_sampler_2;
+layout(set = 3, binding = 31) uniform sampler xe_up_sampler_3;
+layout(set = 3, binding = 32) uniform sampler xe_up_sampler_4;
+layout(set = 3, binding = 33) uniform sampler xe_up_sampler_5;
+layout(set = 3, binding = 34) uniform sampler xe_up_sampler_6;
+layout(set = 3, binding = 35) uniform sampler xe_up_sampler_7;
+layout(set = 3, binding = 36) uniform sampler xe_up_sampler_8;
+layout(set = 3, binding = 37) uniform sampler xe_up_sampler_9;
+layout(set = 3, binding = 38) uniform sampler xe_up_sampler_10;
+layout(set = 3, binding = 39) uniform sampler xe_up_sampler_11;
+layout(set = 3, binding = 40) uniform sampler xe_up_sampler_12;
+layout(set = 3, binding = 41) uniform sampler xe_up_sampler_13;
 
 #define XE_UP_FETCH_TEXTURE_SLOT_SHIFT 4u
 #define XE_UP_FETCH_TEXTURE_USED_SHIFT 8u
@@ -207,16 +225,34 @@ vec3 XeUpLinearToPWLGamma(vec3 linear) {
 vec4 XeUpSample(uint slot, bool is_signed, uint mode, vec3 coordinates,
                 vec3 gradients_h, vec3 gradients_v, float lod) {
   switch (slot) {
-    XE_UP_SAMPLE_2D(0u, xe_up_texture_0_u, xe_up_texture_0_s, xe_up_sampler_0)
-    XE_UP_SAMPLE_2D(1u, xe_up_texture_1_u, xe_up_texture_1_s, xe_up_sampler_1)
-    XE_UP_SAMPLE_2D(2u, xe_up_texture_2_u, xe_up_texture_2_s, xe_up_sampler_2)
-    XE_UP_SAMPLE_2D(3u, xe_up_texture_3_u, xe_up_texture_3_s, xe_up_sampler_3)
-    XE_UP_SAMPLE_2D(4u, xe_up_texture_4_u, xe_up_texture_4_s, xe_up_sampler_4)
-    XE_UP_SAMPLE_2D(5u, xe_up_texture_5_u, xe_up_texture_5_s, xe_up_sampler_5)
-    XE_UP_SAMPLE_CUBE(6u, xe_up_texture_6_u, xe_up_texture_6_s,
-                      xe_up_sampler_6)
-    XE_UP_SAMPLE_CUBE(7u, xe_up_texture_7_u, xe_up_texture_7_s,
-                      xe_up_sampler_7)
+    XE_UP_SAMPLE_2D(0u, xe_up_texture_0_u, xe_up_texture_0_s,
+        xe_up_sampler_0)
+    XE_UP_SAMPLE_2D(1u, xe_up_texture_1_u, xe_up_texture_1_s,
+        xe_up_sampler_1)
+    XE_UP_SAMPLE_2D(2u, xe_up_texture_2_u, xe_up_texture_2_s,
+        xe_up_sampler_2)
+    XE_UP_SAMPLE_2D(3u, xe_up_texture_3_u, xe_up_texture_3_s,
+        xe_up_sampler_3)
+    XE_UP_SAMPLE_2D(4u, xe_up_texture_4_u, xe_up_texture_4_s,
+        xe_up_sampler_4)
+    XE_UP_SAMPLE_2D(5u, xe_up_texture_5_u, xe_up_texture_5_s,
+        xe_up_sampler_5)
+    XE_UP_SAMPLE_2D(6u, xe_up_texture_6_u, xe_up_texture_6_s,
+        xe_up_sampler_6)
+    XE_UP_SAMPLE_2D(7u, xe_up_texture_7_u, xe_up_texture_7_s,
+        xe_up_sampler_7)
+    XE_UP_SAMPLE_2D(8u, xe_up_texture_8_u, xe_up_texture_8_s,
+        xe_up_sampler_8)
+    XE_UP_SAMPLE_2D(9u, xe_up_texture_9_u, xe_up_texture_9_s,
+        xe_up_sampler_9)
+    XE_UP_SAMPLE_2D(10u, xe_up_texture_10_u, xe_up_texture_10_s,
+        xe_up_sampler_10)
+    XE_UP_SAMPLE_2D(11u, xe_up_texture_11_u, xe_up_texture_11_s,
+        xe_up_sampler_11)
+    XE_UP_SAMPLE_CUBE(12u, xe_up_texture_12_u, xe_up_texture_12_s,
+        xe_up_sampler_12)
+    XE_UP_SAMPLE_CUBE(13u, xe_up_texture_13_u, xe_up_texture_13_s,
+        xe_up_sampler_13)
   }
   return vec4(0.0);
 }
@@ -225,7 +261,7 @@ void XeUpTextureFetch(uvec4 ins) {
   uint info = ins.w;
   uint slot = (info >> XE_UP_FETCH_TEXTURE_SLOT_SHIFT) & 15u;
   uint used = (info >> XE_UP_FETCH_TEXTURE_USED_SHIFT) & 15u;
-  if (slot >= 8u || used == 0u) {
+  if (slot >= 14u || used == 0u) {
     XeUpStoreFetchResult(ins, vec4(0.0));
     return;
   }

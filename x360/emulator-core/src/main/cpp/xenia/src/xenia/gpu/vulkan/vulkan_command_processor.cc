@@ -4190,9 +4190,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // on this thread.
         // hakuX-Boosted: shader_ahead translates vertex shaders before their
         // first draw, which must not cost that draw the interpreter.
+        // hakuX-Boosted: and always with vulkan_standin_precompile, where
+        // the interpreter's placeholder costs this thread nothing and one
+        // from the translated shader is not made at all.
         (!vertex_shader_translation->is_translated() ||
          cvars::vulkan_placeholder_interpreter_translated_vs ||
-         cvars::shader_ahead) &&
+         cvars::shader_ahead ||
+         pipeline_cache_->IsStandInPrecompileActive()) &&
         !wait_for_real_pipeline &&
         device_properties.fullDrawIndexUint32 &&
         SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
@@ -4242,9 +4246,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // compiles in the background and the submission waits for it.
     // hakuX-Boosted: and a draw that is going to wait for its real pipeline
     // translates here, so that its bindings are known when it is recorded.
+    // hakuX-Boosted: not for a placeholder with vulkan_standin_precompile:
+    // none is made from the translated vertex shader there, so translating
+    // here would only cost this thread the translation.
+    const bool standin_precompile =
+        pipeline_cache_->IsStandInPrecompileActive();
     bool translate_here =
         !async_available ||
-        (no_placeholder && !cvars::async_shader_skip_draws) ||
+        (no_placeholder && !cvars::async_shader_skip_draws &&
+         !standin_precompile) ||
         (!cvars::vulkan_placeholder_pipelines &&
          cvars::async_shader_translate_on_draw) ||
         wait_for_real_pipeline;
@@ -4255,7 +4265,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
     drop_until_ready = cvars::vulkan_placeholder_pipelines && no_placeholder &&
-                       cvars::async_shader_skip_draws &&
+                       (cvars::async_shader_skip_draws || standin_precompile) &&
                        !wait_for_real_pipeline;
 
     // Obtain the samplers. Note that the bindings don't depend on the shader
@@ -4467,7 +4477,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     if (vertex_shader_translation->is_translated() &&
         !cvars::vulkan_placeholder_interpreter_translated_vs &&
-        !cvars::shader_ahead) {
+        !cvars::shader_ahead &&
+        !pipeline_cache_->IsStandInPrecompileActive()) {
       reasons |= VulkanPipelineCache::kSkipVertexShaderTranslated;
     }
     if (!device_properties.fullDrawIndexUint32) {
@@ -4654,7 +4665,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         pipeline->placeholder_pipeline_layout.load(std::memory_order_acquire);
     if (!stand_in_layout || !pixel_shader) {
       stand_in = VulkanPipelineCache::StandIn();
-      stand_in_layout = nullptr;
+      // hakuX-Boosted: a shared stand-in pipeline (vulkan_standin_precompile)
+      // was created with its own layout whatever its pixel stage, and its
+      // draws bind their descriptor sets with that one.
+      if (!pipeline->placeholder_shared.load(std::memory_order_acquire)) {
+        stand_in_layout = nullptr;
+      }
     }
   }
   const bool stand_in_used =
@@ -8722,7 +8738,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   // could otherwise happen if the real shaders finished translating mid-draw).
   // The no-op placeholder PS never samples; the interpreter VS never samples.
   // (Both flags stay false when vulkan_placeholder_pipelines is off.)
-  // hakuX-Boosted: the pixel interpreter's sixteen textures and eight
+  // hakuX-Boosted: the pixel interpreter's textures (two for each slot) and
   // samplers, which the caller put in program_pixel_texture_bindings_ and
   // current_samplers_pixel_.
   const std::vector<VulkanShader::TextureBinding>* program_pixel_textures =
