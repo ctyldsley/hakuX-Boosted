@@ -1346,8 +1346,13 @@ Outside the core: `boosted/bench/core/bench_xlat.cc` (the counting mode),
   Its row "overhaul 13: 8 + frame chain" has calls at 2.37 host
   instructions per guest instruction, the figure counted here.
 
-- The third round (section 1.16), pushed after this text was written; the
-  run's result is in the last lines of this section once known. In the
+- The third round (section 1.16), commit `eb0c0cb`: Actions run 145
+  green, all three jobs, the translator tests job with every line of the
+  matrix, the third round's among them (2 hours 8 minutes for that job)
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43990356980).
+  Bench run 24 on the same commit: green
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43990356967).
+  In the
   container before the push: the new lines of `ci/matrix.txt` through
   `ci/run-matrix.sh`, all passing ("overhaul 18, shared 4" over
   everything: 141,961 of 141,961; six shared registers alone and
