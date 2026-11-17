@@ -5,7 +5,6 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
-import android.os.Process
 import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -18,6 +17,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import xendroid.compose.core.EmuProcessLink
+import xendroid.compose.core.EmuShutdown
 import xendroid.compose.core.EmulatorRuntime
 import xendroid.compose.core.FrontendLaunch
 import xendroid.compose.core.EmulatorSession
@@ -120,6 +120,13 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val pauseOnFocusLost = Runnable { if (session.booted) session.pause() }
+    // hakuX-Boosted: the soft pause leaves busy-waiting guest threads spinning, so a game
+    // left in the background is ended after a grace period (EmuShutdown,
+    // boosted/notes/emu-lifecycle.md). Posted at onStop, removed at onStart.
+    private val endInBackground = Runnable {
+        endSession("stopped for ${EmuShutdown.BACKGROUND_GRACE_MS / 1000} s", fromDestroy = false)
+    }
+    private var ending = false
 
     private val gamepad by lazy { GamepadController(applicationContext) }
     private val brightnessSampler = ScreenBrightnessSampler()
@@ -217,7 +224,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (hasFocus) {
             mainHandler.removeCallbacks(pauseOnFocusLost)
             enterImmersiveMode()
-            if (session.booted && !menuOpenState.value) session.resumeIfPaused()
+            if (session.booted && !menuOpenState.value && !ending) session.resumeIfPaused()
         } else {
             mainHandler.removeCallbacks(pauseOnFocusLost)
             mainHandler.postDelayed(pauseOnFocusLost, FOCUS_PAUSE_DEBOUNCE_MS)
@@ -462,7 +469,8 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                             onEditControls = { openMenuPage(MenuPage.EDIT_CONTROLS) },
                             onSettings = { openMenuPage(MenuPage.SETTINGS) },
                             onResume = { closeMenuAndResume() },
-                            onQuit = { finish() },
+                            // hakuX-Boosted: quit ends the core and the process at once.
+                            onQuit = { quitGame() },
                             modifier = Modifier.fillMaxSize(),
                         )
                         MenuPage.SETTINGS -> InGameSettingsPanel(
@@ -551,7 +559,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
             // Post-rotation/background re-create: re-attach and resume, but NEVER boot again.
             // Stay paused if the in-game menu is open.
             session.attachSurface(holder.surface)
-            if (!menuOpenState.value) session.resumeIfPaused()
+            if (!menuOpenState.value && !ending) session.resumeIfPaused()
         }
     }
 
@@ -582,6 +590,13 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         mainHandler.removeCallbacks(pauseOnFocusLost)
         if (session.booted) session.pause()
         brightnessSampler.stop()
+        // hakuX-Boosted: the pause above parks audio and the GPU but not a guest thread that
+        // busy-waits, which then spins a core with nothing drawn. Coming back within the grace
+        // period resumes the game (onStart); after it the session is ended cleanly.
+        mainHandler.removeCallbacks(endInBackground)
+        if (!isFinishing && !ending) {
+            mainHandler.postDelayed(endInBackground, EmuShutdown.BACKGROUND_GRACE_MS)
+        }
         // An orphaned core (main process died while we were on screen) hard-kills here, so it
         // does so from a paused, quiescent state.
         EmuProcessLink.setEmuForeground(false)
@@ -589,27 +604,58 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onStart() {
         super.onStart()
+        // hakuX-Boosted: back within the grace period: the game is kept.
+        mainHandler.removeCallbacks(endInBackground)
         EmuProcessLink.setEmuForeground(true)
         if (overlayWantsBrightness) surfaceView?.let { brightnessSampler.start(it) }
         // resumeIfPaused (not bare resume) is idempotent: surfaceCreated already resumes on
         // swapchain-recreate, so this is a no-op there; onStart additionally covers the pure
         // screen-sleep case where the surface was NOT destroyed. Stay paused if the menu is open.
-        if (session.booted && !menuOpenState.value) session.resumeIfPaused()
+        if (session.booted && !menuOpenState.value && !ending) session.resumeIfPaused()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        // hakuX-Boosted: finished (quit, a failed boot), the task removed from recents, or
+        // destroyed by the system: the same clean shutdown as the other ways out, which ends
+        // the process (it used to kill it here directly, with no watchdog).
+        endSession("activity destroyed", fromDestroy = true)
+    }
+
+    /** hakuX-Boosted: the in-game menu's Quit. */
+    private fun quitGame() = endSession("quit from the in-game menu", fromDestroy = false)
+
+    /**
+     * hakuX-Boosted: ends the core and the :emu process (boosted/notes/emu-lifecycle.md).
+     * Idempotent. In order: a watchdog that kills the process if this does not finish within
+     * EmuShutdown.WATCHDOG_MS; the pending guest prompts answered so none holds a guest
+     * thread; the core paused, so audio stops and the GPU is quiescent (a no-op when onStop
+     * already paused it); the activity finished, so the system does not bring it back in a
+     * new process; then, off the main thread, the app's config writes still in flight waited
+     * for (bounded) and the process killed with SIGKILL. killProcess skips the C++ atexit
+     * static-destructor path that System.exit(0) ran, which can deadlock joining a paused
+     * audio worker and wedge :emu instead of closing it.
+     */
+    private fun endSession(reason: String, fromDestroy: Boolean) {
+        if (ending) return
+        ending = true
+        Log.i(TAG, "ending the session: $reason")
+        EmuShutdown.startWatchdog(reason)
+        mainHandler.removeCallbacks(endInBackground)
+        mainHandler.removeCallbacks(pauseOnFocusLost)
         // A pending prompt must not hold a dispatch thread through teardown.
         keyboardRequestState.value = null
-        session.keyboardCancelAll()
         discRequestState.value = null
-        session.discCancelAll()
         messageBoxRequestState.value = null
-        session.messageBoxCancelAll()
-        // Hard-kill via SIGKILL: killProcess skips the C++ atexit static-destructor path
-        // that System.exit(0) ran, which can deadlock joining a paused audio worker and
-        // wedge :emu instead of closing it.
-        Process.killProcess(Process.myPid())
+        runCatching {
+            session.keyboardCancelAll()
+            session.discCancelAll()
+            session.messageBoxCancelAll()
+        }.onFailure { Log.w(TAG, "cancelling the guest prompts failed", it) }
+        runCatching { if (session.booted) session.pause() }
+            .onFailure { Log.w(TAG, "pausing the core at shutdown failed", it) }
+        if (!fromDestroy && !isFinishing) finish()
+        EmuShutdown.exitAfterWrites(reason)
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -790,7 +836,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
                 MenuPage.MAIN -> PanelNav(PAUSE_OPTION_COUNT,
                     { i ->
                         when (i) {
-                            PAUSE_OPTION_QUIT -> finish()
+                            PAUSE_OPTION_QUIT -> quitGame()
                             PAUSE_OPTION_TOUCH_OVERLAY -> toggleTouchOverlay()
                             PAUSE_OPTION_EDIT_CONTROLS -> openMenuPage(MenuPage.EDIT_CONTROLS)
                             PAUSE_OPTION_SETTINGS -> openMenuPage(MenuPage.SETTINGS)
@@ -842,18 +888,21 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         showTouchOverlay.value = next
         session.setShowTouchOverlay(next)
         lifecycleScope.launch(Dispatchers.IO) {
-            runCatching {
-                val handle = ConfigStore(applicationContext).openLive()
-                handle.putBool("HID", "show_touch_overlay", next)
-                handle.closeFile()
-            }.onFailure { Log.w(TAG, "persisting show_touch_overlay failed", it) }
+            // hakuX-Boosted: tracked, so a quit straight after waits for the write.
+            EmuShutdown.tracked {
+                runCatching {
+                    val handle = ConfigStore(applicationContext).openLive()
+                    handle.putBool("HID", "show_touch_overlay", next)
+                    handle.closeFile()
+                }.onFailure { Log.w(TAG, "persisting show_touch_overlay failed", it) }
+            }
         }
     }
 
     private fun closeMenuAndResume() {
         menuOpenState.value = false
         menuPageState.value = MenuPage.MAIN
-        if (session.booted) session.resumeIfPaused()
+        if (session.booted && !ending) session.resumeIfPaused()
     }
 
     private fun isPanelKey(keyCode: Int): Boolean = when (keyCode) {
