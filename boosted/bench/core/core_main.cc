@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 
 #include "bench.h"
 
@@ -80,6 +81,13 @@ extern "C" __attribute__((visibility("default"))) int bench_core_main(
   int launch_argc = int(launch.size());
   char** launch_ptr = launch_argv.data();
   cvar::ParseLaunchArguments(launch_argc, launch_ptr, "", {});
+
+  // BENCH_CORE_LOG=1: the core's own log, to the file its log_file setting
+  // names (--set log_file=...). For looking at what a pass or the scheduler
+  // says about a benchmark; not used by the measured runs.
+  if (std::getenv("BENCH_CORE_LOG")) {
+    xe::InitializeLogging("bench");
+  }
 
   int status;
   if (suite == "xlat") {

@@ -170,6 +170,142 @@ uint64_t BlockGuestAddress(const Block* block) {
   return 0;
 }
 
+// hakuX-Boosted: is every pass of the loop the same as the last unless
+// memory changes? ("Stateless": the second way a loop is known to be a
+// wait, beside holding a pause.) True when no register the loop writes is
+// written with a value that depends on what the loop itself left in a
+// register on an earlier pass: every value stored to the context comes from
+// constants, from loads of guest memory, from registers the loop never
+// writes, or from registers it has already written, in this pass, with such
+// a value. A scan or a search advances a pointer or an index from its own
+// last value and fails this; so does a retry counter. What a loop that
+// passes it computes can only differ from pass to pass if the memory it
+// loads differs: it is waiting for memory to change, or it never ends.
+//
+// The check is deliberately short-sighted. What a block knows of the
+// registers written so far is carried only into a block whose single way
+// in is the block before it in the loop; any other join starts knowing
+// nothing, and an unknown is taken as state. Wrong answers are then all on
+// the side of "not stateless", which only leaves a loop as it was.
+struct ContextRange {
+  uint64_t begin;
+  uint64_t end;
+};
+
+bool Overlaps(const std::vector<ContextRange>& ranges, uint64_t begin,
+              uint64_t end) {
+  for (const ContextRange& r : ranges) {
+    if (begin < r.end && r.begin < end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsStatelessLoop(const std::vector<Block*>& blocks, size_t head,
+                     size_t tail, const Instr* back_branch) {
+  // Every stretch of the context the loop writes.
+  std::vector<ContextRange> written;
+  for (size_t b = head; b <= tail; ++b) {
+    for (const Instr* instr = blocks[b]->instr_head; instr;
+         instr = instr->next) {
+      if (b == tail && instr == back_branch) {
+        break;
+      }
+      if (instr->opcode == &OPCODE_STORE_CONTEXT_info) {
+        const uint64_t at = instr->src1.offset;
+        written.push_back(
+            {at, at + GetTypeSize(instr->src2.value->type)});
+      }
+    }
+  }
+  std::unordered_set<const Value*> clean;
+  // Per block, the written stretches that hold a clean value at its end.
+  std::vector<std::vector<ContextRange>> clean_out(tail - head + 1);
+  auto value_clean = [&clean](const Value* value) {
+    return value && (value->IsConstant() || clean.count(value));
+  };
+  for (size_t b = head; b <= tail; ++b) {
+    Block* block = blocks[b];
+    std::vector<ContextRange> known;
+    if (b != head) {
+      const Edge* in = block->incoming_edge_head;
+      if (in && !in->incoming_next && in->src == blocks[b - 1]) {
+        known = clean_out[b - 1 - head];
+      }
+    }
+    for (const Instr* instr = block->instr_head; instr; instr = instr->next) {
+      if (b == tail && instr == back_branch) {
+        break;
+      }
+      const OpcodeInfo* op = instr->opcode;
+      if (op == &OPCODE_LOAD_CONTEXT_info) {
+        const uint64_t at = instr->src1.offset;
+        const uint64_t end = at + GetTypeSize(instr->dest->type);
+        bool ok = !Overlaps(written, at, end);
+        if (!ok) {
+          // Written by the loop: clean only if this pass has already
+          // written exactly this stretch with a clean value.
+          for (const ContextRange& r : known) {
+            if (r.begin == at && r.end == end) {
+              ok = true;
+              break;
+            }
+          }
+        }
+        if (ok) {
+          clean.insert(instr->dest);
+        }
+        continue;
+      }
+      if (op == &OPCODE_STORE_CONTEXT_info) {
+        const uint64_t at = instr->src1.offset;
+        const uint64_t end = at + GetTypeSize(instr->src2.value->type);
+        if (!value_clean(instr->src2.value)) {
+          return false;
+        }
+        // Whatever was known of an overlapping stretch is replaced.
+        known.erase(std::remove_if(known.begin(), known.end(),
+                                   [at, end](const ContextRange& r) {
+                                     return at < r.end && r.begin < end;
+                                   }),
+                    known.end());
+        known.push_back({at, end});
+        continue;
+      }
+      if (op == &OPCODE_LOAD_info || op == &OPCODE_LOAD_OFFSET_info ||
+          op == &OPCODE_RESERVED_LOAD_info) {
+        // What memory holds is what the loop waits for. (The address is a
+        // register value; a loop that walks memory has changed a register
+        // from its own last value and has already failed above.)
+        if (instr->dest) {
+          clean.insert(instr->dest);
+        }
+        continue;
+      }
+      if (instr->dest) {
+        // A data operation: clean if everything it reads is.
+        const uint32_t sig = op->signature;
+        bool ok = true;
+        if (GET_OPCODE_SIG_TYPE_SRC1(sig) == OPCODE_SIG_TYPE_V) {
+          ok = ok && value_clean(instr->src1.value);
+        }
+        if (GET_OPCODE_SIG_TYPE_SRC2(sig) == OPCODE_SIG_TYPE_V) {
+          ok = ok && value_clean(instr->src2.value);
+        }
+        if (GET_OPCODE_SIG_TYPE_SRC3(sig) == OPCODE_SIG_TYPE_V) {
+          ok = ok && value_clean(instr->src3.value);
+        }
+        if (ok) {
+          clean.insert(instr->dest);
+        }
+      }
+    }
+    clean_out[b - head] = std::move(known);
+  }
+  return true;
+}
+
 struct RegionCandidate {
   size_t head;        // position of the loop's first block
   size_t tail;        // position of the block with the backward branch
@@ -186,8 +322,14 @@ void MemoryPollParkPass::MarkPausePollLoops(HIRBuilder* builder) {
     blocks.push_back(block);
   }
 
-  // Every backward or self branch names a candidate; of several to one
-  // block the last in layout order is kept, so the run covers the others.
+  // Every backward or self branch names a candidate of its own.
+  // hakuX-Boosted: they used to be merged per head block, keeping only the
+  // branch that comes last in layout order. A wait loop whose head is also
+  // the head of a larger loop ("wait; then work; and round again", which is
+  // how a worker's loop and the first bench shape are laid out) was then
+  // only ever judged as the larger loop, which calls and stores, and was
+  // refused. Each is now judged, the largest first, so a refused outer loop
+  // leaves the inner one to be taken.
   std::vector<RegionCandidate> candidates;
   for (size_t x = 0; x < blocks.size(); ++x) {
     for (Instr* instr = blocks[x]->instr_head; instr; instr = instr->next) {
@@ -203,20 +345,7 @@ void MemoryPollParkPass::MarkPausePollLoops(HIRBuilder* builder) {
       if (x - h + 1 > kMaxRegionBlocks) {
         continue;
       }
-      bool merged = false;
-      for (auto& candidate : candidates) {
-        if (candidate.head == h) {
-          // Later in layout order (x only grows, and so do the
-          // instructions of one block).
-          candidate.tail = x;
-          candidate.back_branch = instr;
-          merged = true;
-          break;
-        }
-      }
-      if (!merged) {
-        candidates.push_back({h, x, instr});
-      }
+      candidates.push_back({h, x, instr});
     }
   }
   if (candidates.empty()) {
@@ -310,7 +439,14 @@ void MemoryPollParkPass::MarkPausePollLoops(HIRBuilder* builder) {
             op == &OPCODE_STORE_CONTEXT_info) {
           continue;
         }
-        if (op == &OPCODE_LOAD_info || op == &OPCODE_LOAD_OFFSET_info) {
+        // hakuX-Boosted: a reserved load (lwarx) reads like any load. A
+        // spin lock's wait is "lwarx, compare, branch back while held"; the
+        // conditional store that takes the lock is outside such a loop (a
+        // loop holding it is refused below as before), and every pass
+        // starts with its own lwarx, so a park between two passes loses no
+        // reservation the guest relies on.
+        if (op == &OPCODE_LOAD_info || op == &OPCODE_LOAD_OFFSET_info ||
+            op == &OPCODE_RESERVED_LOAD_info) {
           ++block_loads;
           continue;
         }
@@ -349,19 +485,38 @@ void MemoryPollParkPass::MarkPausePollLoops(HIRBuilder* builder) {
     if (!ok) {
       continue;
     }
-    if (!pause_count) {
-      reject("it does not pause", nullptr);
-      continue;
-    }
     if (!load_count) {
       reject("it loads no guest memory", nullptr);
       continue;
     }
+    // hakuX-Boosted: a loop that holds no pause is still a wait when every
+    // pass of it is the same unless memory changes (IsStatelessLoop):
+    // "while (!flag) {}" with no hint in it.
+    const bool stateless = IsStatelessLoop(blocks, candidate.head,
+                                           candidate.tail,
+                                           candidate.back_branch);
+    if (!pause_count && !stateless) {
+      reject("it does not pause, and a register it writes depends on an "
+             "earlier pass",
+             nullptr);
+      continue;
+    }
 
-    Instr* site = builder->SpinBackoff(1);
-    site->flags = kSpinBackoffPollSite;
-    site->src1.offset = (guest_address << 32) | 1;
-    site->MoveBefore(candidate.back_branch);
+    // hakuX-Boosted: one site in front of every branch of the loop that
+    // goes back to its head, not only the last in layout order. A pass
+    // takes exactly one of them, so it still visits exactly one site; with
+    // the site at the last branch only, a loop whose waiting path goes back
+    // from an earlier block (the bench's spin lock: the wait returns to the
+    // head before the block that takes the lock) never reached it.
+    for (const RegionCandidate& other : candidates) {
+      if (other.head != candidate.head || other.tail > candidate.tail) {
+        continue;
+      }
+      Instr* site = builder->SpinBackoff(1);
+      site->flags = kSpinBackoffPollSite;
+      site->src1.offset = (guest_address << 32) | 1;
+      site->MoveBefore(other.back_branch);
+    }
     for (size_t b = candidate.head; b <= candidate.tail; ++b) {
       taken[b] = true;
     }
@@ -373,9 +528,10 @@ void MemoryPollParkPass::MarkPausePollLoops(HIRBuilder* builder) {
     }
     XELOGI(
         "MemoryPollPark: pause-and-poll loop at guest {:08X}: {} block(s), "
-        "{} load(s), {} pause(s)",
+        "{} load(s), {} pause(s){}",
         guest_address, candidate.tail - candidate.head + 1, load_count,
-        pause_count);
+        pause_count,
+        stateless ? ", every pass the same unless memory changes" : "");
   }
 }
 

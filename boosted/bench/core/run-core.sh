@@ -38,14 +38,31 @@ lean="guest_scheduler_lean_yield=true"
 park="guest_scheduler_park_yield_spinners=true"
 slot="host_thread_state_slot=true"
 skew="guest_scheduler_skew_bound_us=2000 guest_scheduler_skew_cap_multiple=100"
-run bench_core sched "defaults"
+# BENCH_BUSY_WAITS=1 adds the busy_wait_* runs (a thread that busy-waits
+# beside unrelated events; boosted/notes/park-rework.md) to a row. They are
+# many, so only the rows they are about get them.
+BENCH_BUSY_WAITS=1 run bench_core sched "defaults"
 run bench_core sched "lean_yield" $lean
 run bench_core sched "park_yield_spinners" $park
 run bench_core sched "host_thread_state_slot" $slot
 run bench_core sched "skew_bound_us=2000" $skew
 run bench_core sched "lean_yield + slot" $lean $slot
 run bench_core sched "all of the above" $lean $park $slot $skew
-run bench_core sched "park_waits" guest_scheduler_park_waits=true
+BENCH_BUSY_WAITS=1 run bench_core sched "park_waits" guest_scheduler_park_waits=true
+# claude/park-rework (boosted/notes/park-rework.md). The busy_wait_* rows are
+# what these are for: "defaults" is a busy wait left alone, "first gate" is
+# the park as first built (no park if any event happened since the last
+# look: what the phone ran on 2026-11-14), the next two are the adaptive
+# gate without and with the translator's poll sites. A tree without the
+# setting skips its row.
+waits="guest_scheduler_park_waits=true"
+BENCH_BUSY_WAITS=1 run bench_core sched "park_waits, first gate + poll sites" $waits \
+  guest_scheduler_park_wait_adaptive=false park_pause_poll_loops=true
+BENCH_BUSY_WAITS=1 run bench_core sched "park_waits + poll sites" $waits park_pause_poll_loops=true
+BENCH_BUSY_WAITS=1 run bench_core sched "park_waits + poll sites, max 500 us" $waits \
+  park_pause_poll_loops=true guest_scheduler_park_wait_max_us=500
+BENCH_BUSY_WAITS=1 run bench_core sched "park_waits + poll sites + skew bound" $waits \
+  park_pause_poll_loops=true $skew
 run bench_core sched "a64_thunk_fpcr_compare" a64_thunk_fpcr_compare=true
 run bench_core sched "a64_lean_extern_thunk" a64_lean_extern_thunk=true
 run bench_core_static sched "static TLS (not Android's)"

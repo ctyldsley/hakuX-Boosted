@@ -46,6 +46,11 @@ SECTION_TITLES = [
 METRIC_LABELS = {
     "ns_per_op": "ns per operation",
     "cores_busy": "cores busy (process CPU time over wall time)",
+    "unrelated_events_per_s": "unrelated events a second",
+    "wake_latency_us": "us from the flag made true to the waiter seeing it, median",
+    "wake_latency_us_p95": "the same, 95th percentile",
+    "wake_latency_us_worst": "the same, worst",
+    "waits_answered": "waits answered",
     "ns_per_guest_insn": "ns per guest instruction",
     "host_insn_per_guest_insn": "host instructions run per guest instruction",
     "host_code_insn_per_guest_insn":

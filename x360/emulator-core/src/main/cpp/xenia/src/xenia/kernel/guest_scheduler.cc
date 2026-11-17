@@ -153,6 +153,24 @@ DEFINE_bool(
     "guest_scheduler_lean_yield and replaces "
     "guest_scheduler_park_yield_spinners and guest_scheduler_park_poll_loops.",
     "Kernel");
+// hakuX-Boosted: the first device run of guest_scheduler_park_waits (Fable
+// II, 2026-11-14) parked nothing: 131,782 looks, every one answered "an
+// event since the last look", beside 4.2 million events in 340 s. A title
+// sets events and leaves critical sections thousands of times a second
+// whatever its busy-waiting thread waits for, so "no event since the last
+// look" never holds. With this on an event no longer forbids the park. It
+// can only end one early, and how early is learnt per thread: see
+// TryWaitPark. Off is the gate as first built.
+DEFINE_bool(
+    guest_scheduler_park_wait_adaptive, true,
+    "With guest_scheduler_park_waits: a busy-waiting thread is parked "
+    "whether or not unrelated events are happening around it. An event ends "
+    "a park early only while that has proved worth it for the thread: each "
+    "early wake after which the thread is still waiting doubles the time "
+    "its next parks are closed to events (from 50 us up to the whole park), "
+    "and one after which the wait was over opens them again. False is the "
+    "first gate: no park at all if any event happened since the last look.",
+    "Kernel");
 DEFINE_uint32(
     guest_scheduler_park_wait_after_us, 200,
     "With guest_scheduler_park_waits: how long one burst of busy waiting "
@@ -273,6 +291,11 @@ static constexpr uint64_t kPollParkAfterUs = 500;
 // unbroken wait.
 static constexpr uint64_t kWaitParkFirstUs = 100;
 static constexpr uint64_t kWaitParkMinUs = 50;
+// hakuX-Boosted: adaptive gate: a park is the burst's age shifted right by
+// this (a quarter).
+static constexpr unsigned kWaitParkAgeShift = 2;
+// hakuX-Boosted: adaptive gate: yields a thread makes between two parks.
+static constexpr uint32_t kWaitPassesAfterPark = 4;
 static constexpr uint64_t kWaitArmWindowUs = 2000;
 static constexpr uint64_t kPollGapUs = 400;
 
@@ -576,6 +599,7 @@ void GuestScheduler::EnsureStarted() {
   // hakuX-Boosted: guest_scheduler_park_waits, read once, before any
   // dispatch thread exists. It needs the counter (0 = did not calibrate).
   park_waits_ = cvars::guest_scheduler_park_waits && ticks_per_us > 0.0;
+  park_wait_adaptive_ = cvars::guest_scheduler_park_wait_adaptive;
   lean_yield_ = park_waits_ || cvars::guest_scheduler_lean_yield ||
                 cvars::guest_scheduler_park_yield_spinners;
   if (park_waits_) {
@@ -596,9 +620,13 @@ void GuestScheduler::EnsureStarted() {
         std::max<uint64_t>(1, uint64_t(ticks_per_us * kPollGapUs));
     XELOGI(
         "GuestScheduler: busy waits are parked after {} us, for {} us at "
-        "first and {} us at most, and woken by events",
+        "first and {} us at most, and woken by events{}",
         uint32_t(cvars::guest_scheduler_park_wait_after_us), kWaitParkFirstUs,
-        max_us);
+        max_us,
+        park_wait_adaptive_
+            ? " while that proves worth it (adaptive gate)"
+            : " (first gate: no park if an event happened since the last "
+              "look)");
   }
   if (cvars::guest_scheduler_lean_yield ||
       cvars::guest_scheduler_park_yield_spinners ||
@@ -1066,6 +1094,7 @@ void GuestScheduler::RequeueForPriority(XThread* thread) {
 }
 
 bool GuestScheduler::ForgetThread(XThread* thread) {
+  WaitLearnRelease(thread);  // hakuX-Boosted: guest_scheduler_park_waits
   TimedLock lock(this);
   auto& links = thread->scheduler_links();
   // A thread that ever ran has a live fiber stack and one a dispatch thread
@@ -1653,6 +1682,12 @@ int GuestScheduler::TryEmptyYield(XThread* self, bool quantum_end) {
 // When. Once the burst is guest_scheduler_park_wait_after_us old. A wait
 // that is over sooner is never touched.
 //
+// (hakuX-Boosted, park rework: what follows under "For how long" and "No
+// event is slept through" is the first gate, kept behind
+// guest_scheduler_park_wait_adaptive = false. With the adaptive gate, the
+// default, park lengths, what events may do and what a waiter is owed are
+// as written above TryWaitPark.)
+//
 // For how long. Until the first of:
 // - an event that can end a busy wait (NoteWaitEvent: a kernel object
 //   signalled, a critical section left, another guest thread parking in a
@@ -1697,9 +1732,26 @@ bool GuestScheduler::NoteWaitSpin(XThread* self) {
     links.poll_site = 0;
     links.spin_burst_tick = 0;
   }
-  if (!prev || now - prev > 32 * yield_gap_ticks_ || !links.spin_burst_tick) {
+  // hakuX-Boosted: adaptive gate. Back from a park the thread is looked at
+  // again after kWaitPassesAfterPark yields, not 32 (TryWaitPark set the
+  // count so): the guest still runs its own test that many times between
+  // two parks, and a thread that does a few microseconds of work on each
+  // pass is not kept awake for 32 of them every time (bench run 17: such a
+  // thread stayed at a third of a core, 260 us awake for each park). The
+  // cadence that counts as spinning is the same per yield.
+  uint64_t passes = 32;
+  if (park_wait_adaptive_ && prev) {
+    WaitLearn* learn = WaitLearnOf(self);
+    if (learn && learn->short_look) {
+      learn->short_look = false;
+      passes = kWaitPassesAfterPark;
+    }
+  }
+  if (!prev || now - prev > passes * yield_gap_ticks_ ||
+      !links.spin_burst_tick) {
     // The first look of a burst (after a wait of the thread's own), or the
     // thread did something between its yields: a new burst.
+    WaitBurstEnded(self);
     links.spin_burst_tick = now;
     links.spin_park_shift = 0;
     links.wait_armed = false;
@@ -1709,6 +1761,185 @@ bool GuestScheduler::NoteWaitSpin(XThread* self) {
     return false;
   }
   return TryWaitPark(self, now, false);
+}
+
+// hakuX-Boosted: guest_scheduler_park_wait_adaptive, the gate.
+//
+// The first gate parked a thread only if no event had happened since its
+// last look. On a real title that is never: events come thousands of times
+// a second from threads that have nothing to do with the wait, and from the
+// waiting thread's own loop. So an event must not forbid the park. What an
+// event may still do is end a park early, and whether that is worth doing
+// is learnt for each thread from what follows the early wake:
+// - the thread comes back to park in the same burst: the event was not what
+//   it waits for (a futile wake). The time its parks are closed to events
+//   doubles: 50 us, 100, 200 ... until it is longer than any park, when
+//   events no longer wake the thread at all and cost it nothing;
+// - the burst ends (the thread goes on to work, or to a wait of its own):
+//   the wake was worth it, and parks open to events after 50 us again.
+// Every 32nd park the hold-off is halved once, so a thread whose events
+// have become worth waking for is found out.
+//
+// What a waiter is owed, and gets. Its own test runs again:
+// - at the latest when its park's deadline passes. A park lasts a quarter
+//   of the time the burst of waiting has lasted so far, no less than 100 us
+//   and no more than guest_scheduler_park_wait_max_us. So a wait is
+//   answered late by at most a quarter of its own length so far (100 us for
+//   the shortest), and never by more than the longest park;
+// - sooner, at the end of its hold-off, when an event came during the park
+//   or between the thread's last look and the park (the event sequence is
+//   sampled at each look and compared again under the lock as it parks);
+// - at once, when something becomes ready on its CPU that outranks it or a
+//   poke arrives: the dispatch thread is woken as for any blocked thread.
+// Nothing ever answers the test for the thread, so a wrong guess costs
+// time, bounded as above, and never changes what the guest computes.
+//
+// What unrelated events cost. Inside a hold-off that covers the whole park
+// an event is two loads and a store to a flag of the parked thread's CPU:
+// no lock, no wake of the dispatch thread. Inside a shorter hold-off the
+// first event wakes the dispatch thread once, to move the park's deadline
+// to the hold-off's end. (The first gate's wake path took the scheduler
+// lock and woke the dispatch thread for every event, which with thousands
+// of events a second would have kept a parked thread's host thread awake.)
+GuestScheduler::WaitLearn* GuestScheduler::WaitLearnOf(XThread* self) {
+  const size_t start =
+      (reinterpret_cast<uintptr_t>(self) >> 6) % kWaitLearnSlots;
+  for (size_t i = 0; i < kWaitLearnSlots; ++i) {
+    WaitLearn& slot = wait_learn_[(start + i) % kWaitLearnSlots];
+    XThread* owner = slot.owner.load(std::memory_order_relaxed);
+    if (owner == self) {
+      return &slot;
+    }
+    if (!owner) {
+      XThread* expected = nullptr;
+      if (slot.owner.compare_exchange_strong(expected, self)) {
+        return &slot;
+      }
+      if (expected == self) {
+        return &slot;
+      }
+    }
+  }
+  // More busy-waiting threads than slots: this one is parked without
+  // learning (events end its parks after the shortest park, always).
+  return nullptr;
+}
+
+void GuestScheduler::WaitLearnRelease(XThread* thread) {
+  if (!park_waits_) {
+    return;
+  }
+  for (WaitLearn& slot : wait_learn_) {
+    if (slot.owner.load(std::memory_order_relaxed) != thread) {
+      continue;
+    }
+    if (slot.polled.exchange(nullptr)) {
+      wait_polled_count_.fetch_sub(1);
+    }
+    slot.holdoff_shift = 0;
+    slot.woke_early = false;
+    slot.parks_since_probe = 0;
+    slot.polled_wake.store(false);
+    slot.owner.store(nullptr);
+    return;
+  }
+}
+
+void GuestScheduler::WaitBurstEnded(XThread* self) {
+  if (!park_wait_adaptive_) {
+    return;
+  }
+  WaitLearn* learn = WaitLearnOf(self);
+  if (!learn) {
+    return;
+  }
+  if (learn->woke_early) {
+    learn->woke_early = false;
+    learn->holdoff_shift = 0;
+    stats_.wait_wakes_useful.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (learn->polled.load(std::memory_order_relaxed)) {
+    learn->polled.store(nullptr);
+    wait_polled_count_.fetch_sub(1);
+  }
+}
+
+// hakuX-Boosted: see the header.
+void GuestScheduler::NoteEmptyWait(const XObject* object) {
+  if (!park_waits_) {
+    return;
+  }
+  XThread* self = XThread::GetCurrentFiberThread();
+  if (!self) {
+    return;
+  }
+  auto& links = self->scheduler_links();
+  if (!links.running || links.cpu < 0 || links.cpu >= kMaxCpus) {
+    return;
+  }
+  if (park_wait_adaptive_) {
+    if (WaitLearn* learn = WaitLearnOf(self)) {
+      const XObject* before = learn->polled.load(std::memory_order_relaxed);
+      if (before != object) {
+        learn->polled.store(object);
+        if (!before) {
+          wait_polled_count_.fetch_add(1);
+        }
+      }
+    }
+  }
+  NoteWaitSpin(self);
+}
+
+// A signal of |object|: any parked busy waiter that polls it is due now.
+// Only reached when some thread has a polled object and some thread is
+// parked; the first look takes no lock.
+void GuestScheduler::WakePolledWaits(const XObject* object) {
+  bool any = false;
+  for (const WaitLearn& slot : wait_learn_) {
+    if (slot.polled.load(std::memory_order_relaxed) == object) {
+      any = true;
+      break;
+    }
+  }
+  if (!any) {
+    return;
+  }
+  bool wake[kMaxCpus] = {};
+  {
+    TimedLock lock(this);
+    for (int i = 0; i < kMaxCpus; ++i) {
+      Cpu& cpu = cpus_[i];
+      if (!cpu.wait_parked.load(std::memory_order_relaxed)) {
+        continue;
+      }
+      // A thread on the blocked list is alive under the lock.
+      for (XThread* t = cpu.blocked_head; t;
+           t = t->scheduler_links().ready_next) {
+        auto& links = t->scheduler_links();
+        if (!links.wait_park) {
+          continue;
+        }
+        for (WaitLearn& slot : wait_learn_) {
+          if (slot.owner.load(std::memory_order_relaxed) == t &&
+              slot.polled.load(std::memory_order_relaxed) == object) {
+            slot.polled_wake.store(true);
+            links.wait_min_tick = 0;
+            links.wait_deadline_tick = 0;
+            cpu.repoll_now.store(true, std::memory_order_relaxed);
+            wake[i] = true;
+            stats_.wait_wakes_polled.fetch_add(1, std::memory_order_relaxed);
+            break;
+          }
+        }
+      }
+    }
+  }
+  for (int i = 0; i < kMaxCpus; ++i) {
+    if (wake[i] && cpus_[i].parked.load() && cpus_[i].ready_event) {
+      WakeDispatchThread(cpus_[i]);
+    }
+  }
 }
 
 bool GuestScheduler::TryWaitPark(XThread* self, uint64_t now, bool poll) {
@@ -1732,23 +1963,64 @@ bool GuestScheduler::TryWaitPark(XThread* self, uint64_t now, bool poll) {
     links.wait_arm_seq = seq;
     return false;
   }
+  WaitLearn* learn = park_wait_adaptive_ ? WaitLearnOf(self) : nullptr;
   if (links.wait_arm_seq != seq) {
-    // Something happened since the last look: the guest's next passes test
-    // for it, and the look after them decides.
-    links.wait_arm_tick = now;
-    links.wait_arm_seq = seq;
-    stats_.wait_looks_event.fetch_add(1, std::memory_order_relaxed);
-    return false;
+    if (!park_wait_adaptive_) {
+      stats_.wait_looks_event.fetch_add(1, std::memory_order_relaxed);
+      // The first gate. Something happened since the last look: the guest's
+      // next passes test for it, and the look after them decides.
+      links.wait_arm_tick = now;
+      links.wait_arm_seq = seq;
+      return false;
+    }
+    // Adaptive: parked all the same. BlockCurrentThread sees the sequence
+    // moved and ends this park at the thread's hold-off, so the event is
+    // tested for that soon and no later.
   }
-  uint64_t length = wait_park_first_ticks_ << links.spin_park_shift;
-  if (length >= wait_park_max_ticks_) {
-    length = wait_park_max_ticks_;
+  if (learn) {
+    if (learn->woke_early) {
+      // Woken early by an event, and still here: it was not the one.
+      learn->woke_early = false;
+      if (learn->holdoff_shift < kWaitHoldoffMaxShift) {
+        ++learn->holdoff_shift;
+      }
+      stats_.wait_wakes_futile.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (++learn->parks_since_probe >= 32) {
+      learn->parks_since_probe = 0;
+      if (learn->holdoff_shift) {
+        --learn->holdoff_shift;
+      }
+    }
+  }
+  uint64_t length;
+  if (park_wait_adaptive_) {
+    // A quarter of the burst so far (kWaitParkAgeShift).
+    length = (now - links.spin_burst_tick) >> kWaitParkAgeShift;
+    length = std::max(length, wait_park_first_ticks_);
+    length = std::min(length, wait_park_max_ticks_);
   } else {
-    ++links.spin_park_shift;
+    length = wait_park_first_ticks_ << links.spin_park_shift;
+    if (length >= wait_park_max_ticks_) {
+      length = wait_park_max_ticks_;
+    } else {
+      ++links.spin_park_shift;
+    }
   }
   (poll ? stats_.wait_parks_poll : stats_.wait_parks_yield)
       .fetch_add(1, std::memory_order_relaxed);
-  WaitPark(self, now, length);
+  WaitPark(self, now, length, learn ? learn->holdoff_shift : 0);
+  if (learn) {
+    // A deadline is never early (timers only run late), so back before it
+    // means an event ended the park. A signal of the object the thread
+    // polls is not one of the events the hold-off is learnt from.
+    if (learn->polled_wake.load(std::memory_order_relaxed)) {
+      learn->polled_wake.store(false);
+      learn->woke_early = false;
+    } else {
+      learn->woke_early = Clock::host_tick_count_raw() < now + length;
+    }
+  }
   // Back, perhaps on another CPU. The burst keeps its age and the thread
   // stays armed with the sequence it parked on: events during the park
   // moved it, and the looks that follow see that.
@@ -1756,8 +2028,18 @@ bool GuestScheduler::TryWaitPark(XThread* self, uint64_t now, bool poll) {
   const uint64_t back = Clock::host_tick_count_raw();
   after.spin_check_tick = back;
   after.spin_calls = 0;
+  if (learn && !poll) {
+    // See NoteWaitSpin: the next look after a few yields.
+    learn->short_look = true;
+    after.spin_calls = 32 - kWaitPassesAfterPark;
+  }
   after.poll_visits = 0;
   after.wait_arm_tick = back;
+  if (park_wait_adaptive_) {
+    // Events up to here are answered by the passes the guest makes next;
+    // only one after this sample cuts the next park short.
+    after.wait_arm_seq = wait_wake_seq_.load();
+  }
   const uint64_t again = back + wait_arm_window_ticks_;
   if (wait_armed_until_.load(std::memory_order_relaxed) < again) {
     wait_armed_until_.store(again);
@@ -1766,13 +2048,15 @@ bool GuestScheduler::TryWaitPark(XThread* self, uint64_t now, bool poll) {
 }
 
 void GuestScheduler::WaitPark(XThread* self, uint64_t now,
-                              uint64_t length_ticks) {
+                              uint64_t length_ticks, uint8_t holdoff_shift) {
   auto& links = self->scheduler_links();
   links.wait_park = true;
   links.wait_park_start_tick = now;
   links.wait_deadline_tick = now + length_ticks;
+  // hakuX-Boosted: the hold-off, learnt per thread (TryWaitPark).
   links.wait_min_tick =
-      now + std::min<uint64_t>(wait_park_min_ticks_, length_ticks);
+      now + std::min<uint64_t>(wait_park_min_ticks_ << holdoff_shift,
+                               length_ticks);
   // Events stay counted for the whole park and the window after it.
   const uint64_t until = now + length_ticks + wait_arm_window_ticks_;
   if (wait_armed_until_.load(std::memory_order_relaxed) < until) {
@@ -1802,12 +2086,40 @@ void GuestScheduler::WakeParkedWaits() {
     return;
   }
   // A wake already asked for and not yet carried out covers this one.
+  // hakuX-Boosted: and inside a CPU's hold-off (no park there may be ended
+  // by an event yet) the event is only noted: the dispatch thread sleeps no
+  // further than the hold-off's end and finds the note then.
+  const uint64_t event_tick =
+      park_wait_adaptive_ ? Clock::host_tick_count_raw() : 0;
+  bool held[kMaxCpus] = {};
   bool any = false;
   for (int i = 0; i < kMaxCpus; ++i) {
-    if (cpus_[i].wait_parked.load(std::memory_order_relaxed) &&
-        !cpus_[i].wait_wake_noted.load(std::memory_order_relaxed)) {
+    Cpu& cpu = cpus_[i];
+    if (!cpu.wait_parked.load(std::memory_order_relaxed)) {
+      continue;
+    }
+    if (park_wait_adaptive_ &&
+        event_tick < cpu.wait_event_due_tick.load(std::memory_order_relaxed)) {
+      held[i] = true;
+      if (!cpu.wait_event_pending.load(std::memory_order_relaxed)) {
+        cpu.wait_event_pending.store(true);
+      }
+      stats_.wait_events_held.fetch_add(1, std::memory_order_relaxed);
+      if (cpu.wait_event_poke.load(std::memory_order_relaxed) &&
+          !cpu.wait_wake_noted.exchange(true)) {
+        // A park here opens to events before its deadline: its dispatch
+        // thread is told once, without the lock. The poke flag is stored
+        // and the parked flag then read, both in order, as the dispatch
+        // thread stores parked and then looks at the poke flag.
+        cpu.repoll_now.store(true);
+        if (cpu.parked.load() && cpu.ready_event) {
+          WakeDispatchThread(cpu);
+        }
+      }
+      continue;
+    }
+    if (!cpu.wait_wake_noted.load(std::memory_order_relaxed)) {
       any = true;
-      break;
     }
   }
   if (!any) {
@@ -1818,7 +2130,7 @@ void GuestScheduler::WakeParkedWaits() {
     TimedLock lock(this);
     for (int i = 0; i < kMaxCpus; ++i) {
       Cpu& cpu = cpus_[i];
-      if (!cpu.wait_parked.load(std::memory_order_relaxed) ||
+      if (held[i] || !cpu.wait_parked.load(std::memory_order_relaxed) ||
           cpu.wait_wake_noted.load(std::memory_order_relaxed)) {
         continue;
       }
@@ -1889,6 +2201,7 @@ void GuestScheduler::PollSiteVisit(XThread* self, void* raw_context,
   }
   auto& links = self->scheduler_links();
   if (links.poll_site != site) {
+    WaitBurstEnded(self);
     links.poll_site = site;
     links.poll_visits = 0;
     links.spin_check_tick = 0;
@@ -1906,6 +2219,7 @@ void GuestScheduler::PollSiteVisit(XThread* self, void* raw_context,
     if (prev && hash != links.poll_hash) {
       stats_.poll_changed.fetch_add(1, std::memory_order_relaxed);
     }
+    WaitBurstEnded(self);
     links.poll_hash = hash;
     links.spin_burst_tick = now;
     links.spin_park_shift = 0;
@@ -2749,6 +3063,12 @@ void GuestScheduler::WakeForSignal(const XObject* object,
   // semaphore or mutant, a handed-over critical section: before the test
   // below, because a busy-waiting thread is on no blocked list.
   NoteWaitEvent();
+  // hakuX-Boosted: and a parked thread that polls this very object with a
+  // zero timeout is due at once (NoteEmptyWait).
+  if (wait_polled_count_.load(std::memory_order_relaxed) &&
+      wait_parked_total_.load(std::memory_order_relaxed)) {
+    WakePolledWaits(object);
+  }
   bool any_blocked = false;
   for (int i = 0; i < kMaxCpus; ++i) {
     if (cpus_[i].has_blocked.load()) {
@@ -2906,6 +3226,7 @@ void GuestScheduler::NotifyThreadExited(XThread* thread) {
   // while running on its fiber.
   cpus_[CurrentCpu()].exited_thread = thread;
   NoteWaitEvent();  // hakuX-Boosted: guest_scheduler_park_waits
+  WaitLearnRelease(thread);  // hakuX-Boosted: its learning entry is free
 }
 
 void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
@@ -2931,6 +3252,9 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
   // spinner's own park is neither.
   if (park_waits_ && !self->scheduler_links().wait_park) {
     auto& own = self->scheduler_links();
+    if (own.spin_check_tick || own.poll_site) {
+      WaitBurstEnded(self);
+    }
     own.spin_check_tick = 0;
     own.wait_armed = false;
     own.poll_site = 0;
@@ -3053,6 +3377,24 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
         links.wait_arm_seq = wait_wake_seq_.load();
         links.wait_deadline_tick = links.wait_min_tick;
       }
+      // hakuX-Boosted: adaptive gate. When events may end this park, and
+      // whether one that comes sooner is worth a wake of the dispatch
+      // thread (WakeParkedWaits).
+      if (park_wait_adaptive_) {
+        if (cpu.wait_parked.load(std::memory_order_relaxed) == 1) {
+          // The first park here: a note left from before it is not for it
+          // (an event since the thread's last look was seen just above).
+          cpu.wait_event_pending.store(false, std::memory_order_relaxed);
+        }
+        const uint64_t due =
+            cpu.wait_event_due_tick.load(std::memory_order_relaxed);
+        if (!due || links.wait_min_tick < due) {
+          cpu.wait_event_due_tick.store(links.wait_min_tick);
+        }
+        if (links.wait_min_tick < links.wait_deadline_tick) {
+          cpu.wait_event_poke.store(true);
+        }
+      }
       if (!cpu.next_fine_repoll_tick ||
           links.wait_deadline_tick < cpu.next_fine_repoll_tick) {
         cpu.next_fine_repoll_tick = links.wait_deadline_tick;
@@ -3113,10 +3455,17 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
     const bool have_parks =
         cpu.wait_parked.load(std::memory_order_relaxed) != 0;
     const uint64_t now_tick = have_parks ? Clock::host_tick_count_raw() : 0;
-    const bool wake_parks = cpu.wake_wait_parks;
+    // hakuX-Boosted: an event noted inside a hold-off counts as a wake asked
+    // for; parks whose hold-off is not over keep it as their new deadline.
+    const bool event_noted =
+        have_parks && cpu.wait_event_pending.load(std::memory_order_relaxed) &&
+        cpu.wait_event_pending.exchange(false);
+    const bool wake_parks = cpu.wake_wait_parks || event_noted;
     cpu.wake_wait_parks = false;
     uint32_t kept_parks = 0;
     uint64_t fine_next = 0;
+    uint64_t event_due = 0;
+    bool event_poke = false;
     XThread* t = cpu.blocked_head;
     while (t) {
       auto& links = t->scheduler_links();
@@ -3140,6 +3489,15 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
           }
           if (links.wait_deadline_ms && links.wait_deadline_ms < next_due) {
             next_due = links.wait_deadline_ms;
+          }
+          // hakuX-Boosted: adaptive gate, see Cpu::wait_event_due_tick.
+          if (park_wait_adaptive_) {
+            if (!event_due || links.wait_min_tick < event_due) {
+              event_due = links.wait_min_tick;
+            }
+            if (links.wait_min_tick < due_tick) {
+              event_poke = true;
+            }
           }
           if (!fine_next || due_tick < fine_next) {
             fine_next = due_tick;
@@ -3263,6 +3621,12 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
     if (have_parks || kept_parks) {
       cpu.wait_parked.store(kept_parks, std::memory_order_relaxed);
       cpu.next_fine_repoll_tick = fine_next;
+      cpu.wait_event_due_tick.store(event_due, std::memory_order_relaxed);
+      cpu.wait_event_poke.store(event_poke, std::memory_order_relaxed);
+      if (event_noted) {
+        // The note is served: the next event inside a hold-off may poke.
+        cpu.wait_wake_noted.store(false, std::memory_order_relaxed);
+      }
       if (!kept_parks) {
         cpu.wait_wake_noted.store(false, std::memory_order_relaxed);
       }
@@ -3701,12 +4065,15 @@ void GuestScheduler::ReportStatsIfDue() {
         "{} us parked in all | parks ended by the deadline {}, by an event {} "
         "| looks that did not park: an event since the last look {}, not "
         "allowed here {} | events counted {} | poll site looks {}, registers "
-        "changed {}",
+        "changed {} | early wakes: still waiting {}, wait over {} | events "
+        "inside a hold-off {}",
         take(stats_.wait_parks_yield), take(stats_.wait_parks_poll),
         to_us(take(stats_.wait_park_ticks)), take(stats_.wait_ended_timer),
         take(stats_.wait_ended_event), take(stats_.wait_looks_event),
         take(stats_.wait_looks_barred), take(stats_.wait_events),
-        take(stats_.poll_visits), take(stats_.poll_changed));
+        take(stats_.poll_visits), take(stats_.poll_changed),
+        take(stats_.wait_wakes_futile), take(stats_.wait_wakes_useful),
+        take(stats_.wait_events_held));
   }
   {
     uint64_t acquisitions = take(stats_.lock_acquisitions);
