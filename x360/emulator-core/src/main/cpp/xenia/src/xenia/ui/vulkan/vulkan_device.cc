@@ -29,6 +29,22 @@ DEFINE_int32(
     "driver-specific large-binding misbehavior.",
     "Vulkan");
 
+// hakuX-Boosted: boosted/notes/pipeline-libraries.md. Defined here because
+// the device has to enable the extensions; the pipeline cache
+// (gpu/vulkan/vulkan_pipeline_cache.cc) does the rest.
+DEFINE_bool(
+    vulkan_pipeline_libraries, false,
+    "Build graphics pipelines from libraries "
+    "(VK_EXT_graphics_pipeline_library): the guest vertex shader and the "
+    "guest pixel shader of a pipeline are each compiled by the driver once, "
+    "into a library of their own, and a pipeline of a pair of shaders is "
+    "linked from the two, which compiles nothing. Without it the driver "
+    "compiles both shaders again for every new pair. Only on a device that "
+    "offers the extension with independent interpolation decoration (the "
+    "log line 'pipeline libraries:' at start-up says); otherwise pipelines "
+    "are built as before. Needs a restart.",
+    "Vulkan");
+
 namespace xe {
 namespace ui {
 namespace vulkan {
@@ -266,6 +282,15 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 #undef XE_UI_VULKAN_STRUCT_PROMOTED_EXTENSION
 #undef XE_UI_VULKAN_LOCAL_PROMOTED_EXTENSION
 
+  // hakuX-Boosted: extensions the start-up line 'pipeline libraries:'
+  // reports on (boosted/notes/pipeline-libraries.md). Seen in the device's
+  // list, not requested: only vulkan_pipeline_libraries enables two of them,
+  // below.
+  bool boosted_seen_EXT_graphics_pipeline_library = false;
+  bool boosted_seen_KHR_pipeline_library = false;
+  bool boosted_seen_EXT_shader_object = false;
+  bool boosted_seen_EXT_extended_dynamic_state3 = false;
+
   std::vector<const char*> enabled_extensions;
   {
     uint32_t supported_extension_count = 0;
@@ -291,6 +316,20 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       assert_true(supported_extension_count == supported_extensions.size());
       for (const VkExtensionProperties& supported_extension :
            supported_extensions) {
+        // hakuX-Boosted: for the 'pipeline libraries:' line.
+        if (!std::strcmp(supported_extension.extensionName,
+                         "VK_EXT_graphics_pipeline_library")) {
+          boosted_seen_EXT_graphics_pipeline_library = true;
+        } else if (!std::strcmp(supported_extension.extensionName,
+                                "VK_KHR_pipeline_library")) {
+          boosted_seen_KHR_pipeline_library = true;
+        } else if (!std::strcmp(supported_extension.extensionName,
+                                "VK_EXT_shader_object")) {
+          boosted_seen_EXT_shader_object = true;
+        } else if (!std::strcmp(supported_extension.extensionName,
+                                "VK_EXT_extended_dynamic_state3")) {
+          boosted_seen_EXT_extended_dynamic_state3 = true;
+        }
         const auto requested_extension_it =
             requested_extensions.find(supported_extension.extensionName);
         if (requested_extension_it == requested_extensions.cend()) {
@@ -310,6 +349,21 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     XELOGW("Vulkan device '{}' doesn't support swapchains",
            properties.deviceName);
     return nullptr;
+  }
+
+  // hakuX-Boosted: VK_EXT_graphics_pipeline_library (#321) and what it
+  // depends on, VK_KHR_pipeline_library (#291), are enabled only with
+  // vulkan_pipeline_libraries. Neither adds a function (a library is made
+  // with vkCreateGraphicsPipelines). The feature is queried and enabled
+  // further down, with the other features.
+  const bool boosted_enable_pipeline_libraries =
+      with_gpu_emulation && cvars::vulkan_pipeline_libraries &&
+      get_physical_device_properties2_supported &&
+      boosted_seen_EXT_graphics_pipeline_library &&
+      boosted_seen_KHR_pipeline_library;
+  if (boosted_enable_pipeline_libraries) {
+    enabled_extensions.emplace_back("VK_KHR_pipeline_library");
+    enabled_extensions.emplace_back("VK_EXT_graphics_pipeline_library");
   }
 
   VkDeviceCreateInfo device_create_info = {
@@ -1056,6 +1110,119 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     device->properties_.extendedDynamicState3PrimitiveTopologyUnrestricted =
         properties_EXT_extended_dynamic_state3
             .dynamicPrimitiveTopologyUnrestricted;
+  }
+
+  // hakuX-Boosted: what the device offers for building pipelines from parts
+  // (boosted/notes/pipeline-libraries.md), in one line, whatever is set. The
+  // structures are asked for in a chain of their own, which changes nothing
+  // of the device that is created; only with vulkan_pipeline_libraries is
+  // the feature also put in the device's chain (the two extensions were
+  // added to the enabled list above). Needs
+  // VK_KHR_get_physical_device_properties2 in the instance, as every
+  // structure query here does; without it everything reads "no".
+  VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
+      boosted_features_graphics_pipeline_library = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+  VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT
+      boosted_properties_graphics_pipeline_library = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT};
+  VkPhysicalDeviceShaderObjectFeaturesEXT boosted_features_shader_object = {
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT};
+  // What is enabled, for the device's chain: it must live until
+  // vkCreateDevice below.
+  VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
+      boosted_enabled_graphics_pipeline_library = {
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+  {
+    if (get_physical_device_properties2_supported) {
+      if (boosted_seen_EXT_graphics_pipeline_library) {
+        VkPhysicalDeviceFeatures2 boosted_features_2 = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        boosted_features_2.pNext = &boosted_features_graphics_pipeline_library;
+        ifn.vkGetPhysicalDeviceFeatures2(physical_device, &boosted_features_2);
+        VkPhysicalDeviceProperties2 boosted_properties_2 = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        boosted_properties_2.pNext =
+            &boosted_properties_graphics_pipeline_library;
+        ifn.vkGetPhysicalDeviceProperties2(physical_device,
+                                           &boosted_properties_2);
+      }
+      if (boosted_seen_EXT_shader_object) {
+        VkPhysicalDeviceFeatures2 boosted_features_2 = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        boosted_features_2.pNext = &boosted_features_shader_object;
+        ifn.vkGetPhysicalDeviceFeatures2(physical_device, &boosted_features_2);
+      }
+    }
+    const bool boosted_pipeline_libraries_enabled =
+        boosted_enable_pipeline_libraries &&
+        boosted_features_graphics_pipeline_library.graphicsPipelineLibrary !=
+            VK_FALSE;
+    if (boosted_pipeline_libraries_enabled) {
+      boosted_enabled_graphics_pipeline_library.graphicsPipelineLibrary =
+          VK_TRUE;
+      boosted_enabled_graphics_pipeline_library.pNext =
+          const_cast<void*>(device_create_info.pNext);
+      device_create_info.pNext = &boosted_enabled_graphics_pipeline_library;
+      device->properties_.graphicsPipelineLibrary = true;
+      device->properties_.graphicsPipelineLibraryFastLinking =
+          boosted_properties_graphics_pipeline_library
+              .graphicsPipelineLibraryFastLinking != VK_FALSE;
+      device->properties_
+          .graphicsPipelineLibraryIndependentInterpolationDecoration =
+          boosted_properties_graphics_pipeline_library
+              .graphicsPipelineLibraryIndependentInterpolationDecoration !=
+          VK_FALSE;
+    }
+    // The dynamic state 3 structure was filled by the query further up when
+    // the extension was requested and found (with_gpu_emulation); it is zero
+    // otherwise.
+    const VkPhysicalDeviceExtendedDynamicState3FeaturesEXT& boosted_eds3 =
+        features_EXT_extended_dynamic_state3.supported;
+    const auto yes_no = [](bool value) { return value ? "yes" : "no"; };
+    XELOGI(
+        "pipeline libraries: VK_EXT_graphics_pipeline_library offered {} "
+        "(VK_KHR_pipeline_library {}), graphicsPipelineLibrary {}, fast "
+        "linking {}, independent interpolation decoration {}; enabled on "
+        "this device {} (vulkan_pipeline_libraries {}); VK_EXT_shader_object "
+        "offered {}, shaderObject {}; VK_EXT_extended_dynamic_state3 offered "
+        "{} (enabled {}): depth clamp enable {}, polygon mode {}, colour "
+        "blend enable {}, colour blend equation {}, colour write mask {}, "
+        "rasterisation samples {}, sample mask {}, alpha to coverage enable "
+        "{}, depth clip enable {}, logic op enable {}, any topology {}; "
+        "instance has VK_KHR_get_physical_device_properties2 {}",
+        yes_no(boosted_seen_EXT_graphics_pipeline_library),
+        yes_no(boosted_seen_KHR_pipeline_library),
+        yes_no(boosted_features_graphics_pipeline_library
+                   .graphicsPipelineLibrary != VK_FALSE),
+        yes_no(boosted_properties_graphics_pipeline_library
+                   .graphicsPipelineLibraryFastLinking != VK_FALSE),
+        yes_no(
+            boosted_properties_graphics_pipeline_library
+                .graphicsPipelineLibraryIndependentInterpolationDecoration !=
+            VK_FALSE),
+        yes_no(boosted_pipeline_libraries_enabled),
+        yes_no(cvars::vulkan_pipeline_libraries),
+        yes_no(boosted_seen_EXT_shader_object),
+        yes_no(boosted_features_shader_object.shaderObject != VK_FALSE),
+        yes_no(boosted_seen_EXT_extended_dynamic_state3),
+        yes_no(device->extensions_.ext_EXT_extended_dynamic_state3),
+        yes_no(boosted_eds3.extendedDynamicState3DepthClampEnable != VK_FALSE),
+        yes_no(boosted_eds3.extendedDynamicState3PolygonMode != VK_FALSE),
+        yes_no(boosted_eds3.extendedDynamicState3ColorBlendEnable != VK_FALSE),
+        yes_no(boosted_eds3.extendedDynamicState3ColorBlendEquation !=
+               VK_FALSE),
+        yes_no(boosted_eds3.extendedDynamicState3ColorWriteMask != VK_FALSE),
+        yes_no(boosted_eds3.extendedDynamicState3RasterizationSamples !=
+               VK_FALSE),
+        yes_no(boosted_eds3.extendedDynamicState3SampleMask != VK_FALSE),
+        yes_no(boosted_eds3.extendedDynamicState3AlphaToCoverageEnable !=
+               VK_FALSE),
+        yes_no(boosted_eds3.extendedDynamicState3DepthClipEnable != VK_FALSE),
+        yes_no(boosted_eds3.extendedDynamicState3LogicOpEnable != VK_FALSE),
+        yes_no(properties_EXT_extended_dynamic_state3
+                   .dynamicPrimitiveTopologyUnrestricted != VK_FALSE),
+        yes_no(get_physical_device_properties2_supported));
   }
 
 #undef XE_UI_VULKAN_LIMIT
