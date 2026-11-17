@@ -1422,13 +1422,13 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     e.and_(e.w2, e.w2, 0xFFFFF);  // y
     e.umov(e.w3, VReg(d).s4[2]);
     e.and_(e.w3, e.w3, 0xFFFFF);  // z
-    e.umov(e.w4, VReg(d).s4[3]);
-    e.and_(e.w4, e.w4, 0xF);  // w
+    e.umov(e.w8, VReg(d).s4[3]);
+    e.and_(e.w8, e.w8, 0xF);  // w
 
     // Pack into 64-bit: x | (y<<20) | (z<<40) | (w<<60)
     e.orr(e.x0, e.x1, e.x2, LSL, 20);
     e.orr(e.x0, e.x0, e.x3, LSL, 40);
-    e.orr(e.x0, e.x0, e.x4, LSL, 60);
+    e.orr(e.x0, e.x0, e.x8, LSL, 60);
 
     // Store as u32[2]=high, u32[3]=low.  ror 32 swaps halves for LE layout.
     e.ror(e.x0, e.x0, 32);
@@ -1789,7 +1789,7 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     e.sbfx(e.x1, e.x0, 0, 20);   // x: bits 0-19, signed
     e.sbfx(e.x2, e.x0, 20, 20);  // y: bits 20-39, signed
     e.sbfx(e.x3, e.x0, 40, 20);  // z: bits 40-59, signed
-    e.ubfx(e.x4, e.x0, 60, 4);   // w: bits 60-63, unsigned
+    e.ubfx(e.x8, e.x0, 60, 4);   // w: bits 60-63, unsigned
 
     // Add magic constants and insert into dest vector.
     e.mov(e.w0, 0x40400000u);
@@ -1797,12 +1797,12 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     e.add(e.w2, e.w2, e.w0);  // y + 3.0
     e.add(e.w3, e.w3, e.w0);  // z + 3.0
     e.mov(e.w0, 0x3F800000u);
-    e.add(e.w4, e.w4, e.w0);  // w + 1.0
+    e.add(e.w8, e.w8, e.w0);  // w + 1.0
 
     e.ins(VReg(d).s4[0], e.w1);
     e.ins(VReg(d).s4[1], e.w2);
     e.ins(VReg(d).s4[2], e.w3);
-    e.ins(VReg(d).s4[3], e.w4);
+    e.ins(VReg(d).s4[3], e.w8);
 
     // Overflow: XYZ == 0x40380000 → QNaN.  W can't match.
     LoadV128Const(e, 0, vec128i(0x40380000u), 0);
@@ -2002,8 +2002,8 @@ struct STVR_V128 : Sequence<STVR_V128, I<OPCODE_STVR, VoidOp, I64Op, V128Op>> {
     e.and_(e.w17, e.w0, 0xF);
     e.and_(e.x16, e.x0, ~0xFull);
     e.add(e.x0, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
-    e.mov(e.w6, 16);
-    e.sub(e.w6, e.w6, e.w17);  // source tail starts at 16 - offset
+    e.mov(e.w8, 16);
+    e.sub(e.w8, e.w8, e.w17);  // source tail starts at 16 - offset
 
     // for (i = 0; i < offset; ++i) mem[base + i] = stash[16 - offset + i];
     // Heap-backed via the emitter's cache: xbyak's LabelManager registers
@@ -2015,7 +2015,7 @@ struct STVR_V128 : Sequence<STVR_V128, I<OPCODE_STVR, VoidOp, I64Op, V128Op>> {
     e.L(loop);
     e.cmp(e.w1, e.w17);
     e.b(Xbyak_aarch64::GE, done);
-    e.add(e.w2, e.w1, e.w6);
+    e.add(e.w2, e.w1, e.w8);
     e.ldrb(e.w3, ptr(e.x0, e.x2));
     e.strb(e.w3, ptr(e.x16, e.x1));
     e.add(e.w1, e.w1, 1);

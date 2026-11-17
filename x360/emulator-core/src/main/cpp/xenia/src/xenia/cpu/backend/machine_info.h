@@ -22,6 +22,13 @@ struct MachineInfo {
   // (its flush-to-zero mode covers inputs), so the register allocator may
   // give its result the operand's register (register_allocation_elide_copies).
   bool denormflush_is_copy = false;
+  // hakuX-Boosted: a64_shared_guest_registers. Guest general registers
+  // (their numbers) that every translated function keeps in the same host
+  // register: entry n in register n of the integer set. The pinning pass
+  // adds them to every function's pinned slots and leaves them out of its
+  // own choice.
+  uint8_t shared_gpr_count = 0;
+  uint8_t shared_gprs[8] = {};
 
   struct RegisterSet {
     enum Types {

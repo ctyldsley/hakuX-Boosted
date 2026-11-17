@@ -212,7 +212,8 @@ std::string FormatExtraStats() {
       "and values computed straight into a pin {}; copies that took their "
       "operand's register {}; compares that reused the flags {}; branches "
       "taken on a compare's flags {}; non-local returns resumed on the "
-      "landing function's frame {}; frame chain mismatches {}; ABI flag "
+      "landing function's frame {} and with none confirmed {}; frame "
+      "chain mismatches {}; ABI flag "
       "guard: functions keeping flags at returns {}, call sites keeping "
       "them {}, found too late {}, readers after a call through a pointer "
       "{}, functions reading a flag at entry {}; FPCR writes emitted {}, "
@@ -220,6 +221,7 @@ std::string FormatExtraStats() {
       get(t.pin_coalesced_loads), get(t.pin_coalesced_defs),
       get(t.copies_elided), get(t.compares_reused_flags),
       get(t.branches_on_flags), get(t.longjmp_landing_frames),
+      get(t.longjmp_unconfirmed),
       get(t.frame_chain_mismatches), get(t.abi_guard_returns_kept),
       get(t.abi_guard_calls_kept), get(t.abi_guard_late),
       get(t.abi_guard_indirect), get(t.abi_guard_entry_readers),
@@ -236,6 +238,7 @@ uint64_t SelfCheckMismatches() {
          t.verify_mismatches.load(std::memory_order_relaxed) +
          t.frame_chain_mismatches.load(std::memory_order_relaxed) +
          t.fpcr_entry_mismatches +
+         t.shared_gpr_odd_accesses.load(std::memory_order_relaxed) +
          t.stack_fixup_verify_hits;
 }
 

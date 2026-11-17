@@ -110,6 +110,14 @@ run bench_core xlat "overhaul 10: 8 + inline_extern_calls" $o8 inline_extern_cal
 run bench_core xlat "overhaul 11: frame chain alone" a64_frame_chain=true
 run bench_core xlat "overhaul 12: 7 + frame chain" $o7 a64_frame_chain=true
 run bench_core xlat "overhaul 13: 8 + frame chain" $o8 a64_frame_chain=true
+# Eighteen host registers (a64_scratch_gpr_pool) and guest registers kept in
+# the same host register by all translated code
+# (a64_shared_guest_registers): on top of row 12, with up to fourteen pins.
+o14="${o7/pin_guest_registers_max_int=10/pin_guest_registers_max_int=14} a64_frame_chain=true a64_scratch_gpr_pool=true"
+run bench_core xlat "overhaul 14: 12 with 18 registers" $o14
+run bench_core xlat "overhaul 15: 14 + 2 shared registers" $o14 a64_shared_guest_registers=2
+run bench_core xlat "overhaul 16: 14 + 4 shared registers" $o14 a64_shared_guest_registers=4
+run bench_core xlat "overhaul 17: 14 + 6 shared registers" $o14 a64_shared_guest_registers=6
 # The scheduler's kernel call path with the lean thunk now that it applies
 # to import thunks.
 run bench_core sched "overhaul: lean calls, lean extern thunk" \

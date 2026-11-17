@@ -43,6 +43,9 @@ struct TranslationStats {
   // hakuX-Boosted: run time: non-local returns that resumed on the landing
   // function's own host frame (a64_longjmp_resume_live_frame).
   std::atomic<uint64_t> longjmp_landing_frames{0};
+  // hakuX-Boosted: a64_shared_guest_registers (static): context accesses
+  // of a shared register that are not the whole register.
+  std::atomic<uint64_t> shared_gpr_odd_accesses{0};
   // hakuX-Boosted: a64_fpcr_known_block_entry. Loads and writes of FPCR
   // emitted (static, with or without the setting); blocks that started in
   // a known mode (static); what the verify mode found (run time; a plain
@@ -62,6 +65,9 @@ struct TranslationStats {
   std::atomic<uint64_t> abi_guard_late{0};
   std::atomic<uint64_t> abi_guard_indirect{0};
   std::atomic<uint64_t> abi_guard_entry_readers{0};
+  // hakuX-Boosted: run time: returns to a return site with no landing
+  // frame confirmed (taken through the general path).
+  std::atomic<uint64_t> longjmp_unconfirmed{0};
   // hakuX-Boosted: run time: a64_frame_chain_verify found the array and
   // the chain naming different frames.
   std::atomic<uint64_t> frame_chain_mismatches{0};

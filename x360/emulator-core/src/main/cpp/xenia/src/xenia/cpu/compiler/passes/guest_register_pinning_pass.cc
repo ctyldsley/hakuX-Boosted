@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/cpu/compiler/translation_stats.h"
 #include "xenia/cpu/hir/hir_builder.h"
@@ -128,6 +129,11 @@ constexpr int64_t kMinimumNetBenefit = 8;
 //   lr   read by the prologue and written by the host around callbacks;
 //   everything that is not a general, float or vector register (condition
 //   and XER bytes, FPSCR, the reservation and scheduler fields).
+// hakuX-Boosted: bit n: guest register n is one every function keeps in a
+// host register (a64_shared_guest_registers; the same for the whole
+// process, set when the pass is made).
+uint32_t shared_gpr_mask = 0;
+
 bool ClassifySlot(uint32_t offset, TypeName type, uint8_t* out_reg_set,
                   int* out_gpr_index) {
   *out_gpr_index = -1;
@@ -137,6 +143,10 @@ bool ClassifySlot(uint32_t offset, TypeName type, uint8_t* out_reg_set,
         (offset - gpr_base) % 8 == 0) {
       const int n = static_cast<int>((offset - gpr_base) / 8);
       if (n == 1 || n == 2 || n == 13) {
+        return false;
+      }
+      // hakuX-Boosted: a64_shared_guest_registers has it already.
+      if ((shared_gpr_mask >> n) & 1) {
         return false;
       }
       *out_reg_set = 0;
@@ -203,11 +213,97 @@ GuestRegisterPinningPass::GuestRegisterPinningPass(
       vec_register_count_ = set.count;
     }
   }
+  shared_gpr_count_ = machine_info->shared_gpr_count;
+  for (uint32_t n = 0; n < shared_gpr_count_ && n < 8; ++n) {
+    shared_gprs_[n] = machine_info->shared_gprs[n];
+    shared_gpr_mask |= uint32_t(1) << shared_gprs_[n];
+  }
+}
+
+bool GuestRegisterPinningPass::IsSharedGpr(int gpr) const {
+  for (uint32_t n = 0; n < shared_gpr_count_; ++n) {
+    if (shared_gprs_[n] == gpr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// hakuX-Boosted: a64_shared_guest_registers. Every function gets the shared
+// registers as pinned slots, after its own (whose numbers the masks of
+// pin_guest_registers_wide use), in the first registers of the integer
+// set. The backend never loads or stores them; the context accesses of
+// such a slot become register moves like any pin's. The front end reads
+// and writes a general register as one 64-bit value at its own offset; an
+// access of another shape to one of these would read or write the context
+// copy, which is stale, so it is counted with the self-check mismatches
+// and logged.
+void GuestRegisterPinningPass::AddShared(HIRBuilder* builder) {
+  if (!shared_gpr_count_) {
+    return;
+  }
+  auto& pinned = builder->pinned_context_slots();
+  const uint32_t gpr_base = static_cast<uint32_t>(offsetof(PPCContext, r));
+  for (auto block = builder->first_block(); block; block = block->next) {
+    for (auto i = block->instr_head; i; i = i->next) {
+      uint32_t size = 0;
+      TypeName type = INT64_TYPE;
+      if (i->opcode == &OPCODE_LOAD_CONTEXT_info) {
+        type = i->dest->type;
+      } else if (i->opcode == &OPCODE_STORE_CONTEXT_info) {
+        type = i->src2.value->type;
+      } else {
+        continue;
+      }
+      size = static_cast<uint32_t>(GetTypeSize(type));
+      const uint32_t offset = static_cast<uint32_t>(i->src1.offset);
+      if (offset + size <= gpr_base || offset >= gpr_base + 32 * 8) {
+        continue;
+      }
+      const bool whole = type == INT64_TYPE && (offset - gpr_base) % 8 == 0;
+      const int first = static_cast<int>((offset - gpr_base) / 8);
+      const int last = static_cast<int>((offset + size - 1 - gpr_base) / 8);
+      for (int gpr = first; gpr <= last && gpr < 32; ++gpr) {
+        if (IsSharedGpr(gpr) && !whole) {
+          translation_stats.shared_gpr_odd_accesses.fetch_add(
+              1, std::memory_order_relaxed);
+          XELOGE(
+              "a64_shared_guest_registers: {:08X} accesses r{} as {} bytes "
+              "at context offset {:X}; the context copy is stale",
+              builder->guest_function_address(), gpr, size, offset);
+        }
+      }
+    }
+  }
+  if (pinned.empty()) {
+    // No pins of the function's own: the per-instruction sets (all empty)
+    // are what holds, which is also what lets the allocator keep values in
+    // the shared registers (pin_guest_registers_coalesce).
+    builder->pin_sync().by_liveness = true;
+  }
+  for (uint32_t n = 0; n < shared_gpr_count_; ++n) {
+    HIRBuilder::PinnedContextSlot slot;
+    slot.offset = gpr_base + 8 * shared_gprs_[n];
+    slot.type = INT64_TYPE;
+    slot.reg_set = 0;
+    slot.reg_index = static_cast<uint8_t>(n);
+    slot.written = true;
+    slot.shared = true;
+    pinned.push_back(slot);
+  }
 }
 
 GuestRegisterPinningPass::~GuestRegisterPinningPass() = default;
 
 bool GuestRegisterPinningPass::Run(HIRBuilder* builder) {
+  const bool ok = RunOwn(builder);
+  if (ok) {
+    AddShared(builder);
+  }
+  return ok;
+}
+
+bool GuestRegisterPinningPass::RunOwn(HIRBuilder* builder) {
   auto& pinned = builder->pinned_context_slots();
   pinned.clear();
   builder->pin_sync().Clear();
@@ -225,6 +321,9 @@ bool GuestRegisterPinningPass::Run(HIRBuilder* builder) {
   // How many host registers may be given up. The allocator always keeps at
   // least four integer and sixteen vector registers for its own values.
   int max_int = std::clamp(cvars::pin_guest_registers_max_int, 0, 3);
+  // hakuX-Boosted: less what a64_shared_guest_registers has taken.
+  max_int = std::min(max_int, std::max(0, int(int_register_count_) - 4 -
+                                              int(shared_gpr_count_)));
   int max_vec = std::clamp(cvars::pin_guest_registers_max_vec, 0, 12);
   if (int_register_count_ < 7) {
     max_int = 0;
@@ -563,7 +662,12 @@ bool GuestRegisterPinningPass::RunWide(HIRBuilder* builder) {
   // its own values: three pins of seven, ten of the fourteen that
   // a64_extended_gpr_pool gives.
   int max_int = std::clamp(cvars::pin_guest_registers_max_int, 0,
-                           int_register_count_ >= 14 ? 10 : 3);
+                           int_register_count_ >= 18
+                               ? 14
+                               : int_register_count_ >= 14 ? 10 : 3);
+  // hakuX-Boosted: less what a64_shared_guest_registers has taken.
+  max_int = std::min(max_int, std::max(0, int(int_register_count_) - 4 -
+                                              int(shared_gpr_count_)));
   int max_vec = std::clamp(cvars::pin_guest_registers_max_vec, 0, 16);
   if (int_register_count_ < 7) {
     max_int = 0;

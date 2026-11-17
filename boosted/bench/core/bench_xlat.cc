@@ -414,9 +414,75 @@ Program BuildHostCalls(Env& env) {
   return p;
 }
 
+// --- 7. The same, with a host function that reads and writes registers ------
+// What a kernel export does: arguments from the context, the result back in
+// r3. The host function also looks at a register the guest keeps for itself
+// over the call (r31) and at the stack pointer. With
+// a64_shared_guest_registers those live in host registers and are in the
+// context only because the thunk put them there, and the result reaches the
+// guest only because the thunk reads it back: check() fails if either half
+// is missing.
+uint64_t g_host_args_calls = 0;
+uint64_t g_host_args_wrong = 0;
+void HostArgs(PPCContext* context, xe::kernel::KernelState*) {
+  ++g_host_args_calls;
+  if (context->r[3] != context->r[31] || context->r[4] != 7 ||
+      context->r[1] == 0 || context->r[30] > (uint64_t(1) << 40)) {
+    ++g_host_args_wrong;
+  }
+  context->r[3] = context->r[3] + context->r[4] + 1;
+}
+
+Program BuildHostArgs(Env& env) {
+  uint32_t thunk = env.ImportThunk("BenchHostArgs", HostArgs);
+  Asm a(env.NextCodeAddress());
+  Asm::Label loop;
+  a.mflr(0);
+  a.stw(0, -8, 1);
+  a.stwu(1, -96, 1);
+  a.stw(31, 84, 1);
+  a.stw(30, 80, 1);
+  a.mr(31, 3);
+  a.li(30, 0);
+  a.Bind(loop);
+  a.mr(3, 31);
+  a.li(4, 7);
+  a.bl_abs(thunk);
+  a.add(30, 30, 3);
+  a.addi(31, 31, -1);
+  a.cmpwi(6, 31, 0);
+  a.bgt(6, loop);
+  a.mr(3, 30);
+  a.lwz(30, 80, 1);
+  a.lwz(31, 84, 1);
+  a.addi(1, 1, 96);
+  a.lwz(0, -8, 1);
+  a.mtlr(0);
+  a.blr();
+  Program p;
+  p.name = "host_args";
+  p.entry = env.PlaceCode(a);
+  p.functions = {thunk, p.entry};
+  p.guest_words = uint32_t(a.count()) + 2;
+  p.guest_insns = [](uint32_t iterations) {
+    return 7 + uint64_t(iterations) * (7 + 2) + 7;
+  };
+  p.prepare = [](PPCContext*) {
+    g_host_args_calls = 0;
+    g_host_args_wrong = 0;
+  };
+  p.check = [](PPCContext* context, uint32_t iterations) {
+    const uint64_t n = iterations;
+    return g_host_args_calls == n && g_host_args_wrong == 0 &&
+           context->r[3] == n * (n + 1) / 2 + 8 * n;
+  };
+  return p;
+}
+
 using Builder = Program (*)(Env&);
-const Builder kBuilders[] = {BuildInteger, BuildFloat, BuildVector,
-                             BuildCalls,   BuildCopy,  BuildHostCalls};
+const Builder kBuilders[] = {BuildInteger, BuildFloat,     BuildVector,
+                             BuildCalls,   BuildCopy,      BuildHostCalls,
+                             BuildHostArgs};
 
 }  // namespace
 

@@ -20,7 +20,7 @@ set -euo pipefail
 dir=${1:?directory holding bench_core}
 shift
 qemu=${QEMU:-qemu-aarch64 -L /usr/aarch64-linux-gnu}
-programs=${PROGRAMS:-integer float vector calls copy host_calls}
+programs=${PROGRAMS:-integer float vector calls copy host_calls host_args}
 args=()
 for setting in "$@"; do args+=(--set "$setting"); done
 work=$(mktemp -d)

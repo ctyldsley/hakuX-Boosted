@@ -72,6 +72,21 @@ Done after the first round (2026-11-16, second part; sections 1.12 and
   halfword load has its register written by it. Small: `seq_cc_int`
   429,656 to 429,374 with everything on.
 
+Done in the third round (the night of 16 to 17 November; section 1.16):
+- Eighteen host registers for values and pins (`a64_scratch_gpr_pool`):
+  the bench's integer loop 2.52 to 2.24.
+- Guest registers kept in the same host register by all translated code
+  (`a64_shared_guest_registers`; 5a D, in the form the measurement
+  pointed to): with four of them and eighteen registers the compiled-C
+  corpus runs 5.9% fewer host instructions than the second round's best
+  (380,803 against 404,546; 39% below the defaults) and the bench's
+  calls go from 2.59 to 2.26. A kernel call gets eight instructions
+  dearer. Both off by default, both start-up settings.
+- A bench program whose host function reads and writes guest registers
+  (`host_args`), which is what tests the thunks' side of it, and a count
+  of non-local returns that found no landing frame, with a setting that
+  makes one fail a test line.
+
 In progress: nothing half-written is on the branch.
 
 Next, in order (section 5 lists everything left; section 5a is the
@@ -79,8 +94,8 @@ handover):
 1. The device runs of section 4.
 2. No FPCR write at all in functions without VMX float code (section
    1.15's last paragraph before the tests).
-3. One register mapping for all translated code (5a D), which wants the
-   device runs first.
+3. More shared registers, or other ones, once a device profile says
+   which (section 1.16 chose four from the test corpus).
 
 ## 0. The failed "Translator tests" job of run 135
 
@@ -707,6 +722,118 @@ with `mtfsf` so that a fix does not break them. Worth a look by the main
 thread: the fix is `i.X.RB >> 1`, and `instr_mtfsfix.s` has cases to
 extend.
 
+### 1.16 Guest registers in the same host register everywhere (`a64_shared_guest_registers`) and eighteen host registers (`a64_scratch_gpr_pool`)
+
+This is 5a D, built in the third round (the night of 16 to 17 November)
+after the measurement below said it was worth it.
+
+**What was left to take.** With everything on, 13% of the host
+instructions the compiled-C corpus runs were still loads and stores of
+guest general registers in the context: `seq_cc_int`, 404,546 in all,
+26,720 loads and 27,058 stores (counted with a script that classifies
+every instruction executed in the code cache; it is not in the tree, the
+method is "How it is measured" plus qemu's `in_asm`). By register: r1
+7,523 loads (every stack access reads the stack pointer), r3, and r26 to
+r31, which a function's prologue stores to the stack and its epilogue
+loads back. Pinning cannot reach these: a pin belongs to one function, is
+written back before every call and read again after, and the cost model
+therefore keeps registers that are busy round calls out of pins.
+
+**The mapping.** `a64_shared_guest_registers = n` keeps the first n of
+r1, r3, r31, r30, r29, r28 in x22 upward in *all* translated code. They
+are pinned slots of every function (`GuestRegisterPinningPass::AddShared`
+appends them after the function's own, marked `shared`), so every context
+load and store of one is a register move or, with
+`pin_guest_registers_coalesce`, nothing. What is different from a pin:
+- the backend never loads or stores them (a shared slot has no bit in
+  the masks): not at entry, not at calls between translated functions,
+  not at returns, not at `longjmp` resume stubs;
+- the context holds them only while host code runs. The host-to-guest
+  thunk loads them before it calls guest code and stores them after; the
+  two guest-to-host thunks (full and lean) store them before the host
+  function and load them after it, since a kernel export reads its
+  arguments from the context and writes its result there; the resolve
+  thunk stores them (`ResolveFunction` reads r1 for `longjmp`). x22 to
+  x27 are registers a host function preserves, so nothing is saved
+  round a host call;
+- the three places the emitter read r1 from the context (the two forms of
+  the stackpoint push and the frame chain's prologue) read the register.
+
+**Why it needs more host registers.** Each shared register is one fewer
+for a function's own pins and values, and a loop wants those. With the
+fourteen of `a64_extended_gpr_pool` the bench's integer loop went from
+2.52 to 3.10 with six shared registers while calls went from 2.59 to
+2.22: about break-even on the corpus. So `a64_scratch_gpr_pool` adds x4
+to x7 to the pool, eighteen in all. No sequence used x7; x4, x5 and x6
+were temporaries in five (the two atomic compare-and-exchange sequences
+and three VMX ones), which now use x8, x16 and x17 whatever
+the setting (the same code with other register numbers: the one change
+to the defaults' code in this round). The saves round host calls made
+from inside a sequence (the guest-to-host thunk and the two bare calls)
+cover x4 to x7 as they cover x9 to x15, and the stack synchronisation
+helper keeps out of them. With eighteen, up to fourteen pins
+(`pin_guest_registers_max_int = 14`), less the shared ones.
+
+**What it gives** (host instructions per guest instruction on the bench,
+everything exact on plus the frame chain; container counts):
+
+| | integer | calls | copy | host calls | host args |
+|---|---|---|---|---|---|
+| 14 registers (row 12) | 2.523 | 2.593 | 3.050 | 8.500 | |
+| 18 registers | 2.238 | 2.593 | 3.044 | 8.500 | 6.556 |
+| 18, 2 shared | 2.428 | 2.333 | 3.044 | 9.000 | |
+| 18, 4 shared | 2.523 | 2.259 | 3.047 | 9.333 | 6.667 |
+| 18, 6 shared | 2.714 | 2.222 | 3.052 | 10.000 | 7.111 |
+
+and on the corpus (`seq_cc_int`, the whole suite's host instructions):
+404,546 with 14 registers; 396,292 with 18; **380,803 with 18 and 4
+shared** (5.9% fewer; 39% below the defaults' 626,383); 380,826 with 6.
+So four is the number I would use: r1, r3, r31, r30. Float and vector
+loops do not change.
+
+What it costs: a kernel call stores and loads each shared register (the
+"host calls" column: 8.50 to 9.33 with four). A kernel call runs hundreds
+of host instructions of its own, so I expect that to be noise, but it is
+the direction to watch on a title that makes very many small kernel
+calls. Which registers a host function really needs is narrower than
+"all" (it does not read r28 to r31 unless it captures or unwinds a
+context), but I did not narrow it: wrong there would be silent.
+
+What it changes that a title could notice:
+- the context's copy of a shared register is stale while guest code
+  runs. Anything that reads another thread's context, or this thread's
+  from a signal handler, sees the value from the last host call: a crash
+  report's registers, a debugger (the setting turns itself off with
+  `debug`), and the pseudo stack trace's r1. The existing pins have the
+  same property for their registers; this adds r1, which was never
+  pinned for exactly this reason (the list in `ClassifySlot`'s comment).
+  The readers that matter (`ResolveFunction`, kernel exports) are behind
+  the thunks' stores;
+- a guest access to part of a shared register's slot would read stale
+  memory. The front end reads and writes a general register only as one
+  64-bit value; the pass checks every function all the same, logs
+  ("a64_shared_guest_registers: ...") and counts it with the self-check
+  mismatches.
+
+There is no verify mode in the usual sense (nothing to compare a shared
+register with while guest code runs). What stands in for it: the tests,
+the bench's new `host_args` program (below), and the counter above.
+
+Tests: every suite runs with it in the matrix lines below; `seq_longjmp`
+covers non-local returns with r1 shared (the landing function's r1 is in
+a register and `ResolveFunction` reads the thunk's copy). The thunks'
+synchronisation cannot be reached from the instruction tests (they call
+no host function that reads a register), so the bench has a seventh
+program, `host_args`: a host function that reads r3, r4, r31 and r1 from
+the context and writes r3, in a loop that keeps a sum in r30. Its check
+fails, and the counting script and the bench job with it, if the thunk
+does not store before the call or does not load after it; both faults
+were planted, in both thunks, and both were caught.
+
+Both settings are read once at start. `a64_shared_guest_registers` needs
+`a64_extended_gpr_pool`; with fourteen registers it works and is not
+worth having.
+
 ## 2. What it reached
 
 **The aim was a third to a half fewer host instructions per guest
@@ -723,6 +850,11 @@ calls are 35% down with exact settings (2.59 against 3.96) and kernel
 calls 54% by this script's count; the loops without calls are unchanged.
 The table below is the first round's and does not have that row; section
 1.13 has its own.
+
+Third round: with eighteen host registers and four guest registers shared
+by all code (section 1.16) the compiled-C corpus is at 380,803 host
+instructions, 39% below the defaults with exact settings (it was 31%
+after the first round), and the bench's calls at 2.26, 43% below.
 
 Host instructions run per guest instruction on the bench loops, counted in
 the session's container under qemu ("How it is measured"). Each numbered
@@ -879,6 +1011,10 @@ taken out):
 | a frame does not record the guest stack pointer of entry | crash; 10 mismatches with verify | |
 | the old frame search (`a64_longjmp_resume_live_frame = false`) | `longjmp_three_frames` crashes | this is the fault of section 1.12 |
 | the guard off at level 3 | the five hand-written flag conventions of `seq_flags_across_blocks.s` fail | by design: it is what the guard is for |
+| (third round) a guest-to-host thunk does not load the shared registers after the host function | the bench's `host_args` check fails, with the full thunk and the lean one | |
+| a guest-to-host thunk does not store them before it | the same | |
+| the resolve thunk does not store them (`ResolveFunction` reads a stale r1) | **not noticed** by `seq_longjmp` as it was: the tests passed through the general path. With `a64_longjmp_unconfirmed_is_mismatch` (added for this): 2 to 5 mismatches, and the line fails | the matrix's new lines set it |
+| the guest-to-host thunk does not keep x4 to x7 | **not noticed** by 1,952 tests; `values_across_host_helper` (added for this) fails with allocation from the top | |
 | FPCR: a disagreement between a block's predecessors ignored | `fpcr_join_vector_arm` fails; 1 mismatch counted by the verify mode alone | |
 | FPCR: branches to the block still to come ignored | `fpcr_loop_header` fails; 2 mismatches counted | the verify check had to be moved behind the block's label to see this one |
 
@@ -926,6 +1062,8 @@ it wrong, with the verify mode that would show it.
 | `inline_leaf_keeps_lr_writers_out` | a correction (section 1.12) | **on by default already** |
 | `a64_frame_chain` (start-up setting) | exact for calls and returns; changes how a `longjmp` finds its frame, and x29 | default on after a device run with `a64_frame_chain_verify` in a title that uses `setjmp` shows no mismatch |
 | `dead_context_stores_abi_guard` | makes level 3 more careful, never less | **on by default already** (it only acts at level 3) |
+| `a64_scratch_gpr_pool` (start-up setting) | exact; four more host registers for values and pins | with `a64_extended_gpr_pool`, after the same device runs as it |
+| `a64_shared_guest_registers = 4` (start-up setting) | exact for guest code; the context copy of r1, r3, r30, r31 is stale except during host calls (section 1.16) | the last thing to turn on: after everything else has run clean on the device, in more than one title, watching for anything that reads a guest register from outside (crash reports aside) |
 | `a64_fpcr_known_block_entry` | exact | default on after one device run with `a64_fpcr_known_block_entry_verify` alone shows "FPCR mismatches 0" |
 | `a64_vmx_nan_fixup = false` | changes results (ARM's choice of NaN in VMX operations) | not a default; a per-title option worth knowing about for vector-heavy titles |
 
@@ -946,6 +1084,8 @@ before, saves backed up:
 | 8 | `inline_extern_calls` | | |
 | 9 | `a64_frame_chain` (start-up setting) | `a64_frame_chain_verify`: no `a64_frame_chain_verify:` line, "frame chain mismatches" 0, in a title that uses `setjmp` (the counter "non-local returns resumed on the landing function's frame" above 0 says it does) | call-heavy code is where it shows |
 | 10 | `a64_fpcr_known_block_entry` | `a64_fpcr_known_block_entry_verify` on its own first: "FPCR mismatches" 0 | a profile: this one is about time, not instruction count |
+| 11 | `a64_scratch_gpr_pool` (start-up setting), `pin_guest_registers_max_int = 14` | as step 4 (`a64_pin_verify`) | loops; "blocks executed in pinned functions" |
+| 12 | `a64_shared_guest_registers = 4` (start-up setting) | none exists; the stats line's "self-check mismatches" must stay 0 (it counts an access the mapping cannot serve) | call-heavy code. If a title misbehaves only with this on, try 2, then 0, and say which |
 
 Steps 1 to 3 can be one run if time is short: they are the exact ones.
 The earlier sessions' settings not named here (`a64_stack_access_no_fixup`,
@@ -961,13 +1101,17 @@ Largest first. (The stackpoint record, the ABI flag guard and the
 counters, which stood here after the first round, are done: sections 1.13,
 1.14 and 1.12's opening.)
 
-- **A pinned register is written back before every call that could read
-  it.** A static mapping shared by all functions (the study's R1 in its
-  FEX form) would remove that for the registers both sides agree on. The
-  pool and the coalescing here are what it would be built on: the
-  allocator already treats a pin's host register as a value's home.
-  Section 5a D. With the frame chain in, this is the largest fixed cost
-  left on a call.
+- **Which registers are shared, and how many**, is chosen from the test
+  corpus (section 1.16). r4 to r10 (arguments) and r26 to r29 are the
+  candidates a title's profile might prefer; the order is one array in
+  `a64_emitter.cc` (`shared_gprs_`) and the count a setting. Float
+  registers are not shared at all: f1 (argument and result) would be the
+  first, in a register a host function preserves the low half of (v8 to
+  v15), which the vector pool would have to give up.
+- **A kernel call stores and loads every shared register.** Narrowing
+  that to what a host function can read (not r28 to r31, unless it
+  captures or unwinds a context) would take most of the cost back; it
+  needs each such host function found first.
 - **No FPCR write at all in functions without VMX float code.** Section
   1.15 removes the writes a block can inherit from the blocks before it.
   What is left: the first float block after a function's entry, after
@@ -1020,7 +1164,7 @@ counters, which stood here after the first round, are done: sections 1.13,
 
 Written for whoever picks this up (the main thread or another cloud
 session). Each can be done in a cloud session's container; none needs the
-phone to write or to test, only to judge at the end. A, B and C are done; D is left. Cut a branch from
+phone to write or to test, only to judge at the end. A to D are all done. Cut a branch from
 `claude/translator-overhaul`.
 
 ### A. A `longjmp` test: done (section 1.12)
@@ -1042,33 +1186,12 @@ indirection table entry could be pointed back at the resolve thunk, but
 linked call sites and callers that hold the old address would have to be
 found), and the entry scan following conditional branches.
 
-### D. One register mapping for all translated code (after B)
+### D. One register mapping for all translated code: done (section 1.16)
 
-The largest remaining step for call-heavy code, and the largest change.
-Today each function picks its own pins and writes the changed ones back
-before every call. With a mapping all functions agree on, a register in
-the shared set needs no write-back at a guest call and no reload after.
-
-- The shared set: r1, r3 to r10, r31, r30, LR and CTR is a starting point;
-  take it from the phone's `TranslationStats:` "pinned gprs" counts.
-- The context copy of a shared register is brought up to date only where
-  host code can look: the guest-to-host thunks store them before the host
-  call and reload after; the host-to-guest thunk loads them on entry and
-  stores them on return; the resolve thunk stores them (it reads r1).
-  That is `EmitGuestToHostThunk`, `EmitGuestToHostLeanThunk`,
-  `EmitHostToGuestThunk`, `EmitResolveFunctionThunk`.
-- In `GuestRegisterPinningPass::RunWide` a shared register is always
-  pinned, to its fixed host register, and a guest call is not a sync point
-  for it. Everything else in the pass and all of `PlanPinHomes` works
-  unchanged: that is what this branch built it for.
-- Anything that reads a guest register from the context while guest code
-  is interrupted, not at a call: the fault handler, the debugger, thread
-  suspension, the scheduler's switch if it can happen from a signal. Audit
-  before writing code; this is where it can go wrong silently.
-- `PushStackpoint` reads r1 and LR from the context: with B2 done it reads
-  the registers.
-Start-up setting, a verify mode that stores at every write as
-`a64_pin_verify` does, and stress lines in the matrix.
+Smaller than sketched here: the pinning machinery already had everything
+a shared register needs except "never synchronise this one", so it is a
+flag on a pinned slot, three thunks and a wider pool, not a second
+allocator. A, B, C and D are all done; what is left is in section 5.
 
 ## 6. For `HANDOFF.md` and `ARCHITECTURE.md`
 
@@ -1085,7 +1208,9 @@ where the call records confirm it, and (with debug information only) the
 stack check after a call sits where a `longjmp` resumes. If a title that
 worked stops working after this merge, `a64_longjmp_resume_live_frame =
 false` and `inline_leaf_keeps_lr_writers_out = false` give the earlier
-behaviour.
+behaviour. The third round changed the defaults' code in one way that
+changes no behaviour: five sequences (two atomic compare-and-exchange,
+three VMX) use other temporary registers.
 
 For `ARCHITECTURE.md`, upstream files changed (all marked `hakuX-Boosted:`):
 
@@ -1114,6 +1239,12 @@ For `ARCHITECTURE.md`, upstream files changed (all marked `hakuX-Boosted:`):
 | `cpu/compiler/compiler.cc` | the overhaul's counters in the `TranslationStats` line |
 | `cpu/backend/a64/a64_emitter.cc` (again) | `a64_fpcr_known_block_entry`, `_verify`: the block loop's edge records |
 | `cpu/ppc/testing/seq_fpcr_blocks.s` | new tests |
+| (third round) `cpu/backend/a64/a64_emitter.h`, `.cc` | `a64_scratch_gpr_pool` (the map of eighteen, the bare-call saves); `a64_shared_guest_registers` (`SetSharedGprs`, `SharedHostReg`, `EmitSharedGprsToContext`, `EmitSharedGprsFromContext`, shared pins without a mask bit, r1 read from its register) |
+| `cpu/backend/a64/a64_backend.cc` | the two settings; the thunks' stores and loads of the shared registers; x4 to x7 saved by the guest-to-host thunk; the stack helper's registers; `NoteUnconfirmedLanding` and `a64_longjmp_unconfirmed_is_mismatch` |
+| `cpu/backend/a64/a64_seq_memory.cc`, `a64_seq_vector.cc` | five sequences use x8, x16, x17 where they used x4 to x6 |
+| `cpu/backend/machine_info.h`, `cpu/hir/hir_builder.h` | `shared_gprs`; `PinnedContextSlot::shared` |
+| `cpu/compiler/passes/guest_register_pinning_pass.h`, `.cc` | `AddShared`; shared registers kept out of a function's own pins; up to fourteen pins of eighteen |
+| `boosted/bench/core/bench_xlat.cc`, `tools/xlat-count-qemu.sh`, `run-core.sh` | the `host_args` program; rows 14 to 17 |
 | `cpu/ppc/testing/seq_longjmp.s`, `seq_flags_across_blocks.s`, `ci/known-failures.txt`, `ci/matrix.txt` | new tests and lines |
 
 Outside the core: `boosted/bench/core/bench_xlat.cc` (the counting mode),
@@ -1171,12 +1302,28 @@ Outside the core: `boosted/bench/core/bench_xlat.cc` (the counting mode),
 - Actions run 143 (on `e681c3a`: the `longjmp` corrections, the frame
   chain, the guard) had built the core and the APK and was halfway
   through the translator tests when the push after it replaced it with a
-  run on the whole second round, so that one run covers everything; its
-  result is recorded below when known.
+  run on the whole second round, so that one run covers everything.
+- **Actions run 144 on `e4e160e` (the whole second round): green, all
+  three jobs**: "Xbox core", "APK (both cores)" and the translator tests
+  with every line of the matrix, the second round's among them (2 hours
+  40 minutes for that job)
+  (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43960085196).
+  Bench run 23 on the same commit: green.
 - Bench run 22 (the second round's commit `e681c3a`): green
   (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/43947299227).
   Its row "overhaul 13: 8 + frame chain" has calls at 2.37 host
   instructions per guest instruction, the figure counted here.
+
+- The third round (section 1.16), pushed after this text was written; the
+  run's result is in the last lines of this section once known. In the
+  container before the push: the new lines of `ci/matrix.txt` through
+  `ci/run-matrix.sh`, all passing ("overhaul 18, shared 4" over
+  everything: 141,961 of 141,961; six shared registers alone and
+  eighteen registers alone over everything as well); the shared set with
+  stress pinning, with each verify mode, with the stackpoint array
+  instead of the frame chain, at the ABI flag level and at 16 KiB pages:
+  pass; the bench's seven programs with their checks at the defaults and
+  with the set; the four deliberate faults of section 3's table.
 
 In the container before the push (x86-64, tests cross-compiled for ARM64
 and run under qemu-aarch64 8.2), on the tree of `0293269`: every new line

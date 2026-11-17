@@ -314,3 +314,46 @@ test_byte_and_halfword_loads_extend:
   #_ REGISTER_OUT r8 0xFF
   #_ REGISTER_OUT r9 0xFFFF
   #_ REGISTER_OUT r11 0x00FF000000000000
+
+# hakuX-Boosted: a64_scratch_gpr_pool. Values held in registers across an
+# instruction whose sequence calls a host function (vexptefp and vlogefp
+# do): a host function keeps x19 to x28 and nothing else, so whatever the
+# allocator put in x9 to x15 or x4 to x7 has to be saved round the call by
+# the thunk. With register_allocation_from_top the first values go to the
+# last registers of the pool, which is how a short test reaches them.
+test_values_across_host_helper:
+  #_ REGISTER_IN r3 0x1111
+  #_ REGISTER_IN r4 0x2222
+  #_ REGISTER_IN r8 0x0101
+  #_ REGISTER_IN r9 0x0202
+  #_ REGISTER_IN r10 0x0404
+  #_ REGISTER_IN r11 0x0808
+  add r5, r3, r4
+  add r6, r8, r9
+  add r7, r10, r11
+  add r12, r5, r6
+  vexptefp v1, v2
+  add r14, r5, r5
+  add r15, r6, r6
+  add r16, r7, r7
+  add r17, r12, r12
+  vlogefp v3, v2
+  add r18, r5, r6
+  add r19, r7, r12
+  blr
+  #_ REGISTER_OUT r3 0x1111
+  #_ REGISTER_OUT r4 0x2222
+  #_ REGISTER_OUT r8 0x0101
+  #_ REGISTER_OUT r9 0x0202
+  #_ REGISTER_OUT r10 0x0404
+  #_ REGISTER_OUT r11 0x0808
+  #_ REGISTER_OUT r5 0x3333
+  #_ REGISTER_OUT r6 0x0303
+  #_ REGISTER_OUT r7 0x0C0C
+  #_ REGISTER_OUT r12 0x3636
+  #_ REGISTER_OUT r14 0x6666
+  #_ REGISTER_OUT r15 0x0606
+  #_ REGISTER_OUT r16 0x1818
+  #_ REGISTER_OUT r17 0x6C6C
+  #_ REGISTER_OUT r18 0x3636
+  #_ REGISTER_OUT r19 0x4242

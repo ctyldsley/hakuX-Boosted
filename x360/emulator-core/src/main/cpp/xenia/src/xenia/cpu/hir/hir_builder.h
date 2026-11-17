@@ -79,6 +79,10 @@ class HIRBuilder {
     uint8_t reg_set;    // 0: the integer register set, 1: float/vector set
     uint8_t reg_index;  // index within that register set
     bool written;       // the function stores to the slot
+    // hakuX-Boosted: a64_shared_guest_registers. Held in this host register
+    // by all translated code: never read from the context or written to it
+    // by a function, and no part of the sets below.
+    bool shared = false;
   };
   std::vector<PinnedContextSlot>& pinned_context_slots() {
     return pinned_context_slots_;

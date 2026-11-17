@@ -1297,25 +1297,26 @@ struct ATOMIC_COMPARE_EXCHANGE_I32
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // Compute full host address (ldxr/stxr need base-only [Xn] addressing).
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.add(e.x4, e.GetMembaseReg(), addr);
-    // src2 = expected (use w5), src3 = desired (use w6).
+    e.add(e.x16, e.GetMembaseReg(), addr);
+    // src2 = expected, src3 = desired. hakuX-Boosted: in x16, x17 and x8
+    // (were x4, x5, x6, which a64_scratch_gpr_pool hands out).
     if (i.src2.is_constant) {
-      e.mov(e.w5,
+      e.mov(e.w17,
             static_cast<uint64_t>(static_cast<uint32_t>(i.src2.constant())));
     } else {
-      e.mov(e.w5, i.src2);
+      e.mov(e.w17, i.src2);
     }
     if (i.src3.is_constant) {
-      e.mov(e.w6,
+      e.mov(e.w8,
             static_cast<uint64_t>(static_cast<uint32_t>(i.src3.constant())));
     } else {
-      e.mov(e.w6, i.src3);
+      e.mov(e.w8, i.src3);
     }
 
     if (e.IsFeatureEnabled(kA64EmitLSE)) {
-      e.mov(e.w0, e.w5);
-      e.casal(e.w5, e.w6, ptr(e.x4));
-      e.cmp(e.w5, e.w0);
+      e.mov(e.w0, e.w17);
+      e.casal(e.w17, e.w8, ptr(e.x16));
+      e.cmp(e.w17, e.w0);
       e.cset(i.dest, Xbyak_aarch64::EQ);
       return;
     }
@@ -1324,10 +1325,10 @@ struct ATOMIC_COMPARE_EXCHANGE_I32
     auto& fail = e.NewCachedLabel();
     auto& done = e.NewCachedLabel();
     e.L(retry);
-    e.ldaxr(e.w2, ptr(e.x4));
-    e.cmp(e.w2, e.w5);
+    e.ldaxr(e.w2, ptr(e.x16));
+    e.cmp(e.w2, e.w17);
     e.b(Xbyak_aarch64::NE, fail);
-    e.stlxr(e.w3, e.w6, ptr(e.x4));
+    e.stlxr(e.w3, e.w8, ptr(e.x16));
     e.cbnz(e.w3, retry);
     e.mov(i.dest, 1);
     e.b(done);
@@ -1342,22 +1343,22 @@ struct ATOMIC_COMPARE_EXCHANGE_I64
                I<OPCODE_ATOMIC_COMPARE_EXCHANGE, I8Op, I64Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.add(e.x4, e.GetMembaseReg(), addr);
+    e.add(e.x16, e.GetMembaseReg(), addr);
     if (i.src2.is_constant) {
-      e.mov(e.x5, static_cast<uint64_t>(i.src2.constant()));
+      e.mov(e.x17, static_cast<uint64_t>(i.src2.constant()));
     } else {
-      e.mov(e.x5, i.src2);
+      e.mov(e.x17, i.src2);
     }
     if (i.src3.is_constant) {
-      e.mov(e.x6, static_cast<uint64_t>(i.src3.constant()));
+      e.mov(e.x8, static_cast<uint64_t>(i.src3.constant()));
     } else {
-      e.mov(e.x6, i.src3);
+      e.mov(e.x8, i.src3);
     }
 
     if (e.IsFeatureEnabled(kA64EmitLSE)) {
-      e.mov(e.x0, e.x5);
-      e.casal(e.x5, e.x6, ptr(e.x4));
-      e.cmp(e.x5, e.x0);
+      e.mov(e.x0, e.x17);
+      e.casal(e.x17, e.x8, ptr(e.x16));
+      e.cmp(e.x17, e.x0);
       e.cset(i.dest, Xbyak_aarch64::EQ);
       return;
     }
@@ -1366,10 +1367,10 @@ struct ATOMIC_COMPARE_EXCHANGE_I64
     auto& fail = e.NewCachedLabel();
     auto& done = e.NewCachedLabel();
     e.L(retry);
-    e.ldaxr(e.x2, ptr(e.x4));
-    e.cmp(e.x2, e.x5);
+    e.ldaxr(e.x2, ptr(e.x16));
+    e.cmp(e.x2, e.x17);
     e.b(Xbyak_aarch64::NE, fail);
-    e.stlxr(e.w3, e.x6, ptr(e.x4));
+    e.stlxr(e.w3, e.x8, ptr(e.x16));
     e.cbnz(e.w3, retry);
     e.mov(i.dest, 1);
     e.b(done);

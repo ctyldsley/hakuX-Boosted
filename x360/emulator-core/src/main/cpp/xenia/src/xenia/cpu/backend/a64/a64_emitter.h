@@ -83,10 +83,16 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // allocator and the pinning pass are told.
   static constexpr int GPR_COUNT_EXTENDED = 14;
   static int gpr_count() { return gpr_count_; }
-  static bool extended_gpr_pool() { return gpr_count_ == GPR_COUNT_EXTENDED; }
+  static bool extended_gpr_pool() { return gpr_count_ >= GPR_COUNT_EXTENDED; }
+  // hakuX-Boosted: a64_scratch_gpr_pool. x4-x7 as well, eighteen in all:
+  // no sequence uses them (three did, as temporaries, and use x8, x16 and
+  // x17 now), and the saves round host calls cover them like x9-x15.
+  static constexpr int GPR_COUNT_SCRATCH = 18;
+  static bool scratch_gpr_pool() { return gpr_count_ == GPR_COUNT_SCRATCH; }
   // Called once by the backend before any code is emitted.
-  static void SetExtendedGprPool(bool extended) {
-    gpr_count_ = extended ? GPR_COUNT_EXTENDED : GPR_COUNT;
+  static void SetExtendedGprPool(bool extended, bool scratch = false) {
+    gpr_count_ = !extended ? GPR_COUNT
+                           : scratch ? GPR_COUNT_SCRATCH : GPR_COUNT_EXTENDED;
   }
   // hakuX-Boosted: a64_frame_chain. 0 = call records in the per-thread
   // array (PushStackpoint and the rest), 1 = in the host frames themselves,
@@ -95,6 +101,28 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // emitted: the thunks and every function have to agree.
   static int frame_chain() { return frame_chain_; }
   static void SetFrameChain(int mode) { frame_chain_ = mode; }
+  // hakuX-Boosted: a64_shared_guest_registers. The guest general registers
+  // that live in fixed host registers in all translated code (entry n in
+  // x22 + n, which a host function preserves), and so are in the context
+  // only while host code runs: the thunks between the two write them there
+  // and read them back. Set once by the backend before any code is
+  // emitted.
+  static constexpr int kMaxSharedGprs = 6;
+  static int shared_gpr_count() { return shared_gpr_count_; }
+  static int shared_gpr(int n) { return shared_gprs_[n]; }
+  static void SetSharedGprs(int count);
+  // The host register of guest register |gpr|, or -1.
+  static int SharedHostReg(int gpr) {
+    for (int n = 0; n < shared_gpr_count_; ++n) {
+      if (shared_gprs_[n] == gpr) {
+        return 22 + n;
+      }
+    }
+    return -1;
+  }
+  // All of them to the context, and back from it. Nothing else is touched.
+  void EmitSharedGprsToContext();
+  void EmitSharedGprsFromContext();
   // Where a frame keeps the guest stack pointer it was entered with: the
   // upper half of the guest return address's slot (the address is 32 bits).
   static constexpr size_t kFrameGuestStackOffset = 48 + 4;
@@ -244,7 +272,8 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
     hir::TypeName type;  // INT64_TYPE, INT8_TYPE, FLOAT64_TYPE or VEC128_TYPE
     uint32_t host_reg;  // x or v register number
     bool written;       // the function stores to it
-    uint32_t bit;       // its bit in the masks below
+    uint32_t bit;       // its bit in the masks below (0 for a shared one)
+    bool shared = false;  // hakuX-Boosted: a64_shared_guest_registers
   };
   // The pinned register for a context access of exactly this offset and
   // type, or null. Always null when nothing is pinned.
@@ -406,9 +435,11 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   size_t stack_size_ = 0;
 
-  static const uint32_t gpr_reg_map_[GPR_COUNT_EXTENDED];
+  static const uint32_t gpr_reg_map_[GPR_COUNT_SCRATCH];
   static int gpr_count_;
   static int frame_chain_;  // hakuX-Boosted
+  static int shared_gpr_count_;
+  static int shared_gprs_[kMaxSharedGprs];
   static const uint32_t vec_reg_map_[VEC_COUNT];
 
   std::vector<TailEmitter> tail_code_;

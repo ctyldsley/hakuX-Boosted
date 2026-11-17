@@ -213,11 +213,35 @@ static constexpr size_t kMaxCodeSize = 4_MiB;
 // (x19=backend context, x20=context, x21=membase are reserved)
 // hakuX-Boosted: with a64_extended_gpr_pool, x9-x15 as well. They follow
 // the original seven so that an index means the same register either way.
-const uint32_t A64Emitter::gpr_reg_map_[GPR_COUNT_EXTENDED] = {
-    22, 23, 24, 25, 26, 27, 28, 9, 10, 11, 12, 13, 14, 15,
-};
+const uint32_t A64Emitter::gpr_reg_map_[GPR_COUNT_SCRATCH] = {
+    22, 23, 24, 25, 26, 27, 28, 9, 10, 11, 12, 13, 14, 15, 4, 5, 6, 7};
 int A64Emitter::gpr_count_ = A64Emitter::GPR_COUNT;
 int A64Emitter::frame_chain_ = 0;  // hakuX-Boosted
+int A64Emitter::shared_gpr_count_ = 0;
+// In the order they are taken: the stack pointer, the first argument and
+// result, then the registers a function saves and restores for its caller.
+int A64Emitter::shared_gprs_[A64Emitter::kMaxSharedGprs] = {1,  3,  31,
+                                                            30, 29, 28};
+
+void A64Emitter::SetSharedGprs(int count) {
+  shared_gpr_count_ = std::clamp(count, 0, kMaxSharedGprs);
+}
+
+void A64Emitter::EmitSharedGprsToContext() {
+  for (int n = 0; n < shared_gpr_count_; ++n) {
+    str(XReg(22 + n),
+        ptr(x20, static_cast<uint32_t>(offsetof(ppc::PPCContext, r) +
+                                       8 * shared_gprs_[n])));
+  }
+}
+
+void A64Emitter::EmitSharedGprsFromContext() {
+  for (int n = 0; n < shared_gpr_count_; ++n) {
+    ldr(XReg(22 + n),
+        ptr(x20, static_cast<uint32_t>(offsetof(ppc::PPCContext, r) +
+                                       8 * shared_gprs_[n])));
+  }
+}
 
 // VEC allocatable registers: v4-v15, v16-v31
 // (v0-v3 are scratch)
@@ -384,7 +408,11 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     pin.offset = slot.offset;
     pin.type = slot.type;
     pin.written = slot.written;
-    pin.bit = uint32_t(1) << pins_.size();
+    pin.shared = slot.shared;
+    // hakuX-Boosted: a shared register has no bit: no mask ever names it,
+    // so it is neither loaded at entry nor written back or read again at
+    // any way out. (They come after the function's own pins in the list.)
+    pin.bit = slot.shared ? 0 : uint32_t(1) << pins_.size();
     pin_all_mask |= pin.bit;
     if (slot.written) {
       pin_written_mask |= pin.bit;
@@ -516,8 +544,13 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     // from the frame a non-local return was made from.
     stp(x30, x29, ptr(sp, static_cast<int32_t>(StackLayout::HOST_RET_ADDR)));
     str(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
-    ldr(w8, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
-    str(w8, ptr(sp, static_cast<uint32_t>(kFrameGuestStackOffset)));
+    if (SharedHostReg(1) >= 0) {  // hakuX-Boosted: r1 is in a register
+      str(WReg(SharedHostReg(1)),
+          ptr(sp, static_cast<uint32_t>(kFrameGuestStackOffset)));
+    } else {
+      ldr(w8, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+      str(w8, ptr(sp, static_cast<uint32_t>(kFrameGuestStackOffset)));
+    }
     mov(x29, sp);
   } else {
   // Store host return address (x30/LR) so the epilog can restore it.
@@ -1569,6 +1602,7 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
       str(x29, ptr(x19, static_cast<uint32_t>(
                             offsetof(A64BackendContext, resolve_frame))));
     }
+    EmitSharedGprsToContext();  // hakuX-Boosted: it reads r1
     mov(x9, reinterpret_cast<uint64_t>(&ResolveFunction));
     blr(x9);
     mov(x9, x0);  // resolved address in x9
@@ -1674,6 +1708,7 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
       str(x29, ptr(x19, static_cast<uint32_t>(
                             offsetof(A64BackendContext, resolve_frame))));
     }
+    EmitSharedGprsToContext();  // hakuX-Boosted: it reads r1
     mov(x9, reinterpret_cast<uint64_t>(&ResolveFunction));
     blr(x9);
     mov(x9, x0);  // resolved address
@@ -1812,6 +1847,15 @@ uint32_t A64Emitter::EmitSaveExtendedGprsForBareCall() {
   if (!extended_gpr_pool()) {
     return 0;
   }
+  if (scratch_gpr_pool()) {  // hakuX-Boosted: and x4-x7
+    stp(x9, x10, pre_ptr(sp, -96));
+    stp(x11, x12, ptr(sp, 16));
+    stp(x13, x14, ptr(sp, 32));
+    stp(x15, x4, ptr(sp, 48));
+    stp(x5, x6, ptr(sp, 64));
+    str(x7, ptr(sp, 80));
+    return 96;
+  }
   stp(x9, x10, pre_ptr(sp, -64));
   stp(x11, x12, ptr(sp, 16));
   stp(x13, x14, ptr(sp, 32));
@@ -1821,6 +1865,15 @@ uint32_t A64Emitter::EmitSaveExtendedGprsForBareCall() {
 
 void A64Emitter::EmitRestoreExtendedGprsAfterBareCall() {
   if (!extended_gpr_pool()) {
+    return;
+  }
+  if (scratch_gpr_pool()) {
+    ldr(x7, ptr(sp, 80));
+    ldp(x5, x6, ptr(sp, 64));
+    ldp(x15, x4, ptr(sp, 48));
+    ldp(x13, x14, ptr(sp, 32));
+    ldp(x11, x12, ptr(sp, 16));
+    ldp(x9, x10, post_ptr(sp, 96));
     return;
   }
   ldr(x15, ptr(sp, 48));
@@ -1967,6 +2020,11 @@ static uint64_t ReportPinnedMismatch(void* raw_context, uint64_t function,
 }
 
 void A64Emitter::EmitPinnedVerify(const PinnedGuestRegister& pin) {
+  if (pin.shared) {
+    // hakuX-Boosted: a shared register has no context copy to compare with
+    // while guest code runs.
+    return;
+  }
   // The report below goes through the guest-to-host thunk, which leaves FPCR
   // in the scalar mode; make the mode tracking agree whichever way the
   // compare goes.
@@ -2389,7 +2447,12 @@ void A64Emitter::PushStackpoint() {
     mov(x10, sp);
     str(x10, ptr(x8, static_cast<uint32_t>(
                          offsetof(A64BackendStackpoint, host_stack_))));
-    ldr(w10, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+    if (SharedHostReg(1) >= 0) {  // hakuX-Boosted: r1 is in a register
+      mov(w10, WReg(SharedHostReg(1)));
+    } else {
+      ldr(w10,
+          ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+    }
     ldr(w11, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, lr))));
     stp(w10, w11, ptr(x8, static_cast<int32_t>(offsetof(A64BackendStackpoint,
                                                         guest_stack_))));
@@ -2432,7 +2495,11 @@ void A64Emitter::PushStackpoint() {
   str(x10, ptr(x8, static_cast<uint32_t>(
                        offsetof(A64BackendStackpoint, host_stack_))));
   // Store guest r1 (32-bit).
-  ldr(w10, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+  if (SharedHostReg(1) >= 0) {  // hakuX-Boosted: r1 is in a register
+    mov(w10, WReg(SharedHostReg(1)));
+  } else {
+    ldr(w10, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+  }
   str(w10, ptr(x8, static_cast<uint32_t>(
                        offsetof(A64BackendStackpoint, guest_stack_))));
   // Store guest LR (32-bit).

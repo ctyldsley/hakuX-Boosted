@@ -58,6 +58,37 @@ DEFINE_bool(
     "off to get the earlier behaviour exactly.",
     "a64");
 
+DEFINE_bool(
+    a64_longjmp_unconfirmed_is_mismatch, false,
+    "For the tests: a non-local return for which the call records confirm "
+    "no landing frame counts as a self-check mismatch. (It is always "
+    "counted in the TranslationStats line.)",
+    "a64");
+
+// hakuX-Boosted: see A64Emitter::scratch_gpr_pool.
+DEFINE_bool(
+    a64_scratch_gpr_pool, false,
+    "With a64_extended_gpr_pool: eighteen host registers for integer "
+    "values and pinned guest registers, not fourteen (x4-x7 join). What "
+    "makes room for a64_shared_guest_registers without taking registers "
+    "from loops. Read once at start.",
+    "a64");
+
+// hakuX-Boosted: see A64Emitter::SetSharedGprs.
+DEFINE_int32(
+    a64_shared_guest_registers, 0,
+    "How many guest general registers every translated function keeps in "
+    "the same host register (0 to 6, in the order r1, r3, r31, r30, r29, "
+    "r28; they take x22 upward). A call between translated functions then "
+    "neither writes them to the context nor reads them back, and a "
+    "function reads and writes them as registers whether it has a loop or "
+    "not. The context holds them only while host code runs: the thunks "
+    "between host and guest code store and load them, which makes a kernel "
+    "call that many stores and loads dearer. Each one is a host register "
+    "the function's own pins and values cannot have. Needs "
+    "a64_extended_gpr_pool; read once at start; not with the debugger.",
+    "a64");
+
 // hakuX-Boosted: see A64Emitter::frame_chain.
 DEFINE_bool(
     a64_frame_chain, false,
@@ -261,6 +292,25 @@ uint64_t FindLandingFrame(uint64_t frame, uint32_t guest_sp, uint32_t fn_start,
   return 0;
 }
 
+// hakuX-Boosted: a return to a return site inside a function for which the
+// call records name no landing frame. In a title that can be a jump that is
+// not a longjmp at all; in the longjmp tests it means the records or the
+// stack pointer the search was given are wrong, and the test would pass
+// all the same, through the general path. So it is counted, and a setting
+// for the tests makes it a self-check mismatch.
+void NoteUnconfirmedLanding(uint32_t target, uint32_t function) {
+  compiler::translation_stats.longjmp_unconfirmed.fetch_add(
+      1, std::memory_order_relaxed);
+  if (cvars::a64_longjmp_unconfirmed_is_mismatch) {
+    compiler::translation_stats.verify_mismatches.fetch_add(
+        1, std::memory_order_relaxed);
+    XELOGE(
+        "a64_longjmp_unconfirmed_is_mismatch: return to {:08X} in {:08X} "
+        "with no landing frame confirmed",
+        target, function);
+  }
+}
+
 // ==========================================================================
 // A64HelperEmitter — generates thunks using xbyak_aarch64.
 // ==========================================================================
@@ -376,9 +426,14 @@ HostToGuestThunk A64HelperEmitter::EmitHostToGuestThunk() {
     // here (x29 was saved above and comes back in the epilog).
     mov(x29, 0);
   }
+  // hakuX-Boosted: a64_shared_guest_registers. Guest code has them in
+  // x22 upward (saved above for the host); host code has them in the
+  // context.
+  EmitSharedGprsFromContext();
 
   // Call the guest function.
   blr(x9);
+  EmitSharedGprsToContext();  // hakuX-Boosted
 
   code_offsets.epilog = getSize();
 
@@ -470,7 +525,9 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   //   x15          sp + 0x200
   //   Total: 0x210 = 528 bytes
   const bool save_extended = A64Emitter::extended_gpr_pool();
-  const size_t g2h_stack = save_extended ? 528 : 464;
+  // hakuX-Boosted: a64_scratch_gpr_pool: x4-x7 at sp + 0x208 to 0x220.
+  const bool save_scratch = A64Emitter::scratch_gpr_pool();
+  const size_t g2h_stack = save_scratch ? 560 : save_extended ? 528 : 464;
   sub(sp, sp, static_cast<uint32_t>(g2h_stack));
   code_offsets.prolog_stack_alloc = getSize();
 
@@ -497,15 +554,26 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
     stp(x13, x14, ptr(sp, 0x1F0));
     str(x15, ptr(sp, 0x200));
   }
+  if (save_scratch) {
+    // (Singly: a paired store reaches 504 bytes.)
+    str(x4, ptr(sp, 0x208));
+    str(x5, ptr(sp, 0x210));
+    str(x6, ptr(sp, 0x218));
+    str(x7, ptr(sp, 0x220));
+  }
 
   code_offsets.body = getSize();
 
   // Call host function.
   // AAPCS64: x0=first arg. We set x0=context (from x20).
+  // hakuX-Boosted: a64_shared_guest_registers. The host function reads
+  // and writes guest registers in the context.
+  EmitSharedGprsToContext();
   mov(x9, x0);   // x9 = target function (scratch; saved above if it counts)
   mov(x0, x20);  // x0 = PPCContext* (our context reg)
   // x1, x2, x3 already hold args from the caller.
   blr(x9);
+  EmitSharedGprsFromContext();
 
   // Host callbacks may change FPCR. Restore the guest scalar FPCR before
   // resuming the JIT so later guest ops observe the cached PPC mode.
@@ -515,6 +583,12 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   code_offsets.epilog = getSize();
 
   // Restore.
+  if (save_scratch) {
+    ldr(x7, ptr(sp, 0x220));
+    ldr(x6, ptr(sp, 0x218));
+    ldr(x5, ptr(sp, 0x210));
+    ldr(x4, ptr(sp, 0x208));
+  }
   if (save_extended) {
     ldr(x15, ptr(sp, 0x200));
     ldp(x13, x14, ptr(sp, 0x1F0));
@@ -599,10 +673,12 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostLeanThunk() {
 
   code_offsets.body = getSize();
 
+  EmitSharedGprsToContext();  // hakuX-Boosted: as in the full thunk
   mov(x9, x0);   // x9 = target function (scratch)
   mov(x0, x20);  // x0 = PPCContext*
   // x1, x2 already hold the arguments.
   blr(x9);
+  EmitSharedGprsFromContext();
 
   // As in the full thunk: the host function may have changed FPCR.
   EmitGuestFpcrRestore();
@@ -668,6 +744,10 @@ ResolveFunctionThunk A64HelperEmitter::EmitResolveFunctionThunk() {
     str(x29, ptr(x19, static_cast<uint32_t>(
                           offsetof(A64BackendContext, resolve_frame))));
   }
+  // hakuX-Boosted: a64_shared_guest_registers. ResolveFunction reads the
+  // guest stack pointer (and changes no guest register; a host function
+  // keeps x22 upward).
+  EmitSharedGprsToContext();
   // Call ResolveFunction(context, target_address).
   mov(x0, x20);  // x0 = PPCContext*
   mov(x1, x16);  // x1 = guest address (32-bit in w16)
@@ -738,9 +818,12 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
   const XReg x10 = XReg(low ? 1 : 10);
   const WReg w11 = WReg(low ? 2 : 11);
   const WReg w13 = WReg(low ? 3 : 13);
-  const XReg x14 = XReg(low ? 4 : 14);
-  const WReg w14 = WReg(low ? 4 : 14);
-  const WReg w15 = WReg(low ? 5 : 15);
+  // (x17 and w2, not x4 and w5: a64_scratch_gpr_pool hands x4-x7 out. x17
+  // brought the helper's address here and is free; w2's count is dead by
+  // the time the zero is needed.)
+  const XReg x14 = XReg(low ? 17 : 14);
+  const WReg w14 = WReg(low ? 17 : 14);
+  const WReg w15 = WReg(low ? 2 : 15);
 
   // x10 = stackpoints array pointer
   ldr(x10, ptr(x19, static_cast<uint32_t>(
@@ -1030,6 +1113,8 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
             }
             if (chain == 1) {
               if (!chain_landing) {
+                NoteUnconfirmedLanding(static_cast<uint32_t>(target_address),
+                                       afunc->address());
                 break;  // not confirmed: the general path, as with depth 0
               }
               backend_context->pending_resume_frame = chain_landing;
@@ -1054,6 +1139,9 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
               if (sync_depth != 0) {
                 compiler::translation_stats.longjmp_landing_frames.fetch_add(
                     1, std::memory_order_relaxed);
+              } else {
+                NoteUnconfirmedLanding(static_cast<uint32_t>(target_address),
+                                       afunc->address());
               }
             }
             if (chain == 2) {
@@ -1233,12 +1321,24 @@ bool A64Backend::Initialize(Processor* processor) {
   // hakuX-Boosted: or fourteen, with a64_extended_gpr_pool. Decided here,
   // once, before the thunks below are generated: they and every function's
   // code have to agree on it.
-  A64Emitter::SetExtendedGprPool(cvars::a64_extended_gpr_pool);
+  A64Emitter::SetExtendedGprPool(cvars::a64_extended_gpr_pool,
+                                 cvars::a64_scratch_gpr_pool);
   // hakuX-Boosted: likewise where the call records are kept.
   A64Emitter::SetFrameChain(
       !cvars::a64_enable_host_guest_stack_synchronization
           ? 0
           : cvars::a64_frame_chain_verify ? 2 : cvars::a64_frame_chain ? 1 : 0);
+  // hakuX-Boosted: and the guest registers all code keeps in registers.
+  A64Emitter::SetSharedGprs(
+      A64Emitter::extended_gpr_pool() && !cvars::debug
+          ? cvars::a64_shared_guest_registers
+          : 0);
+  machine_info_.shared_gpr_count =
+      static_cast<uint8_t>(A64Emitter::shared_gpr_count());
+  for (int n = 0; n < A64Emitter::shared_gpr_count(); ++n) {
+    machine_info_.shared_gprs[n] =
+        static_cast<uint8_t>(A64Emitter::shared_gpr(n));
+  }
   gpr_set.count = A64Emitter::gpr_count();
   // VEC set: v4-v15, v16-v31 (28 registers, v0-v3 scratch)
   auto& vec_set = machine_info_.register_sets[1];
