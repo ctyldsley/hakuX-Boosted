@@ -226,6 +226,11 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     // slot has taken its handle or given up.
     void* stand_in_pending = nullptr;
     uint32_t stand_in_pending_packed = 0;
+    // hakuX-Boosted: boosted/notes/standin-device-lost.md. The render pass
+    // key of the shared stand-in this slot took (its recipe's), for the draw
+    // time check of vulkan_dynamic_state_check. Written before the handle is
+    // published, read by the GPU command thread only.
+    uint32_t placeholder_render_pass_key = 0;
     // A placeholder was asked for once, made or not: not asked for again.
     bool placeholder_attempted = false;
     // A wait for this slot's real pipeline ran out
@@ -515,6 +520,24 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   // (vulkan_standin_precompile, with the placeholder model and that
   // interpreter). Any thread.
   bool IsStandInPrecompileActive() const;
+
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md. The pieces of
+  // dynamic state the shared stand-ins bake in instead
+  // (vulkan_standin_dynamic_state_mask), as these bits, cut down to those
+  // the device makes dynamic. Fixed at Initialize. A draw that binds a
+  // shared stand-in must not set these (they are static in it), and the
+  // next draw with a real pipeline must set them again.
+  enum StandInStaticBits : uint32_t {
+    kStandInStaticDepthClamp = 1u << 0,
+    kStandInStaticPolygonMode = 1u << 1,
+    kStandInStaticBlendEnable = 1u << 2,
+    kStandInStaticBlendEquation = 1u << 3,
+    kStandInStaticWriteMask = 1u << 4,
+    kStandInStaticTopology = 1u << 5,
+    kStandInStaticRasterDepthStencil = 1u << 6,
+    kStandInStaticAll = (1u << 7) - 1,
+  };
+  uint32_t standin_static_mask() const { return standin_static_mask_; }
 
   // True while this draw must be fed the ucode interpreter's inputs (full float
   // constants + ucode location). False once hot-swapped to the real VS.
@@ -1036,9 +1059,23 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     std::atomic<uint32_t> state{kQueued};
   };
   // Cuts a slot's canonical description down to a recipe's.
+  // hakuX-Boosted: source_description, if given, is the draw's description
+  // before canonicalisation, from which the pieces of state in
+  // standin_static_mask_ are put back (boosted/notes/standin-device-lost.md).
   void BuildStandInRecipe(const PipelineDescription& slot_description,
                           StandInPixelForm pixel_form, uint32_t fallback_inputs,
-                          StandInRecipe& recipe_out) const;
+                          StandInRecipe& recipe_out,
+                          const PipelineDescription* source_description =
+                              nullptr) const;
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md.
+  // vulkan_standin_dynamic_state_mask cut down to what the device makes
+  // dynamic, fixed at Initialize.
+  uint32_t standin_static_mask_ = 0;
+  // The current draw's description before canonicalisation, kept by
+  // ConfigurePipeline while standin_static_mask_ is not 0, for
+  // MakePlaceholder (GPU command thread only).
+  PipelineDescription standin_source_description_;
+  bool standin_source_description_valid_ = false;
   // The shared stand-in of a recipe, queued for the creation threads if it
   // is new. Null if it cannot be made on this device. from_draw: a draw is
   // waiting for it, so it goes (or goes again) ahead of everything queued.

@@ -153,6 +153,28 @@ DECLARE_bool(vulkan_placeholder_interpreter_geometry);
 DECLARE_int32(vulkan_placeholder_interpreter);
 DECLARE_int32(vulkan_placeholder_interpreter_vertex_budget);
 
+// hakuX-Boosted: boosted/notes/standin-device-lost.md.
+DEFINE_int32(
+    vulkan_dynamic_state_check, 0,
+    "A debugging aid for device loss: at each draw, check that every piece "
+    "of dynamic state the bound pipeline declares has been set in the "
+    "command buffer since it began or since the last pipeline that has it "
+    "static was bound, and, for a shared stand-in (vulkan_standin_precompile), "
+    "that it was made for the render pass it is drawn in. The first 16 "
+    "faults are logged with the frame, the shaders, the pipeline and the "
+    "state's name, and a count every 600 frames. 0 off, 1 the draws with a "
+    "shared stand-in, 2 every guest draw.",
+    "Vulkan");
+DEFINE_bool(
+    vulkan_dynamic_color_state_fix, false,
+    "Set the colour blend enable, blend equation and write mask dynamic "
+    "state for all four colour attachments, not only up to the highest the "
+    "draw's render pass has, so that a draw to more attachments than the "
+    "draw that last set them never finds the higher ones unset in the "
+    "command buffer (it did when their remembered values happened to "
+    "match).",
+    "Vulkan");
+
 DEFINE_bool(
     vulkan_dynamic_rendering, true,
     "Use VK_KHR_dynamic_rendering instead of traditional render passes. "
@@ -3705,6 +3727,24 @@ VulkanCommandProcessor::AcquireScratchGpuBuffer(
 void VulkanCommandProcessor::BindExternalGraphicsPipeline(
     VkPipeline pipeline, bool keep_dynamic_depth_bias,
     bool keep_dynamic_blend_constants, bool keep_dynamic_stencil_mask_ref) {
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md
+  // (vulkan_dynamic_state_check): what binding this pipeline makes undefined.
+  {
+    uint64_t made_undefined = ~uint64_t(0) << kDynCheckPrimitiveTopology;
+    if (!keep_dynamic_depth_bias) {
+      made_undefined |= uint64_t(1) << kDynCheckDepthBias;
+    }
+    if (!keep_dynamic_blend_constants) {
+      made_undefined |= uint64_t(1) << kDynCheckBlendConstants;
+    }
+    if (!keep_dynamic_stencil_mask_ref) {
+      for (uint32_t bit = kDynCheckStencilCompareMaskFront;
+           bit <= kDynCheckStencilReferenceBack; ++bit) {
+        made_undefined |= uint64_t(1) << bit;
+      }
+    }
+    dynamic_state_check_set_ &= ~made_undefined;
+  }
   if (!keep_dynamic_depth_bias) {
     dynamic_depth_bias_update_needed_ = true;
   }
@@ -3775,6 +3815,7 @@ void VulkanCommandProcessor::SetViewport(const VkViewport& viewport) {
     dynamic_viewport_ = viewport;
     deferred_command_buffer_.CmdVkSetViewport(0, 1, &dynamic_viewport_);
     dynamic_viewport_update_needed_ = false;
+    DynamicStateCheckSet(kDynCheckViewport);
   }
 }
 
@@ -3793,6 +3834,7 @@ void VulkanCommandProcessor::SetScissor(const VkRect2D& scissor) {
     dynamic_scissor_ = scissor;
     deferred_command_buffer_.CmdVkSetScissor(0, 1, &dynamic_scissor_);
     dynamic_scissor_update_needed_ = false;
+    DynamicStateCheckSet(kDynCheckScissor);
   }
 }
 
@@ -4621,6 +4663,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       current_pipeline != VK_NULL_HANDLE &&
       current_pipeline ==
           pipeline->placeholder_pipeline.load(std::memory_order_acquire);
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md. A shared stand-in
+  // (vulkan_standin_precompile), and the pieces of dynamic state it has
+  // static (vulkan_standin_dynamic_state_mask).
+  const bool shared_stand_in_bound =
+      placeholder_bound &&
+      pipeline->placeholder_shared.load(std::memory_order_acquire);
+  const uint32_t standin_static_mask =
+      shared_stand_in_bound ? pipeline_cache_->standin_static_mask() : 0;
   // hakuX-Boosted: what this draw is drawn with, for the once-a-second split,
   // and the frame's allowance of vertices for the interpreter
   // (vulkan_placeholder_interpreter_vertex_budget): a draw that would go
@@ -5125,7 +5175,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   UpdateDynamicState(viewport_info, primitive_polygonal,
                      normalized_depth_control, draw_resolution_scale_x,
                      draw_resolution_scale_y, apply_host_depth_polygon_offset,
-                     pipeline->dynamic_state);
+                     pipeline->dynamic_state, standin_static_mask);
 
   auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
 
@@ -5433,7 +5483,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     UpdateDynamicState(viewport_info, primitive_polygonal,
                        normalized_depth_control, draw_resolution_scale_x,
                        draw_resolution_scale_y, apply_host_depth_polygon_offset,
-                       pipeline->dynamic_state);
+                       pipeline->dynamic_state, standin_static_mask);
     if (!UpdateBindings(vertex_shader, pixel_shader, stage_bindings_ready[0],
                         stage_bindings_ready[1], interpreter_placeholder,
                         placeholder_pixel_shader,
@@ -5447,6 +5497,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                             : nullptr)) {
       return false;
     }
+  }
+
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md.
+  if (cvars::vulkan_dynamic_state_check >= 2 ||
+      (cvars::vulkan_dynamic_state_check == 1 && shared_stand_in_bound)) {
+    CheckDynamicStateAtDraw(*pipeline, current_pipeline, shared_stand_in_bound,
+                            standin_static_mask,
+                            vertex_shader->ucode_data_hash(),
+                            pixel_shader ? pixel_shader->ucode_data_hash() : 0);
   }
 
   // Track for device-lost diagnostics.
@@ -7027,6 +7086,9 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     dynamic_color_blend_enable_update_needed_ = true;
     dynamic_color_blend_equation_update_needed_ = true;
     dynamic_color_write_mask_update_needed_ = true;
+    // hakuX-Boosted: (vulkan_dynamic_state_check) nothing is set in a new
+    // command buffer.
+    dynamic_state_check_set_ = 0;
     current_render_pass_ = VK_NULL_HANDLE;
     current_framebuffer_ = nullptr;
     in_render_pass_ = false;
@@ -7612,7 +7674,8 @@ void VulkanCommandProcessor::UpdateDynamicState(
     reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
     bool depth_bias_in_pixel_shader,
-    const VulkanPipelineCache::DynamicState& pipeline_dynamic_state) {
+    const VulkanPipelineCache::DynamicState& pipeline_dynamic_state,
+    uint32_t standin_static_mask) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -7699,6 +7762,7 @@ void VulkanCommandProcessor::UpdateDynamicState(
           dynamic_depth_bias_constant_factor_, 0.0f,
           dynamic_depth_bias_slope_factor_);
       dynamic_depth_bias_update_needed_ = false;
+      DynamicStateCheckSet(kDynCheckDepthBias);
     }
 
     // Blend constants.
@@ -7715,6 +7779,7 @@ void VulkanCommandProcessor::UpdateDynamicState(
       std::memcpy(dynamic_blend_constants_, blend_constants, sizeof(float) * 4);
       deferred_command_buffer_.CmdVkSetBlendConstants(dynamic_blend_constants_);
       dynamic_blend_constants_update_needed_ = false;
+      DynamicStateCheckSet(kDynCheckBlendConstants);
     }
 
     // Stencil masks and references.
@@ -7784,14 +7849,18 @@ void VulkanCommandProcessor::UpdateDynamicState(
         deferred_command_buffer_.CmdVkSetStencilCompareMask(
             VK_STENCIL_FACE_FRONT_AND_BACK,
             dynamic_stencil_compare_mask_front_);
+        DynamicStateCheckSet(kDynCheckStencilCompareMaskFront);
+        DynamicStateCheckSet(kDynCheckStencilCompareMaskBack);
       } else {
         if (dynamic_stencil_compare_mask_front_update_needed_) {
           deferred_command_buffer_.CmdVkSetStencilCompareMask(
               VK_STENCIL_FACE_FRONT_BIT, dynamic_stencil_compare_mask_front_);
+          DynamicStateCheckSet(kDynCheckStencilCompareMaskFront);
         }
         if (dynamic_stencil_compare_mask_back_update_needed_) {
           deferred_command_buffer_.CmdVkSetStencilCompareMask(
               VK_STENCIL_FACE_BACK_BIT, dynamic_stencil_compare_mask_back_);
+          DynamicStateCheckSet(kDynCheckStencilCompareMaskBack);
         }
       }
       dynamic_stencil_compare_mask_front_update_needed_ = false;
@@ -7803,14 +7872,18 @@ void VulkanCommandProcessor::UpdateDynamicState(
           dynamic_stencil_write_mask_back_) {
         deferred_command_buffer_.CmdVkSetStencilWriteMask(
             VK_STENCIL_FACE_FRONT_AND_BACK, dynamic_stencil_write_mask_front_);
+        DynamicStateCheckSet(kDynCheckStencilWriteMaskFront);
+        DynamicStateCheckSet(kDynCheckStencilWriteMaskBack);
       } else {
         if (dynamic_stencil_write_mask_front_update_needed_) {
           deferred_command_buffer_.CmdVkSetStencilWriteMask(
               VK_STENCIL_FACE_FRONT_BIT, dynamic_stencil_write_mask_front_);
+          DynamicStateCheckSet(kDynCheckStencilWriteMaskFront);
         }
         if (dynamic_stencil_write_mask_back_update_needed_) {
           deferred_command_buffer_.CmdVkSetStencilWriteMask(
               VK_STENCIL_FACE_BACK_BIT, dynamic_stencil_write_mask_back_);
+          DynamicStateCheckSet(kDynCheckStencilWriteMaskBack);
         }
       }
       dynamic_stencil_write_mask_front_update_needed_ = false;
@@ -7821,14 +7894,18 @@ void VulkanCommandProcessor::UpdateDynamicState(
       if (dynamic_stencil_reference_front_ == dynamic_stencil_reference_back_) {
         deferred_command_buffer_.CmdVkSetStencilReference(
             VK_STENCIL_FACE_FRONT_AND_BACK, dynamic_stencil_reference_front_);
+        DynamicStateCheckSet(kDynCheckStencilReferenceFront);
+        DynamicStateCheckSet(kDynCheckStencilReferenceBack);
       } else {
         if (dynamic_stencil_reference_front_update_needed_) {
           deferred_command_buffer_.CmdVkSetStencilReference(
               VK_STENCIL_FACE_FRONT_BIT, dynamic_stencil_reference_front_);
+          DynamicStateCheckSet(kDynCheckStencilReferenceFront);
         }
         if (dynamic_stencil_reference_back_update_needed_) {
           deferred_command_buffer_.CmdVkSetStencilReference(
               VK_STENCIL_FACE_BACK_BIT, dynamic_stencil_reference_back_);
+          DynamicStateCheckSet(kDynCheckStencilReferenceBack);
         }
       }
       dynamic_stencil_reference_front_update_needed_ = false;
@@ -7846,44 +7923,112 @@ void VulkanCommandProcessor::UpdateDynamicState(
   if (eds_caps.extended_dynamic_state) {
     const VulkanPipelineCache::DynamicState& ds = pipeline_dynamic_state;
 
-    // Primitive topology (EDS1 core).
-    dynamic_primitive_topology_update_needed_ |=
-        dynamic_primitive_topology_ != ds.primitive_topology;
-    if (dynamic_primitive_topology_update_needed_) {
-      dynamic_primitive_topology_ = ds.primitive_topology;
-      deferred_command_buffer_.CmdVkSetPrimitiveTopology(
-          dynamic_primitive_topology_);
-      dynamic_primitive_topology_update_needed_ = false;
+    // hakuX-Boosted: boosted/notes/standin-device-lost.md. A shared stand-in
+    // that has some of this state static (vulkan_standin_dynamic_state_mask):
+    // binding it made those pieces undefined in the command buffer, and they
+    // must not be set while it is bound. They are left out here and marked to
+    // be set again at the next draw that has them dynamic.
+    const bool static_topology =
+        (standin_static_mask &
+         VulkanPipelineCache::kStandInStaticTopology) != 0;
+    const bool static_raster_depth_stencil =
+        (standin_static_mask &
+         VulkanPipelineCache::kStandInStaticRasterDepthStencil) != 0;
+    const bool static_depth_clamp =
+        (standin_static_mask &
+         VulkanPipelineCache::kStandInStaticDepthClamp) != 0;
+    const bool static_polygon_mode =
+        (standin_static_mask &
+         VulkanPipelineCache::kStandInStaticPolygonMode) != 0;
+    const bool static_blend_enable =
+        (standin_static_mask &
+         VulkanPipelineCache::kStandInStaticBlendEnable) != 0;
+    const bool static_blend_equation =
+        (standin_static_mask &
+         VulkanPipelineCache::kStandInStaticBlendEquation) != 0;
+    const bool static_write_mask =
+        (standin_static_mask &
+         VulkanPipelineCache::kStandInStaticWriteMask) != 0;
+    if (standin_static_mask) {
+      dynamic_state_check_set_ &=
+          ~GetStandInStaticCheckBits(standin_static_mask);
+      if (static_topology) {
+        dynamic_primitive_topology_update_needed_ = true;
+        dynamic_primitive_restart_enable_update_needed_ = true;
+      }
+      if (static_raster_depth_stencil) {
+        dynamic_cull_mode_update_needed_ = true;
+        dynamic_front_face_update_needed_ = true;
+        dynamic_depth_test_enable_update_needed_ = true;
+        dynamic_depth_write_enable_update_needed_ = true;
+        dynamic_depth_compare_op_update_needed_ = true;
+        dynamic_stencil_test_enable_update_needed_ = true;
+        dynamic_stencil_op_front_update_needed_ = true;
+        dynamic_stencil_op_back_update_needed_ = true;
+      }
+      if (static_depth_clamp) {
+        dynamic_depth_clamp_enable_update_needed_ = true;
+      }
+      if (static_polygon_mode) {
+        dynamic_polygon_mode_update_needed_ = true;
+      }
+      if (static_blend_enable) {
+        dynamic_color_blend_enable_update_needed_ = true;
+      }
+      if (static_blend_equation) {
+        dynamic_color_blend_equation_update_needed_ = true;
+      }
+      if (static_write_mask) {
+        dynamic_color_write_mask_update_needed_ = true;
+      }
     }
-    // Primitive restart enable (EDS2 core).
-    dynamic_primitive_restart_enable_update_needed_ |=
-        dynamic_primitive_restart_enable_ != ds.primitive_restart_enable;
-    if (dynamic_primitive_restart_enable_update_needed_) {
-      dynamic_primitive_restart_enable_ = ds.primitive_restart_enable;
-      deferred_command_buffer_.CmdVkSetPrimitiveRestartEnable(
-          dynamic_primitive_restart_enable_);
-      dynamic_primitive_restart_enable_update_needed_ = false;
+
+    if (!static_topology) {
+      // Primitive topology (EDS1 core).
+      dynamic_primitive_topology_update_needed_ |=
+          dynamic_primitive_topology_ != ds.primitive_topology;
+      if (dynamic_primitive_topology_update_needed_) {
+        dynamic_primitive_topology_ = ds.primitive_topology;
+        deferred_command_buffer_.CmdVkSetPrimitiveTopology(
+            dynamic_primitive_topology_);
+        dynamic_primitive_topology_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckPrimitiveTopology);
+      }
+      // Primitive restart enable (EDS2 core).
+      dynamic_primitive_restart_enable_update_needed_ |=
+          dynamic_primitive_restart_enable_ != ds.primitive_restart_enable;
+      if (dynamic_primitive_restart_enable_update_needed_) {
+        dynamic_primitive_restart_enable_ = ds.primitive_restart_enable;
+        deferred_command_buffer_.CmdVkSetPrimitiveRestartEnable(
+            dynamic_primitive_restart_enable_);
+        dynamic_primitive_restart_enable_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckPrimitiveRestart);
+      }
     }
-    // Cull mode (EDS1 core).
-    dynamic_cull_mode_update_needed_ |= dynamic_cull_mode_ != ds.cull_mode;
-    if (dynamic_cull_mode_update_needed_) {
-      dynamic_cull_mode_ = ds.cull_mode;
-      deferred_command_buffer_.CmdVkSetCullMode(dynamic_cull_mode_);
-      dynamic_cull_mode_update_needed_ = false;
-    }
-    // Front face (EDS1 core).
-    dynamic_front_face_update_needed_ |= dynamic_front_face_ != ds.front_face;
-    if (dynamic_front_face_update_needed_) {
-      dynamic_front_face_ = ds.front_face;
-      deferred_command_buffer_.CmdVkSetFrontFace(dynamic_front_face_);
-      dynamic_front_face_update_needed_ = false;
+    if (!static_raster_depth_stencil) {
+      // Cull mode (EDS1 core).
+      dynamic_cull_mode_update_needed_ |= dynamic_cull_mode_ != ds.cull_mode;
+      if (dynamic_cull_mode_update_needed_) {
+        dynamic_cull_mode_ = ds.cull_mode;
+        deferred_command_buffer_.CmdVkSetCullMode(dynamic_cull_mode_);
+        dynamic_cull_mode_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckCullMode);
+      }
+      // Front face (EDS1 core).
+      dynamic_front_face_update_needed_ |= dynamic_front_face_ != ds.front_face;
+      if (dynamic_front_face_update_needed_) {
+        dynamic_front_face_ = ds.front_face;
+        deferred_command_buffer_.CmdVkSetFrontFace(dynamic_front_face_);
+        dynamic_front_face_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckFrontFace);
+      }
     }
 
     // Depth / stencil dynamic state. The pipeline cache disables the whole
     // extended-dynamic-state capability on the fragment-shader-interlock path
     // (where these aren't fixed-function), so reaching here implies a render
     // pass with real depth / stencil state.
-    {
+    if (!static_raster_depth_stencil) {
       // Depth test enable (EDS1 core).
       dynamic_depth_test_enable_update_needed_ |=
           dynamic_depth_test_enable_ != ds.depth_test_enable;
@@ -7892,6 +8037,7 @@ void VulkanCommandProcessor::UpdateDynamicState(
         deferred_command_buffer_.CmdVkSetDepthTestEnable(
             dynamic_depth_test_enable_);
         dynamic_depth_test_enable_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckDepthTestEnable);
       }
       // Depth write enable (EDS1 core).
       dynamic_depth_write_enable_update_needed_ |=
@@ -7901,6 +8047,7 @@ void VulkanCommandProcessor::UpdateDynamicState(
         deferred_command_buffer_.CmdVkSetDepthWriteEnable(
             dynamic_depth_write_enable_);
         dynamic_depth_write_enable_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckDepthWriteEnable);
       }
       // Depth compare op (EDS1 core).
       dynamic_depth_compare_op_update_needed_ |=
@@ -7910,6 +8057,7 @@ void VulkanCommandProcessor::UpdateDynamicState(
         deferred_command_buffer_.CmdVkSetDepthCompareOp(
             dynamic_depth_compare_op_);
         dynamic_depth_compare_op_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckDepthCompareOp);
       }
       // Stencil test enable (EDS1 core).
       dynamic_stencil_test_enable_update_needed_ |=
@@ -7919,6 +8067,7 @@ void VulkanCommandProcessor::UpdateDynamicState(
         deferred_command_buffer_.CmdVkSetStencilTestEnable(
             dynamic_stencil_test_enable_);
         dynamic_stencil_test_enable_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckStencilTestEnable);
       }
       // Stencil ops (EDS1 core), tracked per face. memcmp because
       // VkStencilOpState bundles the (dynamic) compare/write masks and
@@ -7937,6 +8086,7 @@ void VulkanCommandProcessor::UpdateDynamicState(
             ds.stencil_front.passOp, ds.stencil_front.depthFailOp,
             ds.stencil_front.compareOp);
         dynamic_stencil_op_front_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckStencilOpFront);
       }
       dynamic_stencil_op_back_update_needed_ |=
           !stencil_ops_equal(dynamic_stencil_op_back_, ds.stencil_back);
@@ -7947,11 +8097,12 @@ void VulkanCommandProcessor::UpdateDynamicState(
             ds.stencil_back.passOp, ds.stencil_back.depthFailOp,
             ds.stencil_back.compareOp);
         dynamic_stencil_op_back_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckStencilOpBack);
       }
     }
 
     // EDS3 sub-features.
-    if (eds_caps.depth_clamp_enable) {
+    if (eds_caps.depth_clamp_enable && !static_depth_clamp) {
       dynamic_depth_clamp_enable_update_needed_ |=
           dynamic_depth_clamp_enable_ != ds.depth_clamp_enable;
       if (dynamic_depth_clamp_enable_update_needed_) {
@@ -7959,26 +8110,37 @@ void VulkanCommandProcessor::UpdateDynamicState(
         deferred_command_buffer_.CmdVkSetDepthClampEnableEXT(
             dynamic_depth_clamp_enable_);
         dynamic_depth_clamp_enable_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckDepthClampEnable);
       }
     }
-    if (eds_caps.polygon_mode) {
+    if (eds_caps.polygon_mode && !static_polygon_mode) {
       dynamic_polygon_mode_update_needed_ |=
           dynamic_polygon_mode_ != ds.polygon_mode;
       if (dynamic_polygon_mode_update_needed_) {
         dynamic_polygon_mode_ = ds.polygon_mode;
         deferred_command_buffer_.CmdVkSetPolygonModeEXT(dynamic_polygon_mode_);
         dynamic_polygon_mode_update_needed_ = false;
+        DynamicStateCheckSet(kDynCheckPolygonMode);
       }
     }
     {
       // Per-render-target blend state. Emit only for the attachments present in
       // the render pass (ds.color_rts_used), as a single contiguous range
       // covering [0, highest used] so the array is dense for the setter.
+      // hakuX-Boosted: boosted/notes/standin-device-lost.md. With
+      // vulkan_dynamic_color_state_fix, for all four: otherwise a draw to more
+      // attachments than the last one that set them compares its higher
+      // attachments' values with ones remembered from an earlier command
+      // buffer (or from before an external pipeline was bound), and if they
+      // match it leaves them unset in this one.
       uint32_t color_rts_used = ds.color_rts_used;
       uint32_t attachment_count =
           color_rts_used ? (32 - xe::lzcnt(color_rts_used)) : 0;
+      if (cvars::vulkan_dynamic_color_state_fix) {
+        attachment_count = xenos::kMaxColorRenderTargets;
+      }
       if (attachment_count) {
-        if (eds_caps.color_blend_enable) {
+        if (eds_caps.color_blend_enable && !static_blend_enable) {
           bool changed = false;
           for (uint32_t i = 0; i < attachment_count; ++i) {
             if (dynamic_color_blend_enable_[i] != ds.color_blend_enable[i]) {
@@ -7991,9 +8153,12 @@ void VulkanCommandProcessor::UpdateDynamicState(
             deferred_command_buffer_.CmdVkSetColorBlendEnableEXT(
                 0, attachment_count, dynamic_color_blend_enable_);
             dynamic_color_blend_enable_update_needed_ = false;
+            for (uint32_t i = 0; i < attachment_count; ++i) {
+              DynamicStateCheckSet(kDynCheckColorBlendEnable0 + i);
+            }
           }
         }
-        if (eds_caps.color_blend_equation) {
+        if (eds_caps.color_blend_equation && !static_blend_equation) {
           bool changed = false;
           for (uint32_t i = 0; i < attachment_count; ++i) {
             if (std::memcmp(&dynamic_color_blend_equation_[i],
@@ -8008,9 +8173,12 @@ void VulkanCommandProcessor::UpdateDynamicState(
             deferred_command_buffer_.CmdVkSetColorBlendEquationEXT(
                 0, attachment_count, dynamic_color_blend_equation_);
             dynamic_color_blend_equation_update_needed_ = false;
+            for (uint32_t i = 0; i < attachment_count; ++i) {
+              DynamicStateCheckSet(kDynCheckColorBlendEquation0 + i);
+            }
           }
         }
-        if (eds_caps.color_write_mask) {
+        if (eds_caps.color_write_mask && !static_write_mask) {
           bool changed = false;
           for (uint32_t i = 0; i < attachment_count; ++i) {
             if (dynamic_color_write_mask_[i] != ds.color_write_mask[i]) {
@@ -8023,10 +8191,207 @@ void VulkanCommandProcessor::UpdateDynamicState(
             deferred_command_buffer_.CmdVkSetColorWriteMaskEXT(
                 0, attachment_count, dynamic_color_write_mask_);
             dynamic_color_write_mask_update_needed_ = false;
+            for (uint32_t i = 0; i < attachment_count; ++i) {
+              DynamicStateCheckSet(kDynCheckColorWriteMask0 + i);
+            }
           }
         }
       }
     }
+  }
+}
+
+// hakuX-Boosted: boosted/notes/standin-device-lost.md
+// (vulkan_dynamic_state_check).
+const char* VulkanCommandProcessor::GetDynamicStateCheckName(uint32_t bit) {
+  static const char* const kNames[] = {
+      "viewport",
+      "scissor",
+      "depth bias",
+      "blend constants",
+      "stencil compare mask (front)",
+      "stencil compare mask (back)",
+      "stencil write mask (front)",
+      "stencil write mask (back)",
+      "stencil reference (front)",
+      "stencil reference (back)",
+      "primitive topology",
+      "primitive restart enable",
+      "cull mode",
+      "front face",
+      "depth test enable",
+      "depth write enable",
+      "depth compare op",
+      "stencil test enable",
+      "stencil op (front)",
+      "stencil op (back)",
+      "depth clamp enable",
+      "polygon mode",
+      "colour blend enable 0",
+      "colour blend enable 1",
+      "colour blend enable 2",
+      "colour blend enable 3",
+      "colour blend equation 0",
+      "colour blend equation 1",
+      "colour blend equation 2",
+      "colour blend equation 3",
+      "colour write mask 0",
+      "colour write mask 1",
+      "colour write mask 2",
+      "colour write mask 3",
+  };
+  static_assert(sizeof(kNames) / sizeof(kNames[0]) == kDynCheckCount);
+  return bit < kDynCheckCount ? kNames[bit] : "?";
+}
+
+uint64_t VulkanCommandProcessor::GetStandInStaticCheckBits(
+    uint32_t standin_static_mask) {
+  uint64_t bits = 0;
+  if (standin_static_mask & VulkanPipelineCache::kStandInStaticTopology) {
+    bits |= (uint64_t(1) << kDynCheckPrimitiveTopology) |
+            (uint64_t(1) << kDynCheckPrimitiveRestart);
+  }
+  if (standin_static_mask &
+      VulkanPipelineCache::kStandInStaticRasterDepthStencil) {
+    for (uint32_t bit = kDynCheckCullMode; bit <= kDynCheckStencilOpBack;
+         ++bit) {
+      bits |= uint64_t(1) << bit;
+    }
+  }
+  if (standin_static_mask & VulkanPipelineCache::kStandInStaticDepthClamp) {
+    bits |= uint64_t(1) << kDynCheckDepthClampEnable;
+  }
+  if (standin_static_mask & VulkanPipelineCache::kStandInStaticPolygonMode) {
+    bits |= uint64_t(1) << kDynCheckPolygonMode;
+  }
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (standin_static_mask & VulkanPipelineCache::kStandInStaticBlendEnable) {
+      bits |= uint64_t(1) << (kDynCheckColorBlendEnable0 + i);
+    }
+    if (standin_static_mask &
+        VulkanPipelineCache::kStandInStaticBlendEquation) {
+      bits |= uint64_t(1) << (kDynCheckColorBlendEquation0 + i);
+    }
+    if (standin_static_mask & VulkanPipelineCache::kStandInStaticWriteMask) {
+      bits |= uint64_t(1) << (kDynCheckColorWriteMask0 + i);
+    }
+  }
+  return bits;
+}
+
+void VulkanCommandProcessor::CheckDynamicStateAtDraw(
+    const VulkanPipelineCache::Pipeline& pipeline, VkPipeline bound_pipeline,
+    bool shared_stand_in, uint32_t standin_static_mask,
+    uint64_t vertex_shader_hash, uint64_t pixel_shader_hash) {
+  ++dynamic_state_check_draws_;
+  // What the guest pipelines declare dynamic, as
+  // VulkanPipelineCache::EnsurePipelineCreated lists it.
+  const VulkanPipelineCache::DynamicStateCapabilities& caps =
+      pipeline_cache_->dynamic_state_capabilities();
+  const bool host_render_targets = render_target_cache_->GetPath() ==
+                                   RenderTargetCache::Path::kHostRenderTargets;
+  uint64_t required =
+      (uint64_t(1) << kDynCheckViewport) | (uint64_t(1) << kDynCheckScissor);
+  if (host_render_targets) {
+    for (uint32_t bit = kDynCheckDepthBias; bit <= kDynCheckStencilReferenceBack;
+         ++bit) {
+      required |= uint64_t(1) << bit;
+    }
+  }
+  if (caps.extended_dynamic_state) {
+    required |= (uint64_t(1) << kDynCheckPrimitiveTopology) |
+                (uint64_t(1) << kDynCheckPrimitiveRestart) |
+                (uint64_t(1) << kDynCheckCullMode) |
+                (uint64_t(1) << kDynCheckFrontFace);
+    if (host_render_targets) {
+      for (uint32_t bit = kDynCheckDepthTestEnable;
+           bit <= kDynCheckStencilOpBack; ++bit) {
+        required |= uint64_t(1) << bit;
+      }
+    }
+    if (caps.depth_clamp_enable) {
+      required |= uint64_t(1) << kDynCheckDepthClampEnable;
+    }
+    if (caps.polygon_mode) {
+      required |= uint64_t(1) << kDynCheckPolygonMode;
+    }
+    if (host_render_targets) {
+      // The pipeline's colour blend state has as many attachments as the
+      // highest colour target its render pass has.
+      const uint32_t color_rts_used = pipeline.dynamic_state.color_rts_used;
+      const uint32_t attachment_count =
+          color_rts_used ? (32 - xe::lzcnt(color_rts_used)) : 0;
+      for (uint32_t i = 0; i < attachment_count; ++i) {
+        if (caps.color_blend_enable) {
+          required |= uint64_t(1) << (kDynCheckColorBlendEnable0 + i);
+        }
+        if (caps.color_blend_equation) {
+          required |= uint64_t(1) << (kDynCheckColorBlendEquation0 + i);
+        }
+        if (caps.color_write_mask) {
+          required |= uint64_t(1) << (kDynCheckColorWriteMask0 + i);
+        }
+      }
+    }
+  }
+  required &= ~GetStandInStaticCheckBits(standin_static_mask);
+  const uint64_t missing = required & ~dynamic_state_check_set_;
+
+  // A shared stand-in was made for the render pass of the slot that first
+  // asked for its recipe: it must be the one it is drawn in (formats, sample
+  // count, attachments; the load operations do not count).
+  bool render_pass_mismatch = false;
+  VulkanRenderTargetCache::RenderPassKey drawn_key =
+      render_target_cache_->last_update_render_pass_key();
+  drawn_key.depth_and_color_load_dont_care = 0;
+  VulkanRenderTargetCache::RenderPassKey made_key;
+  made_key.key = pipeline.placeholder_render_pass_key;
+  made_key.depth_and_color_load_dont_care = 0;
+  if (shared_stand_in && made_key.key != drawn_key.key) {
+    render_pass_mismatch = true;
+  }
+
+  if (missing || render_pass_mismatch) {
+    ++dynamic_state_check_violations_;
+    if (dynamic_state_check_logged_ < 16) {
+      ++dynamic_state_check_logged_;
+      std::string missing_names;
+      for (uint32_t bit = 0; bit < kDynCheckCount; ++bit) {
+        if (missing & (uint64_t(1) << bit)) {
+          if (!missing_names.empty()) {
+            missing_names += ", ";
+          }
+          missing_names += GetDynamicStateCheckName(bit);
+        }
+      }
+      XELOGW(
+          "dynamic state check: frame {}, submission {}: VS {:016X}, PS "
+          "{:016X}, pipeline {:016X} ({}), render pass {:08X}{}: not set in "
+          "this command buffer since it began or since a pipeline that has it "
+          "static was bound: {}",
+          frame_current_, GetCurrentSubmission(), vertex_shader_hash,
+          pixel_shader_hash, (uint64_t)bound_pipeline,
+          shared_stand_in
+              ? fmt::format("a shared stand-in, baked-in state {:#x}",
+                            standin_static_mask)
+              : std::string(pipeline.placeholder_pipeline.load(
+                                std::memory_order_acquire) == bound_pipeline
+                                ? "the slot's own placeholder"
+                                : "the real pipeline"),
+          drawn_key.key,
+          render_pass_mismatch
+              ? fmt::format(" (the stand-in was made for {:08X})",
+                            made_key.key)
+              : std::string(),
+          missing_names.empty() ? std::string("nothing") : missing_names);
+    }
+  }
+  if (frame_current_ >= dynamic_state_check_report_frame_ + 600) {
+    dynamic_state_check_report_frame_ = frame_current_;
+    XELOGI(
+        "dynamic state check: {} draws checked, {} with a fault (the first "
+        "16 are logged)",
+        dynamic_state_check_draws_, dynamic_state_check_violations_);
   }
 }
 

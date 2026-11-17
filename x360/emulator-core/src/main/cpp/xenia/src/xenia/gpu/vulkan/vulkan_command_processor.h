@@ -573,7 +573,11 @@ class VulkanCommandProcessor final : public CommandProcessor {
       reg::RB_DEPTHCONTROL normalized_depth_control,
       uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
       bool depth_bias_in_pixel_shader,
-      const VulkanPipelineCache::DynamicState& pipeline_dynamic_state);
+      const VulkanPipelineCache::DynamicState& pipeline_dynamic_state,
+      // hakuX-Boosted: the bound pipeline is a shared stand-in that has these
+      // pieces static (VulkanPipelineCache::StandInStaticBits): they are not
+      // set, and are set again at the next draw that needs them.
+      uint32_t standin_static_mask = 0);
   void UpdateSystemConstantValues(
       bool primitive_polygonal,
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
@@ -1134,6 +1138,57 @@ class VulkanCommandProcessor final : public CommandProcessor {
   bool dynamic_color_blend_enable_update_needed_;
   bool dynamic_color_blend_equation_update_needed_;
   bool dynamic_color_write_mask_update_needed_;
+
+  // hakuX-Boosted: boosted/notes/standin-device-lost.md. For
+  // vulkan_dynamic_state_check: which pieces of dynamic state have been set
+  // in the command buffer being recorded since it began, or since the last
+  // bind of a pipeline that has them static (DynamicStateCheckBit), and the
+  // violations found.
+  enum DynamicStateCheckBit : uint32_t {
+    kDynCheckViewport,
+    kDynCheckScissor,
+    kDynCheckDepthBias,
+    kDynCheckBlendConstants,
+    kDynCheckStencilCompareMaskFront,
+    kDynCheckStencilCompareMaskBack,
+    kDynCheckStencilWriteMaskFront,
+    kDynCheckStencilWriteMaskBack,
+    kDynCheckStencilReferenceFront,
+    kDynCheckStencilReferenceBack,
+    kDynCheckPrimitiveTopology,
+    kDynCheckPrimitiveRestart,
+    kDynCheckCullMode,
+    kDynCheckFrontFace,
+    kDynCheckDepthTestEnable,
+    kDynCheckDepthWriteEnable,
+    kDynCheckDepthCompareOp,
+    kDynCheckStencilTestEnable,
+    kDynCheckStencilOpFront,
+    kDynCheckStencilOpBack,
+    kDynCheckDepthClampEnable,
+    kDynCheckPolygonMode,
+    // Each of these three for colour attachments 0 to 3.
+    kDynCheckColorBlendEnable0,
+    kDynCheckColorBlendEquation0 = kDynCheckColorBlendEnable0 + 4,
+    kDynCheckColorWriteMask0 = kDynCheckColorBlendEquation0 + 4,
+    kDynCheckCount = kDynCheckColorWriteMask0 + 4,
+  };
+  static const char* GetDynamicStateCheckName(uint32_t bit);
+  // The bits of the pieces in VulkanPipelineCache::StandInStaticBits.
+  static uint64_t GetStandInStaticCheckBits(uint32_t standin_static_mask);
+  void DynamicStateCheckSet(uint32_t bit) {
+    dynamic_state_check_set_ |= uint64_t(1) << bit;
+  }
+  void CheckDynamicStateAtDraw(const VulkanPipelineCache::Pipeline& pipeline,
+                               VkPipeline bound_pipeline, bool shared_stand_in,
+                               uint32_t standin_static_mask,
+                               uint64_t vertex_shader_hash,
+                               uint64_t pixel_shader_hash);
+  uint64_t dynamic_state_check_set_ = 0;
+  uint64_t dynamic_state_check_draws_ = 0;
+  uint64_t dynamic_state_check_violations_ = 0;
+  uint32_t dynamic_state_check_logged_ = 0;
+  uint64_t dynamic_state_check_report_frame_ = 0;
 
   // Currently used samplers.
   std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>
