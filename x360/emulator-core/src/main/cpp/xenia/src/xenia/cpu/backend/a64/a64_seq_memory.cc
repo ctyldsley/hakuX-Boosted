@@ -45,6 +45,8 @@ DEFINE_bool(a64_native_reserved_ops, true,
 DECLARE_bool(guest_scheduler);
 // hakuX-Boosted: defined in cpu/compiler/passes/memory_poll_park_pass.cc.
 DECLARE_bool(park_pause_poll_loops);
+// hakuX-Boosted (park-hot-loops): the same file.
+DECLARE_bool(park_poll_site_backoff);
 
 // hakuX-Boosted: the scheduler's handler for a visit to a pause-and-poll
 // loop's site (kernel/guest_scheduler.cc sets it when it starts; null until
@@ -298,9 +300,50 @@ struct SPIN_BACKOFF
       // hakuX-Boosted: a site MemoryPollParkPass placed in a loop it has
       // shown to be nothing but pause and poll calls in on every pass, with
       // the loop's guest address (SpinPollSiteThunk).
-      if (cvars::guest_scheduler && cvars::park_pause_poll_loops &&
-          (i.instr->flags & compiler::passes::kSpinBackoffPollSite)) {
-        e.mov(e.x1, static_cast<uint64_t>(i.src1.value) >> 32);
+      // hakuX-Boosted (park-hot-loops): the flags are only ever set by
+      // MemoryPollParkPass under its settings (park_pause_poll_loops,
+      // park_one_block_poll_loops, park_delay_sleds), so the flag alone
+      // decides here. A delay site passes kSpinSiteDelayKind beside the
+      // address.
+      const uint16_t site_flags =
+          i.instr->flags & (compiler::passes::kSpinBackoffPollSite |
+                            compiler::passes::kSpinBackoffDelaySite);
+      if (cvars::guest_scheduler && site_flags) {
+        uint64_t site = static_cast<uint64_t>(i.src1.value) >> 32;
+        if (site_flags & compiler::passes::kSpinBackoffDelaySite) {
+          site |= compiler::passes::kSpinSiteDelayKind;
+        }
+        if (cvars::park_poll_site_backoff) {
+          // hakuX-Boosted (park-hot-loops): the cheap part inline. The
+          // scheduler leaves in poll_site_skip how many of the next passes
+          // need not call it; each of those costs a load, a store and the
+          // preemption flag's test, which still calls in at once when a
+          // give-way is asked for (the site's other job). The counter is the
+          // thread's own and lies outside the registers the scheduler
+          // hashes.
+          static_assert(offsetof(ppc::PPCContext, poll_site_skip) % 4 == 0);
+          static_assert(offsetof(ppc::PPCContext, poll_site_skip) < 16384);
+          static_assert(offsetof(ppc::PPCContext, preempt_requested) < 4096);
+          auto& call = e.NewCachedLabel();
+          auto& done = e.NewCachedLabel();
+          constexpr uint32_t kSkipOffset =
+              static_cast<uint32_t>(offsetof(ppc::PPCContext, poll_site_skip));
+          e.ldr(e.w16, Xbyak_aarch64::ptr(e.GetContextReg(), kSkipOffset));
+          e.cbz(e.w16, call);
+          e.sub(e.w16, e.w16, 1);
+          e.str(e.w16, Xbyak_aarch64::ptr(e.GetContextReg(), kSkipOffset));
+          e.ldrb(e.w16, Xbyak_aarch64::ptr(
+                            e.GetContextReg(),
+                            static_cast<uint32_t>(offsetof(
+                                ppc::PPCContext, preempt_requested))));
+          e.cbz(e.w16, done);
+          e.L(call);
+          e.mov(e.x1, site);
+          e.CallNativeSafe(reinterpret_cast<void*>(&SpinPollSiteThunk));
+          e.L(done);
+          return;
+        }
+        e.mov(e.x1, site);
         e.CallNativeSafe(reinterpret_cast<void*>(&SpinPollSiteThunk));
         return;
       }

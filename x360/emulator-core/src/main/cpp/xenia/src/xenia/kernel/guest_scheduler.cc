@@ -40,6 +40,9 @@
 #endif
 
 DECLARE_path(log_file);
+// hakuX-Boosted (park-hot-loops): defined in
+// cpu/compiler/passes/memory_poll_park_pass.cc, read once at start-up here.
+DECLARE_bool(park_poll_site_backoff);
 
 // hakuX-Boosted: defined in cpu/backend/a64/a64_seq_memory.cc, beside the
 // site that calls it (park_pause_poll_loops). The a64 backend is the only
@@ -309,6 +312,24 @@ static constexpr unsigned kWaitParkAgeShift = 2;
 static constexpr uint32_t kWaitPassesAfterPark = 4;
 static constexpr uint64_t kWaitArmWindowUs = 2000;
 static constexpr uint64_t kPollGapUs = 400;
+// hakuX-Boosted (park-hot-loops, boosted/notes/park-hot-loops.md).
+// park_poll_site_backoff: a poll site calls in on one pass in
+// kPollLookStride (each call is a look); after kPollBackoffAfterLooks looks
+// in a row that found the registers changed, each further such look makes
+// the thread skip 8 << level passes, the level growing to
+// kPollBackoffMaxLevel (about 4,000 passes), until a look finds them the
+// same. park_delay_sleds: a delay sled's site calls in on one pass in
+// kDelayLookStride, and the thread counts as spending its time in sleds
+// while kDelayLookStride passes take no more than kDelayPassBudgetNs each
+// on average (a thread that works between its delays is never parked).
+// What the bit in a site value marks: passes::kSpinSiteDelayKind in
+// cpu/compiler/passes/memory_poll_park_pass.h.
+static constexpr uint32_t kPollLookStride = 8;
+static constexpr uint32_t kPollBackoffAfterLooks = 16;
+static constexpr uint8_t kPollBackoffMaxLevel = 9;
+static constexpr uint32_t kDelayLookStride = 64;
+static constexpr uint64_t kDelayPassBudgetNs = 1000;
+static constexpr uint64_t kSiteDelayKind = uint64_t(1) << 32;
 
 // hakuX-Boosted: guest_scheduler_skew_bound_us. How long a held fiber sleeps
 // before it looks again without having been woken (a preemption of the held
@@ -526,6 +547,12 @@ XE_MAYBE_UNUSED static void PollSiteVisitFiber(void* raw_context,
   if (!self) {
     return;  // guest code on a thread the scheduler does not run
   }
+  // hakuX-Boosted (park-hot-loops): a delay sled's site (park_delay_sleds).
+  if (site & kSiteDelayKind) {
+    self->kernel_state()->guest_scheduler()->DelaySiteVisit(self, raw_context,
+                                                            uint32_t(site));
+    return;
+  }
   self->kernel_state()->guest_scheduler()->PollSiteVisit(self, raw_context,
                                                          uint32_t(site));
 }
@@ -616,6 +643,10 @@ void GuestScheduler::EnsureStarted() {
   // dispatch thread exists. It needs the counter (0 = did not calibrate).
   park_waits_ = cvars::guest_scheduler_park_waits && ticks_per_us > 0.0;
   park_wait_adaptive_ = cvars::guest_scheduler_park_wait_adaptive;
+  // hakuX-Boosted (park-hot-loops): the translator emits the inline part of
+  // the backoff under the same setting, read when a function is translated;
+  // the scheduler only writes the skip count the sites read.
+  poll_site_backoff_ = cvars::park_poll_site_backoff;
   lean_yield_ = park_waits_ || cvars::guest_scheduler_lean_yield ||
                 cvars::guest_scheduler_park_yield_spinners;
   if (park_waits_) {
@@ -634,6 +665,10 @@ void GuestScheduler::EnsureStarted() {
         std::max<uint64_t>(1, uint64_t(ticks_per_us * kWaitArmWindowUs));
     poll_gap_ticks_ =
         std::max<uint64_t>(1, uint64_t(ticks_per_us * kPollGapUs));
+    // hakuX-Boosted (park-hot-loops).
+    delay_gap_ticks_ = std::max<uint64_t>(
+        1, uint64_t(ticks_per_us * double(kDelayLookStride) *
+                    double(kDelayPassBudgetNs) / 1000.0));
     XELOGI(
         "GuestScheduler: busy waits are parked after {} us, for {} us at "
         "first and {} us at most, and woken by events{}",
@@ -2213,6 +2248,11 @@ void GuestScheduler::PollSiteVisit(XThread* self, void* raw_context,
     return;
   }
   if (!park_waits_) {
+    // hakuX-Boosted (park-hot-loops): nothing here ever parks, so the site
+    // need not call in again except to give way.
+    if (poll_site_backoff_) {
+      context->poll_site_skip = UINT32_MAX;
+    }
     return;
   }
   auto& links = self->scheduler_links();
@@ -2223,7 +2263,14 @@ void GuestScheduler::PollSiteVisit(XThread* self, void* raw_context,
     links.spin_check_tick = 0;
     links.wait_armed = false;
   }
-  if (++links.poll_visits & 7) {
+  if (poll_site_backoff_) {
+    // hakuX-Boosted (park-hot-loops): the site's inline code skipped the
+    // passes that are not looked at, so every call is a look; the next
+    // kPollLookStride - 1 passes are skipped again (more when backing off,
+    // below). After a park this leaves the guest the same eight passes of
+    // its own test before the next look as the count below does.
+    context->poll_site_skip = kPollLookStride - 1;
+  } else if (++links.poll_visits & (kPollLookStride - 1)) {
     return;
   }
   const uint64_t now = Clock::host_tick_count_raw();
@@ -2235,8 +2282,99 @@ void GuestScheduler::PollSiteVisit(XThread* self, void* raw_context,
     if (prev && hash != links.poll_hash) {
       stats_.poll_changed.fetch_add(1, std::memory_order_relaxed);
     }
+    // hakuX-Boosted (park-hot-loops): a site whose registers keep changing
+    // from one look to the next is not a wait the scheduler can park, and
+    // every look at it costs a call and a hash of the registers. After
+    // kPollBackoffAfterLooks such looks in a row it is looked at less and
+    // less often. The first look after a skip is too far from the one
+    // before to compare and is not counted either way; the second decides:
+    // registers the same (the loop has become a wait) ends the backoff at
+    // once, and the burst is then judged exactly as without it. The skip
+    // only delays when a park can start; it never delays the guest.
+    if (poll_site_backoff_ && prev && now - prev <= poll_gap_ticks_ &&
+        hash != links.poll_hash) {
+      if (links.poll_refusals < kPollBackoffAfterLooks) {
+        ++links.poll_refusals;
+      } else {
+        if (links.poll_backoff_level < kPollBackoffMaxLevel) {
+          ++links.poll_backoff_level;
+        }
+        context->poll_site_skip =
+            (kPollLookStride << links.poll_backoff_level) - 1;
+        stats_.poll_backoffs.fetch_add(1, std::memory_order_relaxed);
+        poll_backoff_site_.store(site, std::memory_order_relaxed);
+      }
+    }
     WaitBurstEnded(self);
     links.poll_hash = hash;
+    links.spin_burst_tick = now;
+    links.spin_park_shift = 0;
+    links.wait_armed = false;
+    return;
+  }
+  // hakuX-Boosted (park-hot-loops): the same registers as the look before:
+  // whatever the site's history, it is a wait now.
+  links.poll_refusals = 0;
+  links.poll_backoff_level = 0;
+  if (now - links.spin_burst_tick < wait_park_after_ticks_) {
+    return;
+  }
+  TryWaitPark(self, now, true);
+}
+
+// hakuX-Boosted (park-hot-loops, park_delay_sleds). A delay sled is a
+// one-block counted loop of the console's pause hints that loads nothing
+// (MemoryPollParkPass::TryInstrumentLoop takes it as a "delay sled"). Its
+// counter changes on every pass, so the register test of PollSiteVisit can
+// never hold; what a sled computes is only its counter, and its one
+// purpose is to let time pass. A thread is taken to be busy waiting when it
+// spends nearly all its time in sleds: kDelayLookStride passes (counted by
+// the site inline, or here without park_poll_site_backoff) in no more than
+// delay_gap_ticks_, look after look, for guest_scheduler_park_wait_after_us.
+// It is then parked exactly as an empty-yield spinner is (TryWaitPark: a
+// quarter of the burst so far, at least 100 us, at most
+// guest_scheduler_park_wait_max_us, ended early by events as learnt). The
+// sled resumes where it was: the delay lasts longer by the parks, by at most
+// a quarter of its own length so far, and the code after it, which tests
+// whatever the thread waits for, runs no later than that. A thread that
+// does work between its delays takes longer than the budget and is never
+// parked.
+void GuestScheduler::DelaySiteVisit(XThread* self, void* raw_context,
+                                    uint32_t site) {
+  auto* context = static_cast<cpu::ppc::PPCContext*>(raw_context);
+  if (context->preempt_requested) {
+    SpinBackoffYieldFiber(raw_context);
+    return;
+  }
+  if (!park_waits_) {
+    if (poll_site_backoff_) {
+      context->poll_site_skip = UINT32_MAX;
+    }
+    return;
+  }
+  auto& links = self->scheduler_links();
+  // Poll sites are word-aligned guest addresses: the low bit keeps the two
+  // kinds of site apart in poll_site.
+  const uint32_t key = site | 1;
+  if (links.poll_site != key) {
+    WaitBurstEnded(self);
+    links.poll_site = key;
+    links.poll_visits = 0;
+    links.spin_check_tick = 0;
+    links.wait_armed = false;
+  }
+  if (poll_site_backoff_) {
+    context->poll_site_skip = kDelayLookStride - 1;
+  } else if (++links.poll_visits & (kDelayLookStride - 1)) {
+    return;
+  }
+  const uint64_t now = Clock::host_tick_count_raw();
+  const uint64_t prev = links.spin_check_tick;
+  links.spin_check_tick = now;
+  stats_.delay_looks.fetch_add(1, std::memory_order_relaxed);
+  if (!prev || now - prev > delay_gap_ticks_) {
+    // The first look, or the thread did other work between its sleds.
+    WaitBurstEnded(self);
     links.spin_burst_tick = now;
     links.spin_park_shift = 0;
     links.wait_armed = false;
@@ -2245,7 +2383,9 @@ void GuestScheduler::PollSiteVisit(XThread* self, void* raw_context,
   if (now - links.spin_burst_tick < wait_park_after_ticks_) {
     return;
   }
-  TryWaitPark(self, now, true);
+  if (TryWaitPark(self, now, true)) {
+    stats_.delay_parks.fetch_add(1, std::memory_order_relaxed);
+  }
 }
 
 // hakuX-Boosted: guest_scheduler_park_poll_loops.
@@ -4082,14 +4222,17 @@ void GuestScheduler::ReportStatsIfDue() {
         "| looks that did not park: an event since the last look {}, not "
         "allowed here {} | events counted {} | poll site looks {}, registers "
         "changed {} | early wakes: still waiting {}, wait over {} | events "
-        "inside a hold-off {}",
+        "inside a hold-off {} | poll site backoffs {} (last at {:08X}) | "
+        "delay sled looks {}, parks {}",
         take(stats_.wait_parks_yield), take(stats_.wait_parks_poll),
         to_us(take(stats_.wait_park_ticks)), take(stats_.wait_ended_timer),
         take(stats_.wait_ended_event), take(stats_.wait_looks_event),
         take(stats_.wait_looks_barred), take(stats_.wait_events),
         take(stats_.poll_visits), take(stats_.poll_changed),
         take(stats_.wait_wakes_futile), take(stats_.wait_wakes_useful),
-        take(stats_.wait_events_held));
+        take(stats_.wait_events_held), take(stats_.poll_backoffs),
+        poll_backoff_site_.load(std::memory_order_relaxed),
+        take(stats_.delay_looks), take(stats_.delay_parks));
   }
   {
     uint64_t acquisitions = take(stats_.lock_acquisitions);

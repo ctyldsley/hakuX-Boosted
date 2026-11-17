@@ -50,6 +50,66 @@ DEFINE_bool(log_memory_poll_park, false,
             "loops are always logged.",
             "CPU");
 
+// hakuX-Boosted (park-hot-loops, boosted/notes/park-hot-loops.md): run 146
+// on Fable II marked the same three-block, four-load loop "every pass the
+// same unless memory changes" in about eighty functions, and the main
+// thread's poll sites then saw its registers change at 97.5% of looks
+// (115,594 of 118,484 a second). A loop that loads its next address from
+// memory through a register it wrote on the pass before ("p = p->next") is
+// a walk, not a wait, and the stateless rule took it because it counted
+// every loaded value as clean. With this on a loaded value is clean only if
+// its address is.
+DEFINE_bool(
+    park_poll_loops_fixed_addresses, true,
+    "With park_pause_poll_loops: a loop without a pause counts as a wait "
+    "only if every address it loads from is the same on every pass unless "
+    "memory changes (a walk along a list, which loads its next address "
+    "through a register it wrote on the pass before, is refused). Fewer "
+    "loops get a poll site; none that could be parked loses one unless its "
+    "registers repeat with the walk. Read when a function is translated.",
+    "CPU");
+// hakuX-Boosted (park-hot-loops): briefs/park-rework-followup.md, item 2.
+// A one-block loop that park_memory_poll_loops marks gets a plain backoff,
+// which under the guest scheduler only yields once a slice: the scheduler's
+// busy-wait parking never sees it.
+DEFINE_bool(
+    park_one_block_poll_loops, false,
+    "With guest_scheduler_park_waits: the one-block memory-poll loops "
+    "park_memory_poll_loops marks become poll sites like the loops of "
+    "park_pause_poll_loops, so a thread stuck in one is parked once its "
+    "registers have stayed the same for a while. Only loops whose load "
+    "addresses are the same on every pass. Read when a function is "
+    "translated.",
+    "CPU");
+// hakuX-Boosted (park-hot-loops): run 146's profile has Fable II's 3D Engine
+// thread at 45.6% of its samples in sub_82B9BF90, whose only loop the log
+// names is a one-block sled of pause hints at 82B9BFAC that loads nothing
+// ("parked poll loop" was logged for it: it got a plain backoff site).
+DEFINE_bool(
+    park_delay_sleds, false,
+    "With guest_scheduler_park_waits: a one-block counted loop of the "
+    "console's pause hints that loads nothing (a delay the title spins in, "
+    "marked by park_memory_poll_loops) reports to the scheduler every 64 "
+    "passes. A thread that spends nearly all its time in such loops for "
+    "guest_scheduler_park_wait_after_us is parked like an empty-yield "
+    "spinner, for at most guest_scheduler_park_wait_max_us at a time. "
+    "Nothing in the loop changes: the delay only lasts longer. Read when a "
+    "function is translated.",
+    "CPU");
+// hakuX-Boosted (park-hot-loops): the same run had
+// xe::kernel::PollSiteVisitFiber at 4.5% of all samples on the main thread:
+// about 950,000 calls a second into a site whose registers almost never
+// stayed the same.
+DEFINE_bool(
+    park_poll_site_backoff, true,
+    "With park_pause_poll_loops: a poll site counts its passes inline and "
+    "calls the scheduler only on the passes it looks at (one in eight), and "
+    "a site whose registers keep changing is looked at less and less often "
+    "(down to one pass in about 4,000), until a look finds them the same. "
+    "False is the call on every pass. Read when a function is translated and "
+    "at start-up.",
+    "CPU");
+
 namespace xe {
 namespace cpu {
 namespace compiler {
@@ -202,6 +262,94 @@ bool Overlaps(const std::vector<ContextRange>& ranges, uint64_t begin,
   return false;
 }
 
+// hakuX-Boosted (park-hot-loops): true when every value operand of |instr|
+// passes |is_clean| (for a load: its address, and the offset of a
+// load_offset).
+template <typename Pred>
+bool ValueSourcesClean(const Instr* instr, Pred is_clean) {
+  const uint32_t sig = instr->opcode->signature;
+  if (GET_OPCODE_SIG_TYPE_SRC1(sig) == OPCODE_SIG_TYPE_V &&
+      !is_clean(instr->src1.value)) {
+    return false;
+  }
+  if (GET_OPCODE_SIG_TYPE_SRC2(sig) == OPCODE_SIG_TYPE_V &&
+      !is_clean(instr->src2.value)) {
+    return false;
+  }
+  if (GET_OPCODE_SIG_TYPE_SRC3(sig) == OPCODE_SIG_TYPE_V &&
+      !is_clean(instr->src3.value)) {
+    return false;
+  }
+  return true;
+}
+
+// hakuX-Boosted (park-hot-loops): park_one_block_poll_loops. Is every
+// address the one-block loop loads from the same on every pass? An address
+// counts as fixed when it is built only from constants, from registers the
+// loop never writes, and from registers this pass has already written with
+// such a value; a loaded value never counts (what memory holds may change,
+// and the brief asks for addresses that do not). Unknowns are taken as not
+// fixed, which leaves the loop with the plain backoff it had.
+bool OneBlockLoadAddressesFixed(const Block* block, const Instr* loop_branch) {
+  std::vector<ContextRange> written;
+  for (const Instr* instr = block->instr_head; instr && instr != loop_branch;
+       instr = instr->next) {
+    if (instr->opcode == &OPCODE_STORE_CONTEXT_info) {
+      const uint64_t at = instr->src1.offset;
+      written.push_back({at, at + GetTypeSize(instr->src2.value->type)});
+    }
+  }
+  std::unordered_set<const Value*> fixed;
+  std::vector<ContextRange> known;
+  auto is_fixed = [&fixed](const Value* value) {
+    return value && (value->IsConstant() || fixed.count(value));
+  };
+  size_t loads = 0;
+  for (const Instr* instr = block->instr_head; instr && instr != loop_branch;
+       instr = instr->next) {
+    const OpcodeInfo* op = instr->opcode;
+    if (op == &OPCODE_LOAD_CONTEXT_info) {
+      const uint64_t at = instr->src1.offset;
+      const uint64_t end = at + GetTypeSize(instr->dest->type);
+      bool ok = !Overlaps(written, at, end);
+      for (const ContextRange& r : known) {
+        if (!ok && r.begin == at && r.end == end) {
+          ok = true;
+        }
+      }
+      if (ok) {
+        fixed.insert(instr->dest);
+      }
+      continue;
+    }
+    if (op == &OPCODE_STORE_CONTEXT_info) {
+      const uint64_t at = instr->src1.offset;
+      const uint64_t end = at + GetTypeSize(instr->src2.value->type);
+      known.erase(std::remove_if(known.begin(), known.end(),
+                                 [at, end](const ContextRange& r) {
+                                   return at < r.end && r.begin < end;
+                                 }),
+                  known.end());
+      if (is_fixed(instr->src2.value)) {
+        known.push_back({at, end});
+      }
+      continue;
+    }
+    if (op == &OPCODE_LOAD_info || op == &OPCODE_LOAD_OFFSET_info ||
+        op == &OPCODE_RESERVED_LOAD_info) {
+      if (!ValueSourcesClean(instr, is_fixed)) {
+        return false;
+      }
+      ++loads;
+      continue;  // its value is not fixed
+    }
+    if (instr->dest && ValueSourcesClean(instr, is_fixed)) {
+      fixed.insert(instr->dest);
+    }
+  }
+  return loads != 0;
+}
+
 bool IsStatelessLoop(const std::vector<Block*>& blocks, size_t head,
                      size_t tail, const Instr* back_branch) {
   // Every stretch of the context the loop writes.
@@ -278,6 +426,14 @@ bool IsStatelessLoop(const std::vector<Block*>& blocks, size_t head,
         // What memory holds is what the loop waits for. (The address is a
         // register value; a loop that walks memory has changed a register
         // from its own last value and has already failed above.)
+        // hakuX-Boosted (park-hot-loops): not so. "p = p->next" stores a
+        // loaded value, which was counted clean whatever its address. With
+        // park_poll_loops_fixed_addresses a loaded value is clean only if
+        // its address is, so the walk's store of p fails below.
+        if (cvars::park_poll_loops_fixed_addresses &&
+            !ValueSourcesClean(instr, value_clean)) {
+          continue;
+        }
         if (instr->dest) {
           clean.insert(instr->dest);
         }
@@ -673,8 +829,47 @@ bool MemoryPollParkPass::TryInstrumentLoop(HIRBuilder* builder, Block* block) {
   Instr* backoff = builder->SpinBackoff(1);
   backoff->MoveBefore(loop_branch);
 
-  XELOGI("MemoryPollPark: parked poll loop at guest {:08X}", guest_address);
+  // hakuX-Boosted (park-hot-loops): this line is logged when the loop is
+  // marked, not when a thread sleeps in it; the plain backoff above only
+  // yields once a slice under the guest scheduler. With
+  // park_one_block_poll_loops or park_delay_sleds the site reports to the
+  // scheduler instead, which can park the thread.
+  const uint16_t kind =
+      OneBlockSiteKind(block, loop_branch, saw_load, is_delay_loop);
+  if (kind) {
+    backoff->flags = kind;
+    backoff->src1.offset = (guest_address << 32) | 1;
+  }
+  XELOGI("MemoryPollPark: parked poll loop at guest {:08X}{}", guest_address,
+         kind == kSpinBackoffPollSite
+             ? " (a poll site: its load addresses are the same every pass)"
+             : kind == kSpinBackoffDelaySite
+                   ? " (a delay site: a sled of pause hints that loads nothing)"
+                   : "");
   return true;
+}
+
+uint16_t MemoryPollParkPass::OneBlockSiteKind(Block* block, Instr* loop_branch,
+                                              bool saw_load,
+                                              bool is_delay_loop) {
+  if (!saw_load) {
+    // Accepted above only as a delay sled.
+    return (cvars::park_delay_sleds && is_delay_loop) ? kSpinBackoffDelaySite
+                                                      : 0;
+  }
+  if (!cvars::park_one_block_poll_loops) {
+    return 0;
+  }
+  if (!OneBlockLoadAddressesFixed(block, loop_branch)) {
+    if (cvars::log_memory_poll_park) {
+      XELOGI(
+          "MemoryPollPark: self-loop at guest {:08X} stays a plain backoff: "
+          "an address it loads from can change between passes",
+          BlockGuestAddress(block));
+    }
+    return 0;
+  }
+  return kSpinBackoffPollSite;
 }
 
 }  // namespace passes

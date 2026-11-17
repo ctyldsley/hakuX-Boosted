@@ -662,6 +662,12 @@ class XThread : public XObject, public cpu::Thread {
     uint64_t poll_hash = 0;
     uint64_t poll_same_tick = 0;
     uint32_t poll_visits = 0;
+    // hakuX-Boosted (park-hot-loops, park_poll_site_backoff): looks in a
+    // row at which the registers had changed since the look before (reset
+    // by one that finds them the same), and how far the thread's sites are
+    // backed off (each look then skips 8 << level passes).
+    uint32_t poll_refusals = 0;
+    uint8_t poll_backoff_level = 0;
   };
   SchedulerLinks& scheduler_links() { return scheduler_links_; }
 
