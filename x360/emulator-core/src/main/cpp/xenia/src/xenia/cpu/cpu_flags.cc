@@ -59,6 +59,17 @@ DEFINE_uint32(
     "4=function calls (7=all). Each mode must be compiled in to be usable.",
     "CPU");
 
+// hakuX-Boosted: see aot_translate_measure.h.
+DEFINE_bool(
+    aot_translate_measure, false,
+    "Measurement only: after the title's executable loads, translate every "
+    "function start it lists (its .pdata table and the functions declared "
+    "at load) on one lowest-priority background thread, through the normal "
+    "translation path, and log progress and a timing and memory summary "
+    "(lines starting \"AOT measure:\"). Costs that thread's CPU time and "
+    "code cache room for functions the title may never call.",
+    "CPU");
+
 DEFINE_bool(validate_hir, false,
             "Perform validation checks on the HIR during compilation.", "CPU");
 

@@ -28,6 +28,9 @@ class CodeCache {
   virtual const std::filesystem::path& file_name() const = 0;
   virtual uintptr_t execute_base_address() const = 0;
   virtual size_t total_size() const = 0;
+  // hakuX-Boosted: bytes of the code region handed out so far (code and
+  // unwind data); 0 where a cache does not track it.
+  virtual size_t used_size() const { return 0; }
 
   // Finds a function based on the given host PC (that may be within a
   // function).

@@ -68,6 +68,30 @@ DEFINE_bool(
     "long form, as if it had been too large.",
     "a64");
 
+// hakuX-Boosted: strict guest memory ordering, a diagnostic for the
+// ARM64-only faults (device-logs/gears-freeze/ANALYSIS-2.md section 2.4).
+// Guest loads and stores are plain ldr/str, so the host may reorder what an
+// x64 host (TSO) never would. Level 1 puts dmb ishld after every guest load
+// (orders it before every later load and store) and dmb ishst before every
+// guest store (orders every earlier store before it): together, the order a
+// TSO host gives. Applied around the whole sequence of OPCODE_LOAD,
+// OPCODE_LOAD_OFFSET and OPCODE_RESERVED_LOAD (barrier after) and
+// OPCODE_STORE, OPCODE_STORE_OFFSET, OPCODE_MEMSET and OPCODE_RESERVED_STORE
+// (barrier before). Not covered: OPCODE_LOAD_MMIO/STORE_MMIO (host device
+// handlers, not guest RAM), OPCODE_ATOMIC_COMPARE_EXCHANGE (casal or
+// ldaxr/stlxr, already ordered both ways), and memory touched by host code
+// on the guest's behalf (kernel exports, the GPU, XMA).
+DEFINE_int32(
+    a64_guest_memory_order, 0,
+    "Diagnostic: order guest memory accesses as an x64 host would. 0 off "
+    "(plain loads and stores, as before). 1: a dmb ishld barrier after every "
+    "guest load and a dmb ishst barrier before every guest store, which "
+    "gives total store order. Slow (every access gains a barrier); meant to "
+    "test whether a fault is a memory-ordering race. Takes effect for "
+    "functions translated after it is set, so set it in the config before "
+    "the title starts.",
+    "a64");
+
 // hakuX-Boosted: see ComputeMemoryAddress in a64_seq_util.h.
 DEFINE_bool(
     a64_stack_access_no_fixup, false,
@@ -916,12 +940,34 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
       last_opcode = instr->GetOpcodeNum();
       const hir::Instr* new_tail = instr;
       bool selected = false;
+      // hakuX-Boosted: a64_guest_memory_order (see its definition).
+      bool order_after_load = false;
+      if (cvars::a64_guest_memory_order >= 1 && !zero_test_taken) {
+        switch (instr->GetOpcodeNum()) {
+          case hir::OPCODE_STORE:
+          case hir::OPCODE_STORE_OFFSET:
+          case hir::OPCODE_MEMSET:
+          case hir::OPCODE_RESERVED_STORE:
+            dmb(Xbyak_aarch64::ISHST);
+            break;
+          case hir::OPCODE_LOAD:
+          case hir::OPCODE_LOAD_OFFSET:
+          case hir::OPCODE_RESERVED_LOAD:
+            order_after_load = true;
+            break;
+          default:
+            break;
+        }
+      }
       try {
         if (zero_test_taken) {
           selected = true;
           new_tail = instr->next;
         } else {
           selected = SelectSequence(this, instr, &new_tail);
+        }
+        if (order_after_load && selected) {
+          dmb(Xbyak_aarch64::ISHLD);
         }
         skip_next_cmp_ = false;
         // hakuX-Boosted: a64_fpcr_known_block_entry. The branches this

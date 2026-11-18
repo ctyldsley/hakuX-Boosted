@@ -32,6 +32,7 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
+#include "xenia/cpu/aot_translate_measure.h"  // hakuX-Boosted
 #include "xenia/cpu/breakpoint.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/export_resolver.h"
@@ -129,6 +130,7 @@ Processor::Processor(xe::Memory* memory, ExportResolver* export_resolver)
 
 Processor::~Processor() {
   // hakuX-Boosted: before anything a translation reads is freed.
+  StopAotTranslateMeasure(nullptr);
   StopTranslateAhead();
   {
     auto global_lock = global_critical_region_.Acquire();
@@ -171,10 +173,42 @@ int CurrentTid() {
 }  // namespace
 
 bool Processor::IsTranslateAheadThread() {
-  return t_is_translate_ahead_thread;
+  // hakuX-Boosted: the aot_translate_measure thread too, so that its
+  // translations queue nothing for the helper and are not counted as on
+  // demand.
+  return t_is_translate_ahead_thread || AotTranslateMeasure::IsMeasureThread();
+}
+
+void Processor::StartAotTranslateMeasure(Module* module,
+                                         std::vector<uint32_t> addresses) {
+  std::lock_guard<std::mutex> lock(aot_measure_mutex_);
+  if (aot_measure_) {
+    XELOGW("AOT measure: already started once; not measuring {}",
+           module->name());
+    return;
+  }
+  aot_measure_ = std::make_unique<AotTranslateMeasure>(this, module,
+                                                       std::move(addresses));
+  aot_measure_->Start();
+}
+
+void Processor::StopAotTranslateMeasure(const Module* module) {
+  std::unique_ptr<AotTranslateMeasure> measure;
+  {
+    std::lock_guard<std::mutex> lock(aot_measure_mutex_);
+    if (!aot_measure_ || (module && aot_measure_->module() != module)) {
+      return;
+    }
+    measure = std::move(aot_measure_);
+  }
+  // Joins the thread, outside the lock.
+  measure.reset();
 }
 
 void Processor::BoostTranslateAhead() {
+  // hakuX-Boosted: aot_translate_measure's thread is lent priority the same
+  // way.
+  AotTranslateMeasure::BoostIfBusy();
   const int tid = g_translate_ahead_busy_tid.load(std::memory_order_acquire);
   if (!tid || t_is_translate_ahead_thread) {
     return;

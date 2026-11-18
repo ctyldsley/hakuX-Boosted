@@ -18,6 +18,8 @@
 #include "xenia/emulator.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/guest_scheduler.h"
+// hakuX-Boosted: stall_watchdog.
+#include "xenia/kernel/stall_watchdog.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_memory.h"
@@ -82,9 +84,15 @@ KernelState::KernelState(Emulator* emulator)
       kMemoryProtectRead | kMemoryProtectWrite);
 
   xenia_assert(fixed_alloc_worked);
+
+  // hakuX-Boosted: stall_watchdog (observes only; off with the cvar).
+  StallWatchdogStart(this);
 }
 
 KernelState::~KernelState() {
+  // hakuX-Boosted: stall_watchdog, stopped before any thread or object goes.
+  StallWatchdogStop();
+
   SetExecutableModule(nullptr);
 
   ShutdownDispatchThread();

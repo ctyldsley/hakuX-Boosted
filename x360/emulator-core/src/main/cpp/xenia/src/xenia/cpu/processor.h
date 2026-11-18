@@ -41,6 +41,7 @@ namespace cpu {
 
 constexpr fourcc_t kProcessorSaveSignature = make_fourcc("PROC");
 
+class AotTranslateMeasure;  // hakuX-Boosted
 class Breakpoint;
 class StackWalker;
 class XexModule;
@@ -77,6 +78,9 @@ class Processor {
   std::deque<uint32_t> ahead_queue_;
   bool ahead_stop_ = false;
   bool ahead_started_ = false;
+  // hakuX-Boosted: aot_translate_measure.
+  std::mutex aot_measure_mutex_;
+  std::unique_ptr<AotTranslateMeasure> aot_measure_;
 
  public:
   Processor(Memory* memory, ExportResolver* export_resolver);
@@ -113,6 +117,14 @@ class Processor {
   static bool IsTranslateAheadThread();
   // Called by a thread that finds the function it needs being compiled.
   static void BoostTranslateAhead();
+
+  // hakuX-Boosted: aot_translate_measure (see aot_translate_measure.h).
+  // Starts the one measurement of a process over the given function starts
+  // of module; Stop... stops and joins it if it is measuring module (any
+  // module for nullptr).
+  void StartAotTranslateMeasure(Module* module,
+                                std::vector<uint32_t> addresses);
+  void StopAotTranslateMeasure(const Module* module);
 
   // Runs any pre-launch logic once the module and thread have been setup.
   void PreLaunch();

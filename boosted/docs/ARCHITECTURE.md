@@ -191,6 +191,12 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/cpu/processor.h`, `.cc`, `cpu/entry_table.cc` | The translate-ahead helper, its stop in `~Processor`, the priority boost from the entry table's wait |
 | `xenia/config.cc` | `SaveConfig` and `SaveGameConfig` write a `.tmp`, flush (and `fsync` in `SaveConfig`) and rename over the file (asked for by `claude/defaults-config`; applied on `claude/integration-1115`, as are the next two rows) |
 | `xenia/gpu/command_processor.cc` | `NoteWaitEvent()` after the read pointer write-back, so a parked busy wait ends with the GPU's progress (asked for by `claude/guest-waits`) |
+| `xenia/cpu/backend/a64/a64_emitter.cc` | `a64_guest_memory_order` (default 0): `dmb ishst` before every guest store sequence and `dmb ishld` after every guest load sequence, in `Emit`'s instruction loop |
+| `xenia/cpu/aot_translate_measure.cc`, `.h` (new), `cpu/processor.h`, `.cc`, `cpu/cpu_flags.h`, `.cc` | `aot_translate_measure` (default off): after the executable loads, one nice-19 thread translates every .pdata and load-declared function start through `ResolveFunction` and logs progress and a timing and memory summary ("AOT measure:"); stopped on executable unload and in `~Processor` |
+| `xenia/cpu/xex_module.cc` | Collects the function starts for `aot_translate_measure` at the end of `Precompile`; stops it at the top of `Unload` |
+| `xenia/cpu/backend/code_cache.h`, `code_cache_base.h` | `used_size()`: bytes of the code region handed out so far |
+| `xenia/kernel/stall_watchdog.cc`, `.h` (new), `kernel/kernel_state.cc` | `stall_watchdog` (default on, observes only) and `stall_watchdog_seconds` (10): a 1 s host thread writes one `STALL REPORT` when frames present but no guest thread other than the swap thread has made a kernel call for that long; started in `KernelState`'s constructor, stopped first in its destructor |
+| `xenia/kernel/util/shim_utils.h`, `kernel/xthread.h` | `X::Trampoline` records every kernel call in the calling thread's 16-entry ring; `XThread::kernel_call_trace_` holds it |
 | `xenia/base/mutex.cc` | On Android `gettid()` is bionic's, which does not go through the TLS resolver (asked for by `claude/guest-waits`) |
 
 ## Taking a newer hakuX

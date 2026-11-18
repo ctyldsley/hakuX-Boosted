@@ -23,6 +23,8 @@
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
+// hakuX-Boosted: stall_watchdog, the kernel call ring (KernelCallTraceEnter).
+#include "xenia/kernel/stall_watchdog.h"
 
 namespace xe {
 namespace kernel {
@@ -545,6 +547,12 @@ struct ExportRegistrerHelper {
         new cpu::Export(ORDINAL, xe::cpu::Export::Type::kFunction, name, TAGS);
     struct X {
       static void Trampoline(PPCContext* ppc_context) {
+        // hakuX-Boosted: stall_watchdog, this call in the thread's ring.
+        const uint32_t trace_seq =
+            xe::kernel::g_kernel_call_trace_enabled
+                ? xe::kernel::KernelCallTraceEnter(ppc_context,
+                                                   export_entry->name)
+                : 0;
         Param::Init init = {
             ppc_context,
             0,
@@ -571,6 +579,12 @@ struct ExportRegistrerHelper {
               (xe::cpu::ExportTag::kLog | xe::cpu::ExportTag::kLogResult)) {
             // TODO(benvanik): log result.
           }
+        }
+        // hakuX-Boosted: stall_watchdog.
+        if (trace_seq) {
+          xe::kernel::KernelCallTraceLeave(
+              ppc_context, trace_seq,
+              std::is_void<R>::value ? 0u : uint32_t(ppc_context->r[3]));
         }
       }
     };

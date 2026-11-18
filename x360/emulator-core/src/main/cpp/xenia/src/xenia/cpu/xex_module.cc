@@ -1117,11 +1117,41 @@ void XexModule::Precompile() {
 
   info_cache_.Init(this);
   PrecompileDiscoveredFunctions();
+
+  // hakuX-Boosted: aot_translate_measure. The title's function starts: its
+  // .pdata table (as in PreanalyzeCode) and every function declared so far
+  // (the save/restore helpers above, import thunks; the measuring thread
+  // skips those that are not ordinary functions).
+  if (cvars::aot_translate_measure && is_executable()) {
+    std::vector<uint32_t> starts;
+    if (auto pdata = GetPESection(".pdata")) {
+      auto pdata_base =
+          (uint32_t*)memory()->TranslateVirtual(pdata->address);
+      for (uint32_t i = 0; i < pdata->raw_size / 8; ++i) {
+        uint32_t address = xe::load_and_swap<uint32_t>(&pdata_base[i * 2]);
+        if (!address) {
+          break;
+        }
+        if (!(address & 3) && ContainsAddress(address)) {
+          starts.push_back(address);
+        }
+      }
+    }
+    ForEachFunction([this, &starts](Function* function) {
+      if (ContainsAddress(function->address())) {
+        starts.push_back(function->address());
+      }
+    });
+    processor_->StartAotTranslateMeasure(this, std::move(starts));
+  }
 }
 bool XexModule::Unload() {
   if (!loaded_) {
     return true;
   }
+  // hakuX-Boosted: aot_translate_measure reads this module's code; stop it
+  // before the memory is released.
+  processor_->StopAotTranslateMeasure(this);
   loaded_ = false;
 
   // If this isn't a patch, just deallocate the memory occupied by the exe

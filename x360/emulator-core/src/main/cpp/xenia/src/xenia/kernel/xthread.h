@@ -26,6 +26,8 @@
 #include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/util/native_list.h"
 #include "xenia/kernel/util/xfiletime.h"
+// hakuX-Boosted: stall_watchdog, the per-thread kernel call ring.
+#include "xenia/kernel/stall_watchdog.h"
 #include "xenia/kernel/xmutant.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/xbox.h"
@@ -670,6 +672,9 @@ class XThread : public XObject, public cpu::Thread {
     uint8_t poll_backoff_level = 0;
   };
   SchedulerLinks& scheduler_links() { return scheduler_links_; }
+  // hakuX-Boosted: stall_watchdog. Written only by this thread, from the
+  // export trampoline; read racily by the watchdog.
+  KernelCallTrace& kernel_call_trace() { return kernel_call_trace_; }
 
   // A handle a host-side caller can block on until this thread exits. Resolves
   // to the host thread, or (for a fiber-backed thread) its exit event.
@@ -763,6 +768,8 @@ class XThread : public XObject, public cpu::Thread {
   // fiber instead of its own host thread (cpu::Thread::thread_).
   std::unique_ptr<xe::threading::Fiber> fiber_;
   SchedulerLinks scheduler_links_;
+  // hakuX-Boosted: stall_watchdog.
+  KernelCallTrace kernel_call_trace_;
   // Set by the first ReclaimExited so both terminal paths reclaim once.
   std::atomic<bool> self_reference_dropped_{false};
   // Owned by XObject::Enter/LeaveCooperativeWait.

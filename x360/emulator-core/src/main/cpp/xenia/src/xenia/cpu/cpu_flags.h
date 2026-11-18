@@ -32,6 +32,8 @@ DECLARE_bool(trace_function_data);
 
 DECLARE_uint32(cpu_trace_mask);
 
+DECLARE_bool(aot_translate_measure);  // hakuX-Boosted
+
 DECLARE_bool(validate_hir);
 
 DECLARE_uint64(pvr);

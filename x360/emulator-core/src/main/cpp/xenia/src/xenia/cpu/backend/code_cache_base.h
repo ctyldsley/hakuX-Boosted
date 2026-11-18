@@ -141,6 +141,11 @@ class CodeCacheBase : public CodeCache {
                : (execute_address_high() | kGeneratedCodeExecuteBaseLow);
   }
   size_t total_size() const override { return kGeneratedCodeSize; }
+  // hakuX-Boosted: see CodeCache::used_size.
+  size_t used_size() const override {
+    auto global_lock = global_critical_region_.Acquire();
+    return generated_code_offset_;
+  }
 
   bool has_indirection_table() { return indirection_table_base_ != nullptr; }
 
