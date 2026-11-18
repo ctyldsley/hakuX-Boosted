@@ -5,7 +5,7 @@ where the work stands, what is waiting on whom, and how to work in this
 repository. **Update it before a session ends** (the "Right now" section
 and a line in the log at the bottom), and commit it with the work.
 
-Last updated: 2026-11-14 (`claude/integration-1115` made: everything in one build, not yet on the phone; the build on the phone is run 90 of `claude/integration-1113`, `91b7a7a`).
+Last updated: 2026-11-18 (run 149, `16c3ab1`; see Right now). Previously: 2026-11-14 (`claude/integration-1115` made: everything in one build, not yet on the phone; the build on the phone is run 90 of `claude/integration-1113`, `91b7a7a`).
 
 ## The backlog: promised to the owner, not yet in a build
 
@@ -89,6 +89,13 @@ Until those branches are merged, this session keeps out of the files
 they own.
 
 ## Right now
+
+- **2026-11-18, overnight scheduled session: three diagnostics on `claude/integration-1116`, commit `16c3ab1` (on top of `59538db`, the 3D tiled lower bound fix). Run 149 (id 44271865057): Xbox core and APK jobs green on the first push; bench run 28 green; "Translator tests" still running when written. APK artifact `hakuX-Boosted-debug-apk`, 34.5 MB, sha256 `ce97d7da2c721a20f99b465d863e69d89e9abc2531b96a3f1820ff02df1760c5`. Nothing compiled locally (no toolchain on the PC), nothing run on a device, nothing measured.**
+  - `stall_watchdog` (Kernel, **default true**, only observes) and `stall_watchdog_seconds` (Kernel, 10). Every guest thread keeps a ring of its last 16 kernel calls (export, lr, r3..r8, result, frame), written by `X::Trampoline`. A host thread looks once a second: frames still presenting (VdSwap counter moved in the last 2 s) and no guest thread except the swap thread made or returned from a kernel call for N s gives one `STALL REPORT` in xe.log (state, decoded in-flight wait with object type/signalled/timeout, last signaller where known, last safepoint PC, LR, back-chain stack 16 deep, the call ring). Re-arms when a watched thread calls again. Known false positive: a title whose workers all idle in waits for N s at a menu gets one report. Not tracked: last signaller of semaphores and mutants (only XEvent's own fields and the cooperative signal ring).
+  - `aot_translate_measure` (CPU, false): after the executable loads, one nice-19 thread translates every .pdata and load-declared function start through `Processor::ResolveFunction` (the guest's own first-call path and locks; dispatch unchanged) and logs `AOT measure:` progress every 5 s and a summary (counts, wall and thread CPU, mean/median/p99/max, 10 slowest, failures, VmHWM, code cache bytes). It changes translation order, which order-dependent passes may see.
+  - `a64_guest_memory_order` (a64, 0): 1 = `dmb ishst` before every guest store sequence and `dmb ishld` after every guest load sequence (STORE, STORE_OFFSET, MEMSET, RESERVED_STORE; LOAD, LOAD_OFFSET, RESERVED_LOAD), which is TSO. Not covered: MMIO loads/stores, `ATOMIC_COMPARE_EXCHANGE` (already ordered), memory host code touches for the guest. Slow; a test, not a fix. Takes effect for functions translated after it is set: put it in the config before launch.
+  - Next on the phone: `NEXT-SESSION.md` section 00c on the owner's PC.
+  - Not done: the xsdk probe workflow another session asked for (it would have been extra pushes beyond this task's budget, on a peer's relayed approval); plan and launch answer in `NEXT-SESSION.md` 00d.
 
 - **`claude/integration-1116`, made 2026-11-17 by the desktop session from `claude/integration-1115` (`b21c96e`). Nothing in it has run on a device; run 134 (`a958e84`) is still what is on the owner's phone.**
   - **Merged with `--no-ff`:** `claude/translator-overhaul` at `ba419cc` (three rounds; its own run 145 green with the whole test matrix; notes `boosted/notes/translator-overhaul.md`, sections 2, 4 and 5), `claude/emu-lifecycle` at `5a62e99` (`boosted/notes/emu-lifecycle.md`), `claude/standin-precompile` at `5142bf4` (`boosted/notes/standin-precompile.md`; its app jobs were green on run 141, its "Translator tests" job failed with the qemu abort the overhaul's section 0 explains and fixes), `claude/park-rework` at `ee24a9b` (`boosted/notes/park-rework.md`, run 139 green). One conflict, a comment in `boosted/bench/CMakeLists.txt`; this side's kept.
@@ -1350,6 +1357,9 @@ build locally and use adb; the device etiquette in upstream's own
 | `vulkan_async_wait_fullscreen_draws` | Vulkan | true | With `vulkan_async_skip_draws`: full-screen passes still wait for their pipeline (written 2026-11-12, not built or run) |
 | `vulkan_async_wait_fullscreen_draws_ms` | Vulkan | 1500 | The longest one submission waits for those |
 | `tessellation_debug` | GPU | 0 | Logs tessellated draws and their vertex shader; 1 no culling, 2 no depth test, 3 both |
+| `stall_watchdog` / `stall_watchdog_seconds` | Kernel | true / 10 | One `STALL REPORT` when frames present but guest threads make no kernel calls (2026-11-18, not run) |
+| `aot_translate_measure` | CPU | false | Times translating every function of the executable on a background thread (2026-11-18, not run) |
+| `a64_guest_memory_order` | a64 | 0 | 1: barriers around every guest load and store, total store order (2026-11-18, not run) |
 | (log line) | | | "This title creates multisampled render targets", a warning when tiled mode is on |
 
 ## The bundled Turnip driver
@@ -1512,3 +1522,4 @@ Newest first. One or two lines each: what changed, what was verified.
   `tessellation_debug`. Merged the control point tessellation fix from a
   second session. Verified: builds on Actions (run 13, `8345f8d`). Not
   verified: anything on a device.
+- 2026-11-18 (overnight scheduled session): `stall_watchdog`, `aot_translate_measure`, `a64_guest_memory_order` in `16c3ab1` on `claude/integration-1116` (watchdog and AOT written by two subagents, reviewed here; ordering written here). Verified: builds on Actions (run 149, core and APK green first push). Not verified: anything on a device.
