@@ -1410,6 +1410,15 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   std::unordered_set<const void*> compiled_shaders_;
   uint64_t compiled_by_seen_count_[3] = {};
   double compiled_by_seen_ms_[3] = {};
+  // hakuX-Boosted: totals since start for the 'pipeline compile totals:' line
+  // (boosted/notes/pipeline-libs-1123.md), under compiled_shaders_lock_.
+  // [0] real pipelines (linked or whole), [1] placeholders and stand-ins.
+  uint64_t compile_totals_count_[2] = {};
+  double compile_totals_ms_[2] = {};
+  uint64_t compile_totals_over_100ms_[2] = {};
+  double compile_totals_slowest_ms_[2] = {};
+  uint64_t compile_totals_linked_ = 0;
+  double compile_totals_linked_ms_ = 0.0;
   // hakuX-Boosted: the kept record.
   enum class DriverCacheState { kNone, kMatch, kMismatch, kUnknown };
   DriverCacheState driver_cache_state_ = DriverCacheState::kNone;

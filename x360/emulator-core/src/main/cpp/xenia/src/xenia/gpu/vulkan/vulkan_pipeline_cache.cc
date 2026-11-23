@@ -674,15 +674,20 @@ bool VulkanPipelineCache::Initialize() {
       vulkan_device->properties().graphicsPipelineLibraryFastLinking;
   inline_link_left_us_ = int64_t(
       std::max(int32_t(0), cvars::vulkan_pipeline_libraries_inline_link_frame_us));
-  if (cvars::vulkan_pipeline_libraries) {
+  // hakuX-Boosted: printed whatever is set (boosted/notes/pipeline-libs-1123.md),
+  // so that both runs of an A/B say which path they took.
+  {
     XELOGI(
-        "pipeline libraries: vulkan_pipeline_libraries is set: real pipelines "
-        "are {} (independent sets {}, links on the GPU command thread {})",
+        "pipeline libraries: in use {}: real pipelines are {} (independent "
+        "sets {}, links on the GPU command thread {})",
+        pipeline_libraries_active_ ? "yes" : "no",
         pipeline_libraries_active_
             ? "linked from libraries"
-            : "built whole as before, because the device does not offer "
-              "VK_EXT_graphics_pipeline_library with independent "
-              "interpolation decoration",
+            : (cvars::vulkan_pipeline_libraries
+                   ? "built whole as before, because the device does not "
+                     "offer VK_EXT_graphics_pipeline_library with "
+                     "independent interpolation decoration"
+                   : "built whole (vulkan_pipeline_libraries is off)"),
         pipeline_libraries_independent_sets_ ? "yes" : "no",
         pipeline_libraries_active_ &&
                 cvars::vulkan_pipeline_libraries_inline_link
@@ -3626,7 +3631,12 @@ void VulkanPipelineCache::LogStatsIfDue() {
   // hakuX-Boosted: the line of boosted/notes/pipeline-libraries.md, whichever
   // model the placeholders are.
   const bool libraries = pipeline_libraries_active_ && cvars::shader_profiling;
-  if (!ahead && !cover && !libraries) {
+  // hakuX-Boosted: the compile totals and the line by shaders seen before,
+  // with shader_profiling whatever else is set, so that a run with
+  // vulkan_pipeline_libraries off has them too
+  // (boosted/notes/pipeline-libs-1123.md).
+  const bool totals = cvars::shader_profiling;
+  if (!ahead && !cover && !libraries && !totals) {
     return;
   }
   uint64_t now_ms = xe::Clock::QueryHostUptimeMillis();
@@ -3690,6 +3700,25 @@ void VulkanPipelineCache::LogStatsIfDue() {
                 library_fallbacks_link_.load(std::memory_order_relaxed) +
                 library_fallbacks_key_.load(std::memory_order_relaxed)) *
                    103;
+  // hakuX-Boosted: and the compile totals.
+  uint64_t totals_count[2];
+  double totals_ms[2];
+  uint64_t totals_over_100ms[2];
+  double totals_slowest_ms[2];
+  uint64_t totals_linked;
+  double totals_linked_ms;
+  {
+    std::lock_guard<std::mutex> totals_lock(compiled_shaders_lock_);
+    for (uint32_t i = 0; i < 2; ++i) {
+      totals_count[i] = compile_totals_count_[i];
+      totals_ms[i] = compile_totals_ms_[i];
+      totals_over_100ms[i] = compile_totals_over_100ms_[i];
+      totals_slowest_ms[i] = compile_totals_slowest_ms_[i];
+    }
+    totals_linked = compile_totals_linked_;
+    totals_linked_ms = compile_totals_linked_ms_;
+  }
+  signature += (totals_count[0] + totals_count[1]) * 107;
   if (signature == stats_logged_signature_) {
     return;
   }
@@ -3728,7 +3757,19 @@ void VulkanPipelineCache::LogStatsIfDue() {
         speculative_dropped_.load(std::memory_order_relaxed),
         speculative_refused_budget_);
   }
-  if (cover || libraries) {
+  if (totals) {
+    XELOGI(
+        "pipeline compile totals: real {} in {:.0f} ms (mean {:.1f}, over "
+        "100 ms {}, slowest {:.1f}; linked from libraries {} in {:.0f} ms), "
+        "placeholders and stand-ins {} in {:.0f} ms (over 100 ms {}, slowest "
+        "{:.1f}); pipeline libraries {}",
+        totals_count[0], totals_ms[0],
+        totals_count[0] ? totals_ms[0] / double(totals_count[0]) : 0.0,
+        totals_over_100ms[0], totals_slowest_ms[0], totals_linked,
+        totals_linked_ms, totals_count[1], totals_ms[1], totals_over_100ms[1],
+        totals_slowest_ms[1], pipeline_libraries_active_ ? "on" : "off");
+  }
+  if (cover || libraries || totals) {
     uint64_t by_seen_count[3];
     double by_seen_ms[3];
     {
@@ -6344,6 +6385,27 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
       // compiled shaders by stage, and warming a pair of shaders with any
       // state at all is as good as guessing its state right
       // (boosted/notes/shader-first-run.md, "Speculation").
+      // hakuX-Boosted: and the totals since start of every pipeline made
+      // here, by kind (boosted/notes/pipeline-libs-1123.md).
+      {
+        double total_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() -
+                              pso_create_start)
+                              .count();
+        const uint32_t total_kind = creating_placeholder ? 1 : 0;
+        std::lock_guard<std::mutex> totals_lock(compiled_shaders_lock_);
+        ++compile_totals_count_[total_kind];
+        compile_totals_ms_[total_kind] += total_ms;
+        if (total_ms > 100.0) {
+          ++compile_totals_over_100ms_[total_kind];
+        }
+        compile_totals_slowest_ms_[total_kind] =
+            std::max(compile_totals_slowest_ms_[total_kind], total_ms);
+        if (pipeline_from_libraries) {
+          ++compile_totals_linked_;
+          compile_totals_linked_ms_ += total_ms;
+        }
+      }
       if (!creating_placeholder) {
         double compile_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() -
