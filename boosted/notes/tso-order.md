@@ -71,6 +71,26 @@ available (and on Mac) the direction is decoded from the instruction:
 `IsArm64LoadPrefetchStore` read `LDAPR` as a store (it sits in the atomic
 operation space); it now reads it as a load. `STLR` was already a store.
 
+### MMIO (the second phone run crashed at the title screen)
+
+With the alignment fix (combined build `claude/merge-1123` 638b9b8) Gears
+reached the title screen (frame 571) and the main thread then crashed:
+guest `stwbrx r11, 0, r10` at 0x825EC318 writing guest 0x7FEA1A80, in the
+GPU register range. A guest load or store the translator cannot tell is MMIO
+is emitted as a normal access and faults; `MMIOHandler` then decodes the
+faulting host instruction and emulates it. Its AArch64 decoder took only
+`LDR`/`STR` of a W or S register, so the `STLR W` was not recognised and the
+fault went on as a crash. It now also decodes `LDAPR Wt, [Xn]` and
+`STLR Wt, [Xn]` (base register only, as level 2 emits them; the value is in
+w17 for floating point, as the sequences move it). A following
+`rev Wt, Wt` after `LDAPR` is detected as for `LDR`. MMIO is 32-bit only, as
+before; the unaligned fallback is a plain `LDR`/`STR`, already decoded.
+The translator tests have no MMIO range, so this is not covered by the
+matrix; the phone is the test.
+
+Write watches do not decode the instruction (the fault address and the
+ESR's direction are enough), so they needed no change.
+
 ### Why LDAPR and STLR give TSO
 
 TSO keeps every order except a store followed by a later load of another

@@ -280,6 +280,41 @@ bool MMIOHandler::TryDecodeLoadStore(const uint8_t* p,
     return false;
   }
 
+  // hakuX-Boosted: a64_guest_memory_order = 2 emits guest 32-bit accesses as
+  // LDAPR Wt, [Xn] and STLR Wt, [Xn] (base only, no offset or index). Decode
+  // them like LDR / STR Wt, [Xn] so a guest access to an MMIO range (the GPU
+  // registers) is emulated rather than reported as a crash.
+  {
+    constexpr uint32_t kArm64AcqRelMask = UINT32_C(0xFFFFFC00);
+    constexpr uint32_t kArm64LdaprWFixed = UINT32_C(0xB8BFC000);
+    constexpr uint32_t kArm64StlrWFixed = UINT32_C(0x889FFC00);
+    const uint32_t acq_rel = instruction & kArm64AcqRelMask;
+    if (acq_rel == kArm64LdaprWFixed || acq_rel == kArm64StlrWFixed) {
+      decoded_out.is_load = acq_rel == kArm64LdaprWFixed;
+      decoded_out.value_reg =
+          DecodedLoadStore::kArm64ValueRegX0 + (instruction & 31);
+      if (decoded_out.is_load &&
+          decoded_out.value_reg == DecodedLoadStore::kArm64ValueRegZero) {
+        decoded_out.is_constant = true;
+        decoded_out.constant = 0;
+      }
+      if (decoded_out.is_load &&
+          decoded_out.value_reg != DecodedLoadStore::kArm64ValueRegZero) {
+        uint32_t next_instruction =
+            *reinterpret_cast<const uint32_t*>(p + sizeof(uint32_t));
+        uint8_t value_reg = instruction & 31;
+        if ((next_instruction & kArm64RevWMask) == kArm64RevWFixed &&
+            (next_instruction & 31) == value_reg &&
+            ((next_instruction >> 5) & 31) == value_reg) {
+          decoded_out.byte_swap = true;
+        }
+      }
+      decoded_out.mem_has_base = true;
+      decoded_out.mem_base_reg = (instruction >> 5) & 31;
+      return true;
+    }
+  }
+
   uint8_t value_reg_base;
   switch (Arm64LoadStoreOp(instruction & kArm64LoadStoreMask)) {
     case Arm64LoadStoreOp::kSTR_w:
