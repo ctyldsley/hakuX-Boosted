@@ -1,0 +1,78 @@
+# hakuX-Boosted: builds xenosworks/xsdk (MIT, a from-scratch Xbox 360 SDK)
+# and its test titles and hardware probes, whose results on a real console
+# are in xsdk's results/ folder. The .xex files run in our 360 core on the
+# phone, hands-off, and their logs are compared with the console's.
+# Runs only on pushes to xsdk/** branches and on request, so it never starts
+# the app build, and the app build never starts it.
+name: xsdk probes
+
+on:
+  push:
+    branches:
+      - 'xsdk/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned: the console results this build is compared with belong to it.
+  XSDK_COMMIT: 9e6de98f6b5d737bce0fecd2864edae94bdd2637
+
+jobs:
+  probes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bison flex texinfo libgmp-dev libmpfr-dev \
+            libmpc-dev curl xz-utils patch python3 cmake ninja-build git
+
+      - name: Clone xsdk
+        run: |
+          git clone https://github.com/xenosworks/xsdk.git "$HOME/xsdk"
+          git -C "$HOME/xsdk" checkout "$XSDK_COMMIT"
+
+      - name: Toolchain cache
+        id: tc
+        uses: actions/cache@v4
+        with:
+          path: ~/xsdk-gcc
+          key: xsdk-gcc-${{ env.XSDK_COMMIT }}
+
+      - name: Build the toolchain (GCC 15, binutils, newlib)
+        if: steps.tc.outputs.cache-hit != 'true'
+        run: |
+          cd "$HOME/xsdk"
+          PREFIX="$HOME/xsdk-gcc" WORK="$HOME/xsdk-gcc-work" JOBS=$(nproc) tools/toolchain/build.sh
+          rm -rf "$HOME/xsdk-gcc-work"
+
+      - name: Build xsdk, the test title and the probes
+        run: |
+          cd "$HOME/xsdk"
+          TC="TOOLCHAIN=$HOME/xsdk-gcc/bin/powerpc-xsdk-elf-"
+          make -j$(nproc) "$TC" 2>&1 | tee build-all.log
+          # Probes outside 'all'; one failing must not lose the rest.
+          for t in cpu_probes system_probes drive_probes xam_probes launch_probes skin_probe msaa_probes \
+                   hiz_pass_probes loop_break_probes instancing_probes; do
+            make -j$(nproc) "$TC" $t 2>&1 | tee -a build-extra.log || echo "TARGET FAILED: $t" | tee -a build-extra.log
+          done
+          make "$TC" samples 2>&1 | tee build-samples.log || echo "TARGET FAILED: samples" | tee -a build-samples.log
+
+      - name: Gather
+        run: |
+          cd "$HOME/xsdk"
+          mkdir -p out/xex out/results
+          find build -name '*.xex' -exec cp --parents {} out/xex/ \;
+          cp -r results/. out/results/
+          cp build-*.log out/
+          grep -h "xenia_scan" build-all.log | sort -u > out/xenia_scan.txt || true
+          git rev-parse HEAD > out/xsdk-commit.txt
+          find out/xex -name '*.xex' | wc -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xsdk-probes
+          path: ~/xsdk/out
