@@ -46,7 +46,7 @@ jobs:
         if: steps.tc.outputs.cache-hit != 'true'
         run: |
           cd "$HOME/xsdk"
-          PREFIX="$HOME/xsdk-gcc" WORK="$HOME/xsdk-gcc-work" JOBS=$(nproc) tools/toolchain/build.sh
+          PREFIX="$HOME/xsdk-gcc" WORK="$HOME/xsdk-gcc-work" JOBS=$(nproc) bash tools/toolchain/build.sh || { tail -40 "$HOME"/xsdk-gcc-work/logs/*.log; exit 1; }
           rm -rf "$HOME/xsdk-gcc-work"
 
       - name: Build xsdk, the test title and the probes
