@@ -198,6 +198,10 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/kernel/stall_watchdog.cc`, `.h` (new), `kernel/kernel_state.cc` | `stall_watchdog` (default on, observes only) and `stall_watchdog_seconds` (10): a 1 s host thread writes one `STALL REPORT` when frames present but no guest thread other than the swap thread has made a kernel call for that long; started in `KernelState`'s constructor, stopped first in its destructor |
 | `xenia/kernel/util/shim_utils.h`, `kernel/xthread.h` | `X::Trampoline` records every kernel call in the calling thread's 16-entry ring; `XThread::kernel_call_trace_` holds it |
 | `xenia/base/mutex.cc` | On Android `gettid()` is bionic's, which does not go through the TLS resolver (asked for by `claude/guest-waits`) |
+| `xenia/kernel/xobject.cc`, `.h`, `xevent.cc`, `xsemaphore.cc`, `xmutant.cc`, `xthread.cc` | `signal_stamp()`: a global order of signals, stamped before the host primitive is signalled (event set from unsignalled, pulse, semaphore release, mutant free and abandon, thread end); a wait-all that had to block returns `STATUS_WAIT_0` plus the index of the object signalled last, as the console does (`claude/kernel-faults`, as are the next four rows) |
+| `xenia/kernel/xboxkrnl/xboxkrnl_memory.cc` | `MmQueryAddressProtect` reports `PAGE_NOACCESS` for a committed no-access page (was 0); `MmQueryStatistics` counts the virtual heaps' committed pages as used and their reservations as reserved virtual memory |
+| `xenia/memory.cc`, `memory.h` | `BaseHeap::committed_page_count()`, kept at every change of a page's commit bit (`AllocFixed`, `Alloc`, `Decommit`, `Release`, `Reset`, `Restore`) |
+| `xenia/kernel/xboxkrnl/xboxkrnl_misc.cc`, `kernel/xthread.h` | `KeSaveFloatingPointState`, `KeRestoreFloatingPointState`, `KeSaveVectorUnitState`, `KeRestoreVectorUnitState` (were not implemented): FPRs and FPSCR, v0 to v127 and VSCR into a per-thread area made on first use (`XThread::fpu_vmx_save_area`), after rexglue |
 
 ## Taking a newer hakuX
 

@@ -1050,6 +1050,7 @@ void BaseHeap::Initialize(Memory* memory, uint8_t* membase, HeapType heap_type,
   host_address_offset_ = host_address_offset;
   page_table_.resize(heap_size / page_size);
   unreserved_page_count_ = uint32_t(page_table_.size());
+  committed_page_count_ = 0;  // hakuX-Boosted
 
   // Initialize free block tracker with a single block covering the entire heap.
   free_blocks_.clear();
@@ -1156,6 +1157,9 @@ bool BaseHeap::Restore(ByteStream* stream) {
   for (size_t i = 0; i < page_table_.size(); i++) {
     auto& page = page_table_[i];
     page.qword = stream->Read<uint64_t>();
+    if (page.state & kMemoryAllocationCommit) {
+      committed_page_count_++;  // hakuX-Boosted
+    }
     if (!page.state) {
       // Unallocated.
       continue;
@@ -1277,6 +1281,7 @@ void BaseHeap::Reset() {
   // TODO(DrChat): protect pages.
   std::memset(page_table_.data(), 0, sizeof(PageEntry) * page_table_.size());
   unreserved_page_count_ = uint32_t(page_table_.size());
+  committed_page_count_ = 0;  // hakuX-Boosted
   // TODO(Triang3l): Remove access callbacks from pages if this is a physical
   // memory heap.
 
@@ -1387,6 +1392,13 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size,
     if (!(page_entry.state & kMemoryAllocationReserve)) {
       had_free_pages = true;
       unreserved_page_count_--;
+    }
+    // hakuX-Boosted: committed_page_count_ follows the commit bit.
+    if (page_entry.state & kMemoryAllocationCommit) {
+      committed_page_count_--;
+    }
+    if (allocation_type & kMemoryAllocationCommit) {
+      committed_page_count_++;
     }
     page_entry.state = kMemoryAllocationReserve | allocation_type;
   }
@@ -1572,6 +1584,9 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
     page_entry.current_protect = protect;
     page_entry.state = kMemoryAllocationReserve | allocation_type;
     unreserved_page_count_--;
+    if (allocation_type & kMemoryAllocationCommit) {
+      committed_page_count_++;  // hakuX-Boosted
+    }
   }
 
   *out_address = heap_base_ + (start_page_number << page_size_shift_);
@@ -1621,6 +1636,9 @@ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
   for (uint32_t page_number = start_page_number; page_number <= end_page_number;
        ++page_number) {
     auto& page_entry = page_table_[page_number];
+    if (page_entry.state & kMemoryAllocationCommit) {
+      committed_page_count_--;  // hakuX-Boosted
+    }
     page_entry.state &= ~kMemoryAllocationCommit;
   }
 
@@ -1679,6 +1697,9 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
   for (uint32_t page_number = base_page_number; page_number <= end_page_number;
        ++page_number) {
     auto& page_entry = page_table_[page_number];
+    if (page_entry.state & kMemoryAllocationCommit) {
+      committed_page_count_--;  // hakuX-Boosted
+    }
     page_entry.qword = 0;
     unreserved_page_count_++;
   }

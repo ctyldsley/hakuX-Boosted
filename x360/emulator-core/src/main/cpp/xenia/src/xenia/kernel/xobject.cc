@@ -461,6 +461,36 @@ std::vector<XObject::SignalRecord> XObject::RecentCooperativeSignals(
   return out;
 }
 
+// hakuX-Boosted: the global order of signals behind signal_stamp().
+static std::atomic<uint64_t> g_signal_stamp{0};
+
+void XObject::NoteSignalStamp() {
+  signal_stamp_.store(g_signal_stamp.fetch_add(1) + 1,
+                      std::memory_order_release);
+}
+
+uint64_t XObject::CurrentSignalStamp() {
+  return g_signal_stamp.load(std::memory_order_acquire);
+}
+
+// hakuX-Boosted: the console's wait-all returns STATUS_WAIT_0 plus the index
+// of the object whose signal completed the wait: 0 when everything was
+// already signalled on entry, the last one signalled when it had to block.
+// Objects that never stamp (timers, files) read as signalled before entry.
+static uint32_t WaitAllSatisfierIndex(XObject** objects, uint32_t count,
+                                      uint64_t entry_stamp) {
+  uint32_t index = 0;
+  uint64_t newest = entry_stamp;
+  for (uint32_t i = 0; i < count; ++i) {
+    uint64_t stamp = objects[i]->signal_stamp();
+    if (stamp > newest) {
+      newest = stamp;
+      index = i;
+    }
+  }
+  return index;
+}
+
 void XObject::WakeCooperativeWaiters() {
   cooperative_signal_time_us_.store(GuestScheduler::NowMicros(),
                                     std::memory_order_relaxed);
@@ -765,6 +795,8 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                                              Clock::ScaleGuestDurationMillis(
                                                  TimeoutTicksToMs(*opt_timeout))
                                        : 0;
+    // hakuX-Boosted: see WaitAllSatisfierIndex.
+    const uint64_t entry_signal_stamp = CurrentSignalStamp();
     uint32_t entry_pulse_epochs[kMaxWaitHandles];
     uint32_t handle_ids[kMaxWaitHandles];
     for (size_t i = 0; i < count; ++i) {
@@ -858,6 +890,10 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
               if (current) {
                 current->BoostOnWake(boost_increment);
               }
+              if (status == X_STATUS_SUCCESS) {  // hakuX-Boosted
+                status = X_STATUS(WaitAllSatisfierIndex(objects, count,
+                                                        entry_signal_stamp));
+              }
               return status;
             }
             case xe::threading::WaitResult::kUserCallback:
@@ -877,6 +913,8 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
 
+  // hakuX-Boosted: see WaitAllSatisfierIndex.
+  const uint64_t entry_signal_stamp = CurrentSignalStamp();
   X_KTHREAD* kthread = WaitEnter(wait_reason, processor_mode, alertable);
   X_STATUS status;
   uint32_t boost_increment = 0;
@@ -921,6 +959,10 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
           if (objects[i]->priority_increment() > boost_increment) {
             boost_increment = objects[i]->priority_increment();
           }
+        }
+        if (status == X_STATUS_SUCCESS) {  // hakuX-Boosted
+          status = X_STATUS(
+              WaitAllSatisfierIndex(objects, count, entry_signal_stamp));
         }
         break;
       case xe::threading::WaitResult::kUserCallback:

@@ -113,6 +113,12 @@ void XEvent::RecordSetter() {
 int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
   set_priority_increment(priority_increment);
   RecordSetter();
+  // hakuX-Boosted: a set that signals, before the host does (signal_stamp).
+  if (!memory()
+           ->TranslateVirtual<X_KEVENT*>(guest_object())
+           ->header.signal_state) {
+    NoteSignalStamp();
+  }
   event_->Set();
   memory()->TranslateVirtual<X_KEVENT*>(guest_object())->header.signal_state =
       1;
@@ -138,6 +144,7 @@ int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
     // Releases every waiter parked right now. Must precede the wake below.
     pulse_epoch_.fetch_add(1);
   }
+  NoteSignalStamp();  // hakuX-Boosted: see XObject::signal_stamp
   event_->Pulse();
   // Pulse leaves the event reset after releasing waiters.
   kevent->header.signal_state = 0;

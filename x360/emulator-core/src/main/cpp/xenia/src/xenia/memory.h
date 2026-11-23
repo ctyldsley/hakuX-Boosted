@@ -144,6 +144,11 @@ class BaseHeap {
     return total_page_count() - unreserved_page_count();
   }
 
+  // hakuX-Boosted: pages in the heap that are committed, so the kernel's
+  // free-page count (MmQueryStatistics) moves with virtual commits and frees
+  // as on the console.
+  uint32_t committed_page_count() const { return committed_page_count_; }
+
   // Type of specified heap
   HeapType heap_type() const { return heap_type_; }
 
@@ -256,6 +261,7 @@ class BaseHeap {
   uint32_t page_size_shift_;
   uint32_t host_address_offset_;
   uint32_t unreserved_page_count_;
+  uint32_t committed_page_count_ = 0;  // hakuX-Boosted
   xe::global_critical_region global_critical_region_;
   std::vector<PageEntry> page_table_;
 

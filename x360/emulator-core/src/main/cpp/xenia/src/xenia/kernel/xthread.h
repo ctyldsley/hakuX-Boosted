@@ -694,7 +694,26 @@ class XThread : public XObject, public cpu::Thread {
   static void SetCurrentThread(XThread* thread);
   void OnHostThreadExitCleanup();
 
+  // hakuX-Boosted: where KeSaveFloatingPointState and KeSaveVectorUnitState
+  // keep this thread's registers until the matching restore (rexglue's
+  // DPCSaveArea). Made on first use; most threads never call them.
+  struct FpuVmxSaveArea {
+    uint32_t fpscr;
+    double f[32];
+    vec128_t v[128];
+    vec128_t vscr_vec;
+    uint8_t vscr_sat;
+  };
+  FpuVmxSaveArea& fpu_vmx_save_area() {
+    if (!fpu_vmx_save_area_) {
+      fpu_vmx_save_area_ = std::make_unique<FpuVmxSaveArea>();
+    }
+    return *fpu_vmx_save_area_;
+  }
+
  protected:
+  std::unique_ptr<FpuVmxSaveArea> fpu_vmx_save_area_;  // hakuX-Boosted
+
   bool AllocateStack(uint32_t size);
   void FreeStack();
   void InitializeGuestObject();

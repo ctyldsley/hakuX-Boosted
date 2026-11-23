@@ -312,6 +312,16 @@ class XObject {
   uint64_t cooperative_signal_time_us() const {
     return cooperative_signal_time_us_.load(std::memory_order_relaxed);
   }
+  // hakuX-Boosted: when this object last became signalled, as a position in
+  // one global order of signals (0: never). A wait-all that had to block
+  // returns STATUS_WAIT_0 plus the index of the object whose signal completed
+  // it, as the console's kernel does (xsdk m55_check, "pending mixed wait-all
+  // completes after the target thread ends"); this is how it finds that one.
+  uint64_t signal_stamp() const {
+    return signal_stamp_.load(std::memory_order_acquire);
+  }
+  void NoteSignalStamp();
+  static uint64_t CurrentSignalStamp();
   // Bumped by a release-everyone-then-reset transition (a manual-reset pulse),
   // which is gone from the host primitive before any parked fiber re-polls it.
   virtual uint32_t cooperative_pulse_epoch() const { return 0; }
@@ -380,6 +390,7 @@ class XObject {
 
   std::atomic<uint32_t> cooperative_signal_epoch_{0};
   std::atomic<uint64_t> cooperative_signal_time_us_{0};
+  std::atomic<uint64_t> signal_stamp_{0};  // hakuX-Boosted
 
   // Host objects are persisted through resets/etc.
   bool host_object_ = false;

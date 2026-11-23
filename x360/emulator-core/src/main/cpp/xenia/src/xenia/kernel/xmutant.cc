@@ -154,6 +154,7 @@ X_STATUS XMutant::ReleaseMutant(uint32_t priority_increment, bool abandon,
     // host thread would be stranded with a null owning_thread_.
     owning_thread_ = nullptr;
     RemoveMutantOwned(memory(), this);
+    NoteSignalStamp();  // hakuX-Boosted: see XObject::signal_stamp
     free_signal_->Release(1, nullptr);
     WakeCooperativeWaiters();
   }
@@ -225,6 +226,7 @@ void XMutant::AbandonAllOwnedByThread(KernelState* ks, XThread* thread) {
       if (obj && obj->owning_thread_.exchange(nullptr)) {
         // Only the thread that held it releases, however deep its recursion.
         obj->recursion_count_ = 0;
+        obj->NoteSignalStamp();  // hakuX-Boosted
         obj->free_signal_->Release(1, nullptr);
         obj->WakeCooperativeWaiters();
       }
