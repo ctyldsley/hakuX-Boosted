@@ -33,6 +33,17 @@ console. The stamp is a relaxed global `fetch_add` on each signal: negligible ne
 
 **Rerun:** `m55_check`, `xsdk_test`, `probe_objects`.
 
+**Our own `hakux_waits` disagrees, and the probe is the one to change.** On the merged build `claude/merge-1123`
+(aa51fa3), `hakux_waits` went from 30 of 30 to 27: three wait-all checks expect exactly `STATUS_SUCCESS` from a wait-all
+that blocked. The waits completed and consumed every event (`0 left signalled`); they returned `0x2`, the index of the
+event set last by the other thread, and in the three-thread step only the 65 rounds where thread 0 ended last (or all had
+ended before the wait) returned 0. Those expectations were never run on a console (`boosted/notes/mt-probes.md` says
+so); `m55_check` was, and it returns the completing object's index. NT's `KiWaitTest` does the same for a wait-all: it
+unwaits the thread with the wait key of the object whose signal satisfied it. So the kernel stays as it is, and those
+three checks in `boosted/xsdk-tests/hakux_waits.c` (branch `xsdk/mt-probes`) should accept `STATUS_WAIT_0` to
+`STATUS_WAIT_0 + n - 1` for a wait-all that had to block, and exactly `STATUS_WAIT_0` only where everything was signalled
+on entry (the second wait-all of the three-thread step, and the mixed step).
+
 ## 2. `PAGE_NOACCESS` reads back
 
 **What the probe showed.** "pages: no-access protection restores to writable": `mprotect(PROT_NONE)` succeeded,
