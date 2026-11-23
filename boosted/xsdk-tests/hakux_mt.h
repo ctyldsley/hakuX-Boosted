@@ -75,6 +75,8 @@ static inline void hakux_abort(const char *why)
 	hakux_failed++;
 	xsdk_log_write("%s: %u passed, %u failed (aborted)", hakux_title, hakux_passed, hakux_failed);
 	_exit((int)hakux_failed);
+	for (;;) {
+	}
 }
 
 static inline uint32_t hakux_watchdog(void *context)

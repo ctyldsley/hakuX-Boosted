@@ -40,9 +40,10 @@ jobs:
           git clone https://github.com/xenosworks/xsdk.git "$HOME/xsdk"
           git -C "$HOME/xsdk" checkout "$XSDK_COMMIT"
 
+      # Restored and saved in two steps, so a later failing step does not lose a freshly built toolchain.
       - name: Toolchain cache
         id: tc
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/xsdk-gcc
           key: xsdk-gcc-${{ env.XSDK_COMMIT }}
@@ -53,6 +54,13 @@ jobs:
           cd "$HOME/xsdk"
           PREFIX="$HOME/xsdk-gcc" WORK="$HOME/xsdk-gcc-work" JOBS=$(nproc) bash tools/toolchain/build.sh || { tail -40 "$HOME"/xsdk-gcc-work/logs/*.log; exit 1; }
           rm -rf "$HOME/xsdk-gcc-work"
+
+      - name: Save the toolchain cache
+        if: steps.tc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/xsdk-gcc
+          key: xsdk-gcc-${{ env.XSDK_COMMIT }}
 
       - name: Build xsdk, the test title and the probes
         run: |

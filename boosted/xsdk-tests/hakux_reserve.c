@@ -28,6 +28,7 @@ static inline __attribute__((always_inline)) void reserve_add(volatile uint32_t 
 		: "=&b"(value), "+b"(again)
 		: "r"(word)
 		: "cr0", "memory");
+	(void)value;
 	*retries = again;
 }
 
