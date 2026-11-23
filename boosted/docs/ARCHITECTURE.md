@@ -204,6 +204,10 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/cpu/backend/backend.h`, `a64/a64_backend.h`, `.cc`, `a64/a64_code_cache.h`, `code_cache_base.h` | `RetireGuestFunction` (a no-op but on A64): the indirection slot reset (`ResetIndirection`), the linked-call target forgotten (`ForgetLinkTarget`), the old entry patched with a branch to a stub that re-enters the resolve thunk (`PlaceRawCode`, `WriteCode`) |
 | `xenia/cpu/compiler/translation_stats.h`, `compiler.cc` | The rewritten-code counters in the translation stats line |
 | `xenia/kernel/xboxkrnl/xboxkrnl_memory.cc` | `MmQueryAddressProtect` reports a title's code sections as `PAGE_EXECUTE_READ` (0x20), as the console does |
+| `xenia/kernel/xobject.cc`, `.h`, `xevent.cc`, `xsemaphore.cc`, `xmutant.cc`, `xthread.cc` | `signal_stamp()`: a global order of signals, stamped before the host primitive is signalled (event set from unsignalled, pulse, semaphore release, mutant free and abandon, thread end); a wait-all that had to block returns `STATUS_WAIT_0` plus the index of the object signalled last, as the console does (`claude/kernel-faults`, as are the next four rows) |
+| `xenia/kernel/xboxkrnl/xboxkrnl_memory.cc` | `MmQueryAddressProtect` reports `PAGE_NOACCESS` for a committed no-access page (was 0); `MmQueryStatistics` counts the virtual heaps' committed pages as used and their reservations as reserved virtual memory |
+| `xenia/memory.cc`, `memory.h` | `BaseHeap::committed_page_count()`, kept at every change of a page's commit bit (`AllocFixed`, `Alloc`, `Decommit`, `Release`, `Reset`, `Restore`) |
+| `xenia/kernel/xboxkrnl/xboxkrnl_misc.cc`, `kernel/xthread.h` | `KeSaveFloatingPointState`, `KeRestoreFloatingPointState`, `KeSaveVectorUnitState`, `KeRestoreVectorUnitState` (were not implemented): FPRs and FPSCR, v0 to v127 and VSCR into a per-thread area made on first use (`XThread::fpu_vmx_save_area`), after rexglue |
 
 ## Taking a newer hakuX
 

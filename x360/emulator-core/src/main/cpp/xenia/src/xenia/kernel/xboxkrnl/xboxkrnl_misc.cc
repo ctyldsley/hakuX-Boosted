@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include "xenia/cpu/processor.h"  // hakuX-Boosted: KeRestoreFloatingPointState
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xthread.h"
@@ -116,6 +117,61 @@ void KeSaveFloatingPointState_entry(ppc_context_t& ctx) {
 
 DECLARE_XBOXKRNL_EXPORT1(KeSaveFloatingPointState, kNone, kImplemented);
 #endif
+// hakuX-Boosted: kernel code that borrows the floating-point or vector unit
+// (DPCs, drivers) saves the interrupted thread's registers here and restores
+// them after, as rexglue does (src/kernel/xboxkrnl/xboxkrnl_threading.cpp).
+// These four were not implemented: a caller got 0 and its clobbered registers
+// were never restored. Saving leaves the registers as they are, as rexglue.
+void KeSaveFloatingPointState_entry(const ppc_context_t& ctx) {
+  auto* thread = XThread::GetCurrentThread();
+  if (!thread) {
+    return;
+  }
+  auto& area = thread->fpu_vmx_save_area();
+  std::memcpy(area.f, ctx->f, sizeof(area.f));
+  area.fpscr = ctx->fpscr.value;
+}
+DECLARE_XBOXKRNL_EXPORT1(KeSaveFloatingPointState, kThreading, kImplemented);
+
+void KeRestoreFloatingPointState_entry(const ppc_context_t& ctx) {
+  auto* thread = XThread::GetCurrentThread();
+  if (!thread) {
+    return;
+  }
+  auto& area = thread->fpu_vmx_save_area();
+  std::memcpy(ctx->f, area.f, sizeof(area.f));
+  ctx->fpscr.value = area.fpscr;
+  // The host's rounding and flush-to-zero follow FPSCR's RN and NI.
+  ctx->processor->backend()->SetGuestRoundingMode(
+      ctx.value(), ctx->fpscr.bits.rn | (ctx->fpscr.bits.ni << 2));
+}
+DECLARE_XBOXKRNL_EXPORT1(KeRestoreFloatingPointState, kThreading,
+                         kImplemented);
+
+void KeSaveVectorUnitState_entry(const ppc_context_t& ctx) {
+  auto* thread = XThread::GetCurrentThread();
+  if (!thread) {
+    return;
+  }
+  auto& area = thread->fpu_vmx_save_area();
+  std::memcpy(area.v, ctx->v, sizeof(area.v));
+  area.vscr_vec = ctx->vscr_vec;
+  area.vscr_sat = ctx->vscr_sat;
+}
+DECLARE_XBOXKRNL_EXPORT1(KeSaveVectorUnitState, kThreading, kImplemented);
+
+void KeRestoreVectorUnitState_entry(const ppc_context_t& ctx) {
+  auto* thread = XThread::GetCurrentThread();
+  if (!thread) {
+    return;
+  }
+  auto& area = thread->fpu_vmx_save_area();
+  std::memcpy(ctx->v, area.v, sizeof(area.v));
+  ctx->vscr_vec = area.vscr_vec;
+  ctx->vscr_sat = area.vscr_sat;
+}
+DECLARE_XBOXKRNL_EXPORT1(KeRestoreVectorUnitState, kThreading, kImplemented);
+
 static qword_result_t KeQueryInterruptTime_entry(const ppc_context_t& ctx) {
   auto kstate = ctx->kernel_state;
   uint32_t ts_bundle = kstate->GetKeTimestampBundle();

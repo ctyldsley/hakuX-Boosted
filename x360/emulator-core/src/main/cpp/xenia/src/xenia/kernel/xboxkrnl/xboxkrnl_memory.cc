@@ -581,15 +581,24 @@ dword_result_t MmQueryAddressProtect_entry(dword_t base_address) {
   if (!heap->QueryProtect(base_address, &access)) {
     access = 0;
   }
-  access = !access ? 0 : ToXdkProtectFlags(access);
-  // hakuX-Boosted: the console reports a title's code sections as
-  // PAGE_EXECUTE_READ (0x20), though a title can write to them
-  // (xex_code_writable; xsdk's probe_exec, docs/HARDWARE.md milestone 55).
   if (access) {
+    access = ToXdkProtectFlags(access);
+    // hakuX-Boosted: the console reports a title's code sections as
+    // PAGE_EXECUTE_READ (0x20), though a title can write to them
+    // (xex_code_writable; xsdk's probe_exec, docs/HARDWARE.md milestone 55).
     auto xex = dynamic_cast<cpu::XexModule*>(
         kernel_state()->processor()->LookupModule(base_address));
     if (xex && xex->IsCodeAddress(base_address)) {
       access = X_PAGE_EXECUTE_READ;
+    }
+  } else {
+    // hakuX-Boosted: a committed page set to no access reports PAGE_NOACCESS,
+    // as on the console (xsdk_test, "pages: no-access protection restores to
+    // writable"); only a page that is not committed reports 0.
+    HeapAllocationInfo info = {};
+    if (heap->QueryRegionInfo(base_address, &info) &&
+        (info.state & kMemoryAllocationCommit)) {
+      access = X_PAGE_NOACCESS;
     }
   }
 
@@ -672,6 +681,26 @@ dword_result_t xeMmQueryStatistics(
   kernel_memory()->GetHeapsPageStatsSummary(
       physical_heaps, std::size(physical_heaps), reserved_pages,
       unreserved_pages, used_pages, reserved_pages_bytes);
+
+  // hakuX-Boosted: the title's virtual allocations (NtAllocateVirtualMemory,
+  // where malloc's heap and maps live) take physical pages when committed and
+  // give them back when freed, and their reservations count as reserved
+  // virtual memory, as on the console (xsdk_test: "MmQueryStatistics: heap
+  // growth takes free pages", "pages: unmap returns committed pages to the
+  // kernel", "sbrk: the heap's reservation covers the title's free memory").
+  const BaseHeap* virtual_heaps[2] = {
+      kernel_memory()->LookupHeapByType(false, 0x1000),
+      kernel_memory()->LookupHeapByType(false, 0x10000)};
+  for (const BaseHeap* heap : virtual_heaps) {
+    used_pages += uint32_t(uint64_t(heap->committed_page_count()) *
+                           heap->page_size() / 4096);
+    reserved_pages_bytes += heap->reserved_page_count() * heap->page_size();
+  }
+  const uint32_t title_limit_pages =
+      stats_ptr->total_physical_pages - stats_ptr->kernel_pages - 1;
+  if (used_pages > title_limit_pages) {
+    used_pages = title_limit_pages;
+  }
 
   assert_true(used_pages < stats_ptr->total_physical_pages);
   stats_ptr->title.available_pages =

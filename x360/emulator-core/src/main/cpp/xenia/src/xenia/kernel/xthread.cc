@@ -625,6 +625,9 @@ X_STATUS XThread::Exit(int exit_code) {
   // Set exit code.
   kthread->header.signal_state = 1;
   kthread->exit_status = exit_code;
+  // hakuX-Boosted: before any waiter can see the end, so a wait-all it
+  // completes returns this thread's index (XObject::signal_stamp).
+  NoteSignalStamp();
 
   auto kprocess = cpu_context->TranslateVirtual(kthread->process);
 
@@ -681,6 +684,7 @@ X_STATUS XThread::Terminate(int exit_code) {
   thread->thread_state = KTHREAD_STATE_TERMINATED;
   thread->may_queue_apcs = 0;
   XMutant::AbandonAllOwnedByThread(kernel_state(), this);
+  NoteSignalStamp();  // hakuX-Boosted: see XThread::Exit
 
   // Notify processor of our exit.
   emulator()->processor()->OnThreadExit(thread_id_);

@@ -56,6 +56,7 @@ bool XSemaphore::InitializeNative(void* native_ptr,
 bool XSemaphore::ReleaseSemaphore(int32_t release_count,
                                   int32_t* out_previous_count) {
   int32_t previous_count = 0;
+  NoteSignalStamp();  // hakuX-Boosted: see XObject::signal_stamp
   bool success = semaphore_->Release(release_count, &previous_count);
   if (out_previous_count) {
     *out_previous_count = previous_count;

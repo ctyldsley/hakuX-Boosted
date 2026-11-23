@@ -1386,6 +1386,11 @@ build locally and use adb; the device etiquette in upstream's own
 
 Newest first. One or two lines each: what changed, what was verified.
 
+- **2026-11-23 (desktop).** `claude/kernel-faults`: the xsdk kernel faults (`boosted/notes/kernel-faults.md`):
+  wait-all returns the completing object's index, `PAGE_NOACCESS` reads back, virtual commits and frees move
+  `MmQueryStatistics`, the four `KeSave`/`KeRestore` FPU and VMX exports. Ordinal `0x36D` left as its own task.
+  Verified: CI build only. Not verified: any xsdk rerun on the phone.
+
 - **2026-11-14 (desktop, evening).** `claude/integration-1115`: 1114 plus
   the heads of `claude/guest-waits`, `claude/shader-first-run` and
   `claude/translator-wide`, and three small changes their notes asked for
