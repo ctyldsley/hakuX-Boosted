@@ -30,6 +30,11 @@ jobs:
           sudo apt-get install -y build-essential bison flex texinfo libgmp-dev libmpfr-dev \
             libmpc-dev curl xz-utils patch python3 cmake ninja-build git
 
+      - name: Check out this repository (for our own test titles)
+        uses: actions/checkout@v4
+        with:
+          path: boosted-repo
+
       - name: Clone xsdk
         run: |
           git clone https://github.com/xenosworks/xsdk.git "$HOME/xsdk"
@@ -61,7 +66,16 @@ jobs:
           done
           make "$TC" samples 2>&1 | tee build-samples.log || echo "TARGET FAILED: samples" | tee -a build-samples.log
 
+      - name: Build our multi-threaded test titles (boosted/xsdk-tests)
+        run: |
+          cd "$HOME/xsdk"
+          cp "$GITHUB_WORKSPACE"/boosted-repo/boosted/xsdk-tests/*.c "$GITHUB_WORKSPACE"/boosted-repo/boosted/xsdk-tests/*.h tests/
+          cp "$GITHUB_WORKSPACE"/boosted-repo/boosted/xsdk-tests/hakux.mk .
+          make -f Makefile -f hakux.mk "TOOLCHAIN=$HOME/xsdk-gcc/bin/powerpc-xsdk-elf-" hakux_titles 2>&1 | tee build-hakux.log
+          exit "${PIPESTATUS[0]}"
+
       - name: Gather
+        if: always()
         run: |
           cd "$HOME/xsdk"
           mkdir -p out/xex out/results
@@ -73,6 +87,7 @@ jobs:
           find out/xex -name '*.xex' | wc -l
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: xsdk-probes
           path: ~/xsdk/out
