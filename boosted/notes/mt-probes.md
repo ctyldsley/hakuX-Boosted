@@ -54,7 +54,7 @@ assumes of the in-order Xenon; each such case says so.
 | Wait-any, single thread | With objects 1 and 3 signalled, wait-any returns 1, then 3, then times out, each consuming one auto event | PASS |
 | Wait-any across 4 threads (1-4), 1000 rounds each | Every signal is seen exactly once, counted per index | PASS |
 | Wait-all short of one object | Times out after 5 ms and consumes none of the signalled auto events | PASS (NT's wait-all is all or nothing) |
-| Wait-all whose last object comes from hardware thread 3 after 20 ms | Completes, and consumes all three auto events | PASS |
+| Wait-all whose last object comes from hardware thread 3 after 20 ms | Completes with `STATUS_WAIT_0 + i` (see "What a wait-all returns"), and consumes all three auto events | PASS, most likely index 2 |
 | Mixed wait-all: semaphore (2), auto event, manual event, free mutant | Takes one semaphore count, clears the auto event, leaves the manual one set, owns the mutant | PASS |
 | Wait-all across 3 threads (1, 2, 4), 1000 rounds | Completes every round; no event left signalled after it | PASS |
 | Wait-all of a thread object and an auto event, 300 rounds on 1-5 | Times out while the thread runs (without taking the event); completes once the thread ends by return, by `ExTerminateThread`, or after a spin; every fourth round the thread has ended before the wait, otherwise the wait races its end; the thread stays signalled afterwards and the event is consumed | PASS; this is the step aimed at the wait-all fault |
@@ -127,6 +127,46 @@ First built green in run 45235613650 (commit 77682b3), artifact
 `xsdk-probes` id 14849463114. The `hakux_titles` target succeeds only when
 all three `.xex` files are made; the artifact's contents were not inspected
 from here (no token to download it).
+
+## What a wait-all returns
+
+A wait-all whose objects were all signalled on entry returns exactly
+`STATUS_WAIT_0`. A wait-all that had to block returns `STATUS_WAIT_0 + i`,
+where i is the object whose signal completed it, as NT's `KiWaitTest` does
+and as xsdk's console-verified `m55_check` ("pending mixed wait-all") shows.
+`hakux_waits` first expected `STATUS_SUCCESS` from every wait-all. On the
+combined build three checks failed only for that reason: the waits completed
+and consumed every event (`claude/kernel-faults` 5e998a9,
+`boosted/notes/kernel-faults.md`). The checks now accept
+`STATUS_WAIT_0 .. STATUS_WAIT_0 + n - 1` for a wait-all that blocked or may
+have blocked:
+- the late setter
+- wait-all across threads
+- racing a thread's end
+- the first wait on three ending threads
+
+They demand exactly `STATUS_WAIT_0` only where everything was signalled on
+entry:
+- the mixed wait-all
+- the rounds where the thread had surely ended
+- the second wait on three ended threads
+
+Each step logs how often each index was returned, as
+`waits: <step>: returned index (STATUS_WAIT_0 + i) counts for i = 0..n-1: ...`.
+
+## Found in our core so far (for later)
+
+From the lead session's phone runs, not re-checked here:
+
+- **`hakux_reserve` found a real core bug.** `stwcx.` succeeds after
+  another thread stores the same value to the reserved word: 2000 of 2000.
+  Reservations are checked by value, not by a store to the granule. This is
+  the ABA hole the step was written to catch. A lock-free stack or queue
+  in a game can lose or duplicate nodes through it.
+- **`hakux_order` reproduced the Gears of War pattern.** With the writer
+  doing `lwsync` and the reader using no barrier, the ring read stale slots:
+  2 stale in 10.6 M on build 149, and 35 stale on build 157 at order level 0.
+  That is the reordering the game's crash points at.
 
 ## Not done
 

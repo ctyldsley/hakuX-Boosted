@@ -444,6 +444,27 @@ static uint32_t set_late(void *context)
 	return NT_SUCCESS(NtSetEvent(late->event, NULL)) ? 0 : 1;
 }
 
+// A wait-all that had to block returns STATUS_WAIT_0 + i, i being the object whose signal completed it (NT's
+// KiWaitTest; console-verified by xsdk's m55_check "pending mixed wait-all"). Only a wait-all whose objects were all
+// signalled on entry must return exactly STATUS_WAIT_0. Counts the returned index in counts[0..n-1].
+static bool blocked_wait_all_ok(NTSTATUS status, uint32_t n, uint32_t *counts)
+{
+	if (status < STATUS_WAIT_0 || status >= STATUS_WAIT_0 + (NTSTATUS)n)
+		return false;
+	counts[status - STATUS_WAIT_0]++;
+	return true;
+}
+
+static void log_wait_all_indexes(const char *what, const uint32_t *counts, uint32_t n)
+{
+	char text[96];
+	int used = 0;
+	for (uint32_t i = 0; i < n && used >= 0 && (size_t)used < sizeof text; i++)
+		used += snprintf(text + used, sizeof text - (size_t)used, "%s%u", i ? " " : "", (unsigned)counts[i]);
+	xsdk_log_write("waits: %s: returned index (STATUS_WAIT_0 + i) counts for i = 0..%u: %s", what, (unsigned)(n - 1),
+		text);
+}
+
 static void wait_all(void)
 {
 	HANDLE events[ALL_WORKERS];
@@ -470,10 +491,13 @@ static void wait_all(void)
 	HANDLE setter = hakux_spawn(set_late, &late, 3);
 	const NTSTATUS completed = hakux_wait_many_ms(ALL_WORKERS, events, WAIT_ALL, WAIT_MS);
 	hakux_join(setter, WAIT_MS);
-	hakux_check(completed == STATUS_SUCCESS &&
-			hakux_wait_many_ms(ALL_WORKERS, events, WAIT_ANY, 0) == STATUS_TIMEOUT,
-		"wait-all completes when another thread sets the last object, and consumes all three (0x%X)",
-		(unsigned)completed);
+	uint32_t late_counts[ALL_WORKERS] = { 0 };
+	const bool late_ok = blocked_wait_all_ok(completed, ALL_WORKERS, late_counts);
+	log_wait_all_indexes("wait-all with a late setter", late_counts, ALL_WORKERS);
+	hakux_check(late_ok && hakux_wait_many_ms(ALL_WORKERS, events, WAIT_ANY, 0) == STATUS_TIMEOUT,
+		"wait-all completes when another thread sets the last object (returned 0x%X, STATUS_WAIT_0 + 0..%u "
+		"accepted), and consumes all three",
+		(unsigned)completed, (unsigned)(ALL_WORKERS - 1));
 
 	hakux_step("wait-all of a semaphore, an auto event, a manual event and a free mutant");
 	HANDLE sem = semaphore(2, 4);
@@ -509,9 +533,11 @@ static void wait_all(void)
 	uint32_t round = 0;
 	uint32_t leftovers = 0;
 	NTSTATUS bad = STATUS_SUCCESS;
+	uint32_t round_counts[ALL_WORKERS] = { 0 };
 	for (; round < ALL_ROUNDS; round++) {
+		// The signallers race this wait, so it may or may not block: any STATUS_WAIT_0 + i is right.
 		const NTSTATUS status = hakux_wait_many_ms(ALL_WORKERS, events, WAIT_ALL, WAIT_MS);
-		if (status != STATUS_SUCCESS) {
+		if (!blocked_wait_all_ok(status, ALL_WORKERS, round_counts)) {
 			bad = status;
 			break;
 		}
@@ -524,6 +550,7 @@ static void wait_all(void)
 		hakux_join(threads[i], WAIT_MS * 2);
 	xsdk_log_write("waits: wait-all: %u of %u rounds, %u left signalled, main 0x%08X", (unsigned)round,
 		(unsigned)ALL_ROUNDS, (unsigned)leftovers, (unsigned)bad);
+	log_wait_all_indexes("wait-all across threads", round_counts, ALL_WORKERS);
 	hakux_check(bad == STATUS_SUCCESS && round == ALL_ROUNDS && leftovers == 0,
 		"wait-all across threads completes every round and consumes every event (%u of %u, %u left over)",
 		(unsigned)round, (unsigned)ALL_ROUNDS, (unsigned)leftovers);
@@ -569,6 +596,8 @@ static void wait_all_threads(void)
 	uint32_t stays_ok = 0;
 	uint32_t consumed_ok = 0;
 	NTSTATUS first_bad = STATUS_SUCCESS;
+	uint32_t entry_counts[2] = { 0 };
+	uint32_t race_counts[2] = { 0 };
 	for (uint32_t r = 0; r < THREAD_ROUNDS; r++) {
 		Ending e = { start, r % 3 };
 		(void)NtClearEvent(start);
@@ -583,7 +612,11 @@ static void wait_all_threads(void)
 		if (r % 4 == 3)
 			(void)hakux_wait_ms(thread, WAIT_MS);
 		const NTSTATUS status = hakux_wait_many_ms(2, both, WAIT_ALL, WAIT_MS);
-		if (status == STATUS_SUCCESS)
+		// When the thread has surely ended, both objects are signalled on entry: exactly STATUS_WAIT_0. Otherwise
+		// the wait may block until the thread ends: STATUS_WAIT_0 + i for either object.
+		const bool ok = r % 4 == 3 ? status == STATUS_WAIT_0 && ++entry_counts[0]
+								   : blocked_wait_all_ok(status, 2, race_counts);
+		if (ok)
 			ended_ok++;
 		else if (first_bad == STATUS_SUCCESS)
 			first_bad = status;
@@ -599,6 +632,8 @@ static void wait_all_threads(void)
 		"consumed %u of %u; first bad 0x%08X",
 		(unsigned)early_ok, (unsigned)ended_ok, (unsigned)stays_ok, (unsigned)consumed_ok, (unsigned)THREAD_ROUNDS,
 		(unsigned)first_bad);
+	log_wait_all_indexes("thread wait-all, thread ended before the wait (exactly 0 expected)", entry_counts, 2);
+	log_wait_all_indexes("thread wait-all racing the thread's end (0 = thread, 1 = event)", race_counts, 2);
 	hakux_check(early_ok == THREAD_ROUNDS,
 		"wait-all on a running thread and a set event times out (%u of %u)", (unsigned)early_ok,
 		(unsigned)THREAD_ROUNDS);
@@ -612,20 +647,28 @@ static void wait_all_threads(void)
 	hakux_step("wait-all of three threads ending together on hardware threads 1, 3, 5, %u rounds",
 		(unsigned)THREE_THREAD_ROUNDS);
 	uint32_t three_ok = 0;
+	uint32_t three_counts[3] = { 0 };
+	NTSTATUS three_bad = STATUS_SUCCESS;
 	for (uint32_t r = 0; r < THREE_THREAD_ROUNDS; r++) {
 		Ending e[3] = { { start, r % 3 }, { start, (r + 1) % 3 }, { start, (r + 2) % 3 } };
 		(void)NtClearEvent(start);
 		HANDLE threads[3] = { hakux_spawn(end_thread, &e[0], 1), hakux_spawn(end_thread, &e[1], 3),
 			hakux_spawn(end_thread, &e[2], 5) };
 		(void)NtSetEvent(start, NULL);
-		if (hakux_wait_many_ms(3, threads, WAIT_ALL, WAIT_MS) == STATUS_SUCCESS &&
-			hakux_wait_many_ms(3, threads, WAIT_ALL, 0) == STATUS_SUCCESS)
+		// The first wait races the ends (any STATUS_WAIT_0 + i); the second finds all three ended (exactly WAIT_0).
+		const NTSTATUS first = hakux_wait_many_ms(3, threads, WAIT_ALL, WAIT_MS);
+		const NTSTATUS again = hakux_wait_many_ms(3, threads, WAIT_ALL, 0);
+		if (blocked_wait_all_ok(first, 3, three_counts) && again == STATUS_WAIT_0)
 			three_ok++;
+		else if (three_bad == STATUS_SUCCESS)
+			three_bad = first != STATUS_WAIT_0 ? first : again;
 		for (uint32_t i = 0; i < 3; i++)
 			hakux_join(threads[i], WAIT_MS);
 	}
-	hakux_check(three_ok == THREE_THREAD_ROUNDS, "wait-all of three ending threads completes and stays complete (%u of %u)",
-		(unsigned)three_ok, (unsigned)THREE_THREAD_ROUNDS);
+	log_wait_all_indexes("wait-all of three ending threads", three_counts, 3);
+	hakux_check(three_ok == THREE_THREAD_ROUNDS,
+		"wait-all of three ending threads completes and stays complete (%u of %u; first bad 0x%08X)",
+		(unsigned)three_ok, (unsigned)THREE_THREAD_ROUNDS, (unsigned)three_bad);
 	(void)NtClose(start);
 	(void)NtClose(ev);
 }
