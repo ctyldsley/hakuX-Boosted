@@ -1873,6 +1873,9 @@ EMITTER_OPCODE_TABLE(OPCODE_UNPACK, UNPACK);
 // ============================================================================
 struct LVL_V128 : Sequence<LVL_V128, I<OPCODE_LVL, V128Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2, as for a 128-bit load
+    // (a64_seq_memory.cc, LOAD_V128): dmb ishld after the load.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     // Inline LVL using TBL.  The bswap-within-lanes base pattern plus the
     // address offset gives a TBL control vector.  Indices >= 16 naturally
     // produce zero from TBL, which is the correct LVL behaviour.
@@ -1886,6 +1889,9 @@ struct LVL_V128 : Sequence<LVL_V128, I<OPCODE_LVL, V128Op, I64Op>> {
     // Align address down to 16-byte boundary and load.
     e.and_(e.x0, e.x0, ~0xFull);
     e.ldr(QReg(0), ptr(e.x0));
+    if (ordered) {
+      GuestOrderBarrier(e, Xbyak_aarch64::ISHLD);
+    }
 
     // Build bswap-within-lanes base pattern in v1:
     //   {3,2,1,0, 7,6,5,4, 11,10,9,8, 15,14,13,12}
@@ -1909,6 +1915,9 @@ EMITTER_OPCODE_TABLE(OPCODE_LVL, LVL_V128);
 // ============================================================================
 struct LVR_V128 : Sequence<LVR_V128, I<OPCODE_LVR, V128Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2, as for a 128-bit load
+    // (a64_seq_memory.cc, LOAD_V128): dmb ishld after the load.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     // Inline LVR using a 2-register TBL.  Table = {zeros, mem}.
     // Indices 0-15 read zeros (from v0), 16-31 read mem (from v1).
     // base + offset produces indices > 15 exactly where LVR should output
@@ -1925,6 +1934,9 @@ struct LVR_V128 : Sequence<LVR_V128, I<OPCODE_LVR, V128Op, I64Op>> {
     e.movi(VReg(0).d2, 0);
     e.and_(e.x0, e.x0, ~0xFull);
     e.ldr(QReg(1), ptr(e.x0));
+    if (ordered) {
+      GuestOrderBarrier(e, Xbyak_aarch64::ISHLD);
+    }
 
     // Build base pattern in v2.
     e.mov(e.x0, 0x0405060700010203ull);
@@ -1947,6 +1959,11 @@ EMITTER_OPCODE_TABLE(OPCODE_LVR, LVR_V128);
 // ============================================================================
 struct STVL_V128 : Sequence<STVL_V128, I<OPCODE_STVL, VoidOp, I64Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2, as for a 128-bit store
+    // (a64_seq_memory.cc, STORE_V128): earlier stores first.
+    if (GuestAccessOrdered(e, i.src1)) {
+      GuestOrderBarrier(e, Xbyak_aarch64::ISHST);
+    }
     // Store bytes offset..15 from the byte-swapped source, touching only the
     // in-range bytes so concurrent writes to the rest of the line survive.
     int s = SrcVReg(e, i.src2, 0);
@@ -1988,6 +2005,11 @@ EMITTER_OPCODE_TABLE(OPCODE_STVL, STVL_V128);
 // ============================================================================
 struct STVR_V128 : Sequence<STVR_V128, I<OPCODE_STVR, VoidOp, I64Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2, as for a 128-bit store
+    // (a64_seq_memory.cc, STORE_V128): earlier stores first.
+    if (GuestAccessOrdered(e, i.src1)) {
+      GuestOrderBarrier(e, Xbyak_aarch64::ISHST);
+    }
     // Store bytes 0..offset-1 from the byte-swapped source tail, touching only
     // the in-range bytes. offset == 0 stores nothing.
     int s = SrcVReg(e, i.src2, 0);

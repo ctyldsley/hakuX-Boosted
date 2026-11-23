@@ -1299,6 +1299,16 @@ void GuestScheduler::SwitchTo(XThread* next) {
   if (skew_bound_ticks_ && cpus_[CurrentCpu()].skew_probe_tick.load()) {
     next->thread_state()->context()->preempt_requested = 1;
   }
+  // hakuX-Boosted: a reservation does not survive a context switch, as on
+  // the console (its kernel clears it with a stwcx. when it switches): one
+  // taken before this thread last left the CPU must fail its stwcx., since
+  // the native path's compare of values cannot see a store made meanwhile
+  // that left the word as it was.
+  if (cpu::Processor* processor = kernel_state_->processor()) {
+    if (cpu::backend::Backend* backend = processor->backend()) {
+      backend->ClearReservation(next->thread_state()->context());
+    }
+  }
   next->fiber()->SwitchTo();
   // Back on the idle fiber.
   {

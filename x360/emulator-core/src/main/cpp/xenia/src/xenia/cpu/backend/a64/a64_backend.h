@@ -162,6 +162,7 @@ class A64Backend : public Backend {
   void InitializeBackendContext(void* ctx) override;
   void DeinitializeBackendContext(void* ctx) override;
   void PrepareForReentry(void* ctx) override;
+  void ClearReservation(void* ctx) override;  // hakuX-Boosted
 
   A64BackendContext* BackendContextForGuestContext(void* ctx) {
     return reinterpret_cast<A64BackendContext*>(

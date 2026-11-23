@@ -1566,6 +1566,14 @@ void A64Backend::PrepareForReentry(void* ctx) {
   a64_ctx->pending_stackpoint_sync_depth = 0;
 }
 
+// hakuX-Boosted: see Backend::ClearReservation. Both the native path (the
+// flag and cached_reserve_value_) and the software path (the flag beside
+// reserve_address and reserve_generation) fail a stwcx. without the flag.
+void A64Backend::ClearReservation(void* ctx) {
+  auto* a64_ctx = BackendContextForGuestContext(ctx);
+  a64_ctx->flags &= ~(1u << kA64BackendHasReserveBit);
+}
+
 uint32_t A64Backend::CreateGuestTrampoline(GuestTrampolineProc proc,
                                            void* userdata1, void* userdata2,
                                            bool long_term) {

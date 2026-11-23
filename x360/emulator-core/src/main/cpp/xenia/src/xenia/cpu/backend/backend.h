@@ -102,6 +102,11 @@ class Backend {
 
   * */
   virtual void PrepareForReentry(void* ctx) {}
+  // hakuX-Boosted: drop the thread's lwarx reservation, as the console's
+  // kernel does at every context switch (a stwcx. there). Called by the guest
+  // scheduler each time it dispatches a fiber, so a reservation taken before
+  // the thread left the CPU fails its stwcx. and the guest retries.
+  virtual void ClearReservation(void* ctx) {}
 
   // returns true if populated st
   virtual bool PopulatePseudoStacktrace(GuestPseudoStackTrace* st) {

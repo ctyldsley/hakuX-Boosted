@@ -1359,7 +1359,7 @@ build locally and use adb; the device etiquette in upstream's own
 | `tessellation_debug` | GPU | 0 | Logs tessellated draws and their vertex shader; 1 no culling, 2 no depth test, 3 both |
 | `stall_watchdog` / `stall_watchdog_seconds` | Kernel | true / 10 | One `STALL REPORT` when frames present but guest threads make no kernel calls (2026-11-18, not run) |
 | `aot_translate_measure` | CPU | false | Times translating every function of the executable on a background thread (2026-11-18, not run) |
-| `a64_guest_memory_order` | a64 | 0 | 1: barriers around every guest load and store, total store order (2026-11-18, not run) |
+| `a64_guest_memory_order` | a64 | 0 | 1: barriers around every guest load and store, total store order (2026-11-18). 2: the same order from `LDAPR`/`STLR`, stack and read-only accesses plain (`claude/tso-order`, 2026-11-23, not run; `boosted/notes/tso-order.md`) |
 | (log line) | | | "This title creates multisampled render targets", a warning when tiled mode is on |
 
 ## The bundled Turnip driver
