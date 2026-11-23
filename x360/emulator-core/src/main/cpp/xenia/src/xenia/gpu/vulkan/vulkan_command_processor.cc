@@ -5817,7 +5817,22 @@ bool VulkanCommandProcessor::IssueCopy() {
           MakeReadbackResolveKey(written_address, written_length);
       auto& last_write = uma_readback_last_write_[resolve_key];
       bool do_read;
-      if (!last_write) {
+      // hakuX-Boosted: a later resolve of a destination used to read the host
+      // mapping before this resolve had run, so guest RAM got the previous
+      // resolve's pixels (or none) and readback_resolve_sync was ignored. On
+      // the console a resolve has written memory by the time its fence
+      // passes. So, as upstream's fast mode does, with readback_resolve_sync
+      // (the default): a destination the CPU has read since it was first
+      // resolved (the read watch) is drained and read now, this resolve's
+      // bytes; one the CPU has not read is not copied at all. The watch is
+      // armed after the copy, so the copy itself is never taken for a read.
+      // readback_resolve_sync = false keeps the old one-behind read.
+      const bool uma_sync = cvars::readback_resolve_sync;
+      const bool uma_watched = resolve_armed_keys_.count(resolve_key) != 0;
+      const bool uma_current =
+          uma_sync && last_write &&
+          (!uma_watched || AnyResolvePageRead(written_address, written_length));
+      if (!last_write || uma_current) {
         ++vk_frame_sync_stats_.rb_uma_first_use;
         // First resolve of this destination: guest RAM holds nothing yet, so
         // make the just-recorded write host-visible and drain to read it now.
@@ -5839,6 +5854,9 @@ bool VulkanCommandProcessor::IssueCopy() {
           return true;
         }
         do_read = true;
+      } else if (uma_sync) {
+        // hakuX-Boosted: not read by the CPU since its first resolve.
+        do_read = false;
       } else {
         // Read the previous resolve's bytes, but only once that submission has
         // retired, so the CPU never races the GPU writing the same region.
@@ -5852,6 +5870,10 @@ bool VulkanCommandProcessor::IssueCopy() {
         shared_memory_->ReadHostMapped(
             written_address, written_length,
             memory_->TranslatePhysical(written_address));
+      }
+      if (uma_sync) {
+        // hakuX-Boosted: see above.
+        TryArmResolveReadWatch(resolve_key, written_address, written_length);
       }
       last_write = resolve_submission;
       PopDebugMarker();

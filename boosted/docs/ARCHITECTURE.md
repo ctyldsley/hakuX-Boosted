@@ -210,6 +210,8 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/kernel/xboxkrnl/xboxkrnl_memory.cc` | `MmQueryAddressProtect` reports `PAGE_NOACCESS` for a committed no-access page (was 0); `MmQueryStatistics` counts the virtual heaps' committed pages as used and their reservations as reserved virtual memory |
 | `xenia/memory.cc`, `memory.h` | `BaseHeap::committed_page_count()`, kept at every change of a page's commit bit (`AllocFixed`, `Alloc`, `Decommit`, `Release`, `Reset`, `Restore`) |
 | `xenia/kernel/xboxkrnl/xboxkrnl_misc.cc`, `kernel/xthread.h` | `KeSaveFloatingPointState`, `KeRestoreFloatingPointState`, `KeSaveVectorUnitState`, `KeRestoreVectorUnitState` (were not implemented): FPRs and FPSCR, v0 to v127 and VSCR into a per-thread area made on first use (`XThread::fpu_vmx_save_area`), after rexglue |
+| `xenia/gpu/vulkan/vulkan_command_processor.cc` (`IssueCopy`) | `readback_resolve = uma`: a later resolve of a destination the CPU reads is drained and read at once (its own pixels, not the previous resolve's), as upstream's fast mode with `readback_resolve_sync`; destinations the CPU never reads are not copied; `readback_resolve_sync = false` keeps the old one-behind read (`boosted/notes/gpu-correct.md`) |
+| `xenia/gpu/shaders/ucode_program.glsli`, `ucode_program_vertex.glsli`, `ucode_interpreter.vs.glsl`, `ucode_interpreter_stand_in.vs.glsl` | The placeholder vertex interpreters' position `invariant` and their arithmetic `precise`, as the translator's Invariant and NoContraction, so placeholder and real draws of one mesh give the same depth (`boosted/notes/gpu-correct.md`) |
 
 ## Taking a newer hakuX
 
