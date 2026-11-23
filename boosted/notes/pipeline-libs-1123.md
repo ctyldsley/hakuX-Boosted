@@ -238,4 +238,4 @@ The merge's own upstream files are the rows added to
 
 ## Builds
 
-To be filled in with the CI run once pushed.
+Run 150 (Actions id 45234728326, `df3e94d`, 2026-11-23): "Xbox core (hakuX)" green (3 m 49 s), "APK (both cores)" green (22 m 48 s), artifact `hakuX-Boosted-debug-apk` (34.5 MB). "Translator tests" (the CPU side, untouched here) still running when this was written. This is the APK for the A/B.
