@@ -97,6 +97,13 @@ struct TranslationStats {
   // a64_stack_access_no_fixup.
   std::atomic<uint64_t> address_fixups_emitted{0};
   std::atomic<uint64_t> address_fixups_skipped{0};
+  // hakuX-Boosted: a64_guest_memory_order = 2. Guest accesses emitted as
+  // LDAPR or STLR; left plain as stack-pointer relative or read-only; and
+  // dmb barriers emitted for 128-bit accesses and dcbz.
+  std::atomic<uint64_t> memory_order_acquire_release{0};
+  std::atomic<uint64_t> memory_order_plain_stack{0};
+  std::atomic<uint64_t> memory_order_plain_read_only{0};
+  std::atomic<uint64_t> memory_order_barriers{0};
   // translate_ahead: functions queued for the helper thread; dropped
   // because the queue was full; found already translated when their turn
   // came; not attempted (no function known at the address yet); translated

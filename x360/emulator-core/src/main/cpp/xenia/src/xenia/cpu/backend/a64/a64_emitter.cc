@@ -9,7 +9,13 @@
 
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 
+#include <atomic>
 #include <cstring>
+
+#include "xenia/base/platform.h"
+#if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID
+#include <sys/auxv.h>  // hakuX-Boosted: getauxval, HostHasLrcpc
+#endif
 
 #include "xenia/base/debugging.h"
 #include "xenia/base/logging.h"
@@ -81,15 +87,32 @@ DEFINE_bool(
 // handlers, not guest RAM), OPCODE_ATOMIC_COMPARE_EXCHANGE (casal or
 // ldaxr/stlxr, already ordered both ways), and memory touched by host code
 // on the guest's behalf (kernel exports, the GPU, XMA).
+//
+// hakuX-Boosted: level 2, the same total-store-order visibility without the
+// barriers (boosted/notes/tso-order.md). Guest loads are LDAPR (acquire,
+// RCpc: no later access is performed before it) and guest stores STLR
+// (release: no earlier access is performed after it). An STLR followed by an
+// LDAPR of another address may still pass each other, which is exactly the
+// one reordering TSO allows, so the pair gives what an x64 host gives. Done
+// inside the load and store sequences (a64_seq_memory.cc, GuestLdr and
+// GuestStr in a64_seq_util.h). Left plain, because no other thread can see
+// them or they never change: accesses whose address is the guest stack
+// pointer plus a constant, and accesses to a constant address in a page the
+// title cannot write (read-only data, code). 128-bit accesses have no
+// acquire or release form: a plain ldr q followed by dmb ishld, or dmb ishst
+// followed by a plain str q. MEMSET (dcbz) gets dmb ishst before it. The
+// reserved load (lwarx) is an LDAPR; the reserved store's CASAL is already
+// ordered both ways. Without FEAT_LRCPC on the host, level 2 runs as level 1.
 DEFINE_int32(
     a64_guest_memory_order, 0,
-    "Diagnostic: order guest memory accesses as an x64 host would. 0 off "
-    "(plain loads and stores, as before). 1: a dmb ishld barrier after every "
-    "guest load and a dmb ishst barrier before every guest store, which "
-    "gives total store order. Slow (every access gains a barrier); meant to "
-    "test whether a fault is a memory-ordering race. Takes effect for "
-    "functions translated after it is set, so set it in the config before "
-    "the title starts.",
+    "Order guest memory accesses as an x64 host would. 0 off (plain loads "
+    "and stores, as before). 1: a dmb ishld barrier after every guest load "
+    "and a dmb ishst barrier before every guest store, which gives total "
+    "store order; slow, a diagnostic. 2: the same ordering from acquire "
+    "loads (LDAPR) and release stores (STLR) instead of barriers, leaving "
+    "stack and read-only accesses plain; runs as 1 on a CPU without "
+    "FEAT_LRCPC. Takes effect for functions translated after it is set, so "
+    "set it in the config before the title starts.",
     "a64");
 
 // hakuX-Boosted: see ComputeMemoryAddress in a64_seq_util.h.
@@ -227,6 +250,49 @@ namespace backend {
 namespace a64 {
 
 using namespace Xbyak_aarch64;
+
+// hakuX-Boosted: a64_guest_memory_order (see its definition).
+static bool HostHasLrcpc() {
+#if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID
+  // HWCAP_LRCPC: LDAPR, LDAPRB, LDAPRH (FEAT_LRCPC, Armv8.3).
+  return (getauxval(AT_HWCAP) & (1UL << 15)) != 0;
+#elif XE_PLATFORM_MAC
+  return true;  // Every Apple arm64 core has it.
+#else
+  return false;
+#endif
+}
+
+int GuestMemoryOrderLevel() {
+  static const bool has_lrcpc = HostHasLrcpc();
+  const int requested = cvars::a64_guest_memory_order;
+  int level = requested <= 0 ? 0 : requested >= 2 ? 2 : 1;
+  if (level == 2 && !has_lrcpc) {
+    level = 1;
+  }
+  static std::atomic<int> logged{-1};
+  if (level != 0 && logged.load(std::memory_order_relaxed) != level &&
+      logged.exchange(level, std::memory_order_relaxed) != level) {
+    XELOGI(
+        "a64_guest_memory_order: {} requested, {} in effect (host "
+        "FEAT_LRCPC {})",
+        requested, level, has_lrcpc ? "present" : "absent");
+  }
+  return level;
+}
+
+bool IsReadOnlyGuestAddress(A64Emitter& e, uint32_t address) {
+  Memory* memory = e.processor() ? e.processor()->memory() : nullptr;
+  if (!memory) {
+    return false;
+  }
+  BaseHeap* heap = memory->LookupHeap(address);
+  uint32_t protect = 0;
+  if (!heap || !heap->QueryProtect(address, &protect)) {
+    return false;
+  }
+  return (protect & kMemoryProtectRead) && !IsWritableProtect(protect);
+}
 
 // Defined in a64_backend.cc.
 extern uint64_t ResolveFunction(void* raw_context, uint64_t target_address);
@@ -685,6 +751,8 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   bool fpcr_first_block = true;
   bool fpcr_previous_falls_through = false;
   FPCRMode fpcr_previous_end = FPCRMode::Unknown;
+  // hakuX-Boosted: a64_guest_memory_order, read once per function.
+  const int guest_order_level = GuestMemoryOrderLevel();
   while (block) {
     // Reset FPCR tracking on each block entry (we don't know which
     // predecessor ran, so mode is unknown).
@@ -942,7 +1010,8 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
       bool selected = false;
       // hakuX-Boosted: a64_guest_memory_order (see its definition).
       bool order_after_load = false;
-      if (cvars::a64_guest_memory_order >= 1 && !zero_test_taken) {
+      // Level 1 here; level 2 is emitted by the sequences themselves.
+      if (guest_order_level == 1 && !zero_test_taken) {
         switch (instr->GetOpcodeNum()) {
           case hir::OPCODE_STORE:
           case hir::OPCODE_STORE_OFFSET:

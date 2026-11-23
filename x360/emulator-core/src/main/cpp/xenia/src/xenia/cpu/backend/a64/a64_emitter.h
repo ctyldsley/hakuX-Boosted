@@ -50,6 +50,15 @@ class XbyakA64Allocator : public Xbyak_aarch64::Allocator {
 };
 
 class A64Emitter;
+
+// hakuX-Boosted: a64_guest_memory_order as it applies on this host: the
+// setting, except that 2 becomes 1 where the CPU lacks FEAT_LRCPC (LDAPR).
+// Read at each translation, like the setting itself.
+int GuestMemoryOrderLevel();
+// hakuX-Boosted: true for a guest address the title cannot write (its
+// read-only data and code, as protected when this is called).
+bool IsReadOnlyGuestAddress(A64Emitter& e, uint32_t address);
+
 using TailEmitCallback =
     std::function<void(A64Emitter& e, Xbyak_aarch64::Label& lbl)>;
 struct TailEmitter {

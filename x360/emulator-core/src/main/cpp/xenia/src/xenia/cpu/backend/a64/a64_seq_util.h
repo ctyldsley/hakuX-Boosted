@@ -506,6 +506,174 @@ inline XReg ComputeMemoryAddressOffset(A64Emitter& e, const I64Op& guest,
   return e.x0;
 }
 
+// hakuX-Boosted: a64_guest_memory_order = 2 (see its definition in
+// a64_emitter.cc and boosted/notes/tso-order.md). Whether one guest access
+// is emitted ordered (LDAPR / STLR, or a barrier for 128-bit and dcbz) or
+// left plain: plain for an address that is the guest stack pointer plus a
+// constant (IsGuestStackPointerValue) and for a constant address in a page
+// the title cannot write. Counted in the TranslationStats line.
+inline bool GuestAccessOrderedAt(A64Emitter& e, const I64Op& guest,
+                                 bool constant_known, uint32_t constant) {
+  if (GuestMemoryOrderLevel() != 2) {
+    return false;
+  }
+  if (constant_known && IsReadOnlyGuestAddress(e, constant)) {
+    compiler::translation_stats.memory_order_plain_read_only.fetch_add(
+        1, std::memory_order_relaxed);
+    return false;
+  }
+  if (!guest.is_constant && IsGuestStackPointerValue(guest.value)) {
+    compiler::translation_stats.memory_order_plain_stack.fetch_add(
+        1, std::memory_order_relaxed);
+    return false;
+  }
+  compiler::translation_stats.memory_order_acquire_release.fetch_add(
+      1, std::memory_order_relaxed);
+  return true;
+}
+inline bool GuestAccessOrdered(A64Emitter& e, const I64Op& guest) {
+  return GuestAccessOrderedAt(
+      e, guest, guest.is_constant,
+      guest.is_constant ? static_cast<uint32_t>(guest.constant()) : 0);
+}
+inline bool GuestAccessOrdered(A64Emitter& e, const I64Op& guest,
+                               const I64Op& offset) {
+  const bool known = guest.is_constant && offset.is_constant;
+  return GuestAccessOrderedAt(
+      e, guest, known,
+      known ? static_cast<uint32_t>(guest.constant()) +
+                  static_cast<uint32_t>(offset.constant())
+            : 0);
+}
+// A barrier level 2 puts round a 128-bit access or dcbz.
+inline void GuestOrderBarrier(A64Emitter& e,
+                              Xbyak_aarch64::BarOpt option) {
+  e.dmb(option);
+  compiler::translation_stats.memory_order_barriers.fetch_add(
+      1, std::memory_order_relaxed);
+}
+
+// Guest loads and stores at [membase + addr] (addr from ComputeMemoryAddress
+// or ComputeMemoryAddressOffset): plain ldr/str when ordered is false,
+// exactly as before; otherwise x16 = membase + addr (the acquire and release
+// forms take a base register only) and LDAPR/STLR. Floating-point values go
+// through w17/x17, which no caller holds anything in at that point.
+inline void GuestOrderedBase(A64Emitter& e, const XReg& addr) {
+  e.add(e.x16, e.GetMembaseReg(), addr);
+}
+inline void GuestLdrb(A64Emitter& e, bool ordered, const WReg& dest,
+                      const XReg& addr) {
+  if (!ordered) {
+    e.ldrb(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  GuestOrderedBase(e, addr);
+  e.ldaprb(dest, Xbyak_aarch64::ptr(e.x16));
+}
+inline void GuestLdrh(A64Emitter& e, bool ordered, const WReg& dest,
+                      const XReg& addr) {
+  if (!ordered) {
+    e.ldrh(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  GuestOrderedBase(e, addr);
+  e.ldaprh(dest, Xbyak_aarch64::ptr(e.x16));
+}
+inline void GuestLdr(A64Emitter& e, bool ordered, const WReg& dest,
+                     const XReg& addr) {
+  if (!ordered) {
+    e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  GuestOrderedBase(e, addr);
+  e.ldapr(dest, Xbyak_aarch64::ptr(e.x16));
+}
+inline void GuestLdr(A64Emitter& e, bool ordered, const XReg& dest,
+                     const XReg& addr) {
+  if (!ordered) {
+    e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  GuestOrderedBase(e, addr);
+  e.ldapr(dest, Xbyak_aarch64::ptr(e.x16));
+}
+inline void GuestLdr(A64Emitter& e, bool ordered, const SReg& dest,
+                     const XReg& addr) {
+  if (!ordered) {
+    e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  GuestOrderedBase(e, addr);
+  e.ldapr(e.w17, Xbyak_aarch64::ptr(e.x16));
+  e.fmov(dest, e.w17);
+}
+inline void GuestLdr(A64Emitter& e, bool ordered, const DReg& dest,
+                     const XReg& addr) {
+  if (!ordered) {
+    e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  GuestOrderedBase(e, addr);
+  e.ldapr(e.x17, Xbyak_aarch64::ptr(e.x16));
+  e.fmov(dest, e.x17);
+}
+inline void GuestStrb(A64Emitter& e, bool ordered, const WReg& src,
+                      const XReg& addr) {
+  if (!ordered) {
+    e.strb(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  GuestOrderedBase(e, addr);
+  e.stlrb(src, Xbyak_aarch64::ptr(e.x16));
+}
+inline void GuestStrh(A64Emitter& e, bool ordered, const WReg& src,
+                      const XReg& addr) {
+  if (!ordered) {
+    e.strh(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  GuestOrderedBase(e, addr);
+  e.stlrh(src, Xbyak_aarch64::ptr(e.x16));
+}
+inline void GuestStr(A64Emitter& e, bool ordered, const WReg& src,
+                     const XReg& addr) {
+  if (!ordered) {
+    e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  GuestOrderedBase(e, addr);
+  e.stlr(src, Xbyak_aarch64::ptr(e.x16));
+}
+inline void GuestStr(A64Emitter& e, bool ordered, const XReg& src,
+                     const XReg& addr) {
+  if (!ordered) {
+    e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  GuestOrderedBase(e, addr);
+  e.stlr(src, Xbyak_aarch64::ptr(e.x16));
+}
+inline void GuestStr(A64Emitter& e, bool ordered, const SReg& src,
+                     const XReg& addr) {
+  if (!ordered) {
+    e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  e.fmov(e.w17, src);
+  GuestOrderedBase(e, addr);
+  e.stlr(e.w17, Xbyak_aarch64::ptr(e.x16));
+}
+inline void GuestStr(A64Emitter& e, bool ordered, const DReg& src,
+                     const XReg& addr) {
+  if (!ordered) {
+    e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+    return;
+  }
+  e.fmov(e.x17, src);
+  GuestOrderedBase(e, addr);
+  e.stlr(e.x17, Xbyak_aarch64::ptr(e.x16));
+}
+
 // Flush denormal float32 lanes to zero in a NEON register (in-place).
 // A float32 is denormal when 0 < abs(val) < 0x00800000.
 // vreg must not equal sa or sb.

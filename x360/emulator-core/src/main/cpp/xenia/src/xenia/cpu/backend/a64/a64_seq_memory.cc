@@ -485,8 +485,10 @@ static T MMIOAwareLoad(void* _ctx, unsigned int guestaddr) {
 // ============================================================================
 struct LOAD_I8 : Sequence<LOAD_I8, I<OPCODE_LOAD, I8Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.ldrb(i.dest, ptr(e.GetMembaseReg(), addr));
+    GuestLdrb(e, ordered, i.dest, addr);
     if (IsTracingData()) {
       addr = ComputeMemoryAddress(e, i.src1);
       e.mov(e.w2, i.dest);
@@ -497,8 +499,10 @@ struct LOAD_I8 : Sequence<LOAD_I8, I<OPCODE_LOAD, I8Op, I64Op>> {
 };
 struct LOAD_I16 : Sequence<LOAD_I16, I<OPCODE_LOAD, I16Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.ldrh(i.dest, ptr(e.GetMembaseReg(), addr));
+    GuestLdrh(e, ordered, i.dest, addr);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       e.rev16(i.dest, i.dest);
     }
@@ -512,6 +516,8 @@ struct LOAD_I16 : Sequence<LOAD_I16, I<OPCODE_LOAD, I16Op, I64Op>> {
 };
 struct LOAD_I32 : Sequence<LOAD_I32, I<OPCODE_LOAD, I32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     if (IsPossibleMMIOInstruction(e, i.instr)) {
       void* mmio_fn = (void*)&MMIOAwareLoad<uint32_t, false>;
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
@@ -554,7 +560,7 @@ struct LOAD_I32 : Sequence<LOAD_I32, I<OPCODE_LOAD, I32Op, I64Op>> {
       e.L(normal_access);
       {
         auto addr = ComputeMemoryAddress(e, i.src1);
-        e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
+        GuestLdr(e, ordered, i.dest, addr);
         if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
           e.rev(i.dest, i.dest);
         }
@@ -562,7 +568,7 @@ struct LOAD_I32 : Sequence<LOAD_I32, I<OPCODE_LOAD, I32Op, I64Op>> {
       e.L(done);
     } else {
       auto addr = ComputeMemoryAddress(e, i.src1);
-      e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
+      GuestLdr(e, ordered, i.dest, addr);
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
         e.rev(i.dest, i.dest);
       }
@@ -577,8 +583,10 @@ struct LOAD_I32 : Sequence<LOAD_I32, I<OPCODE_LOAD, I32Op, I64Op>> {
 };
 struct LOAD_I64 : Sequence<LOAD_I64, I<OPCODE_LOAD, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
+    GuestLdr(e, ordered, i.dest, addr);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       e.rev(i.dest, i.dest);
     }
@@ -592,13 +600,15 @@ struct LOAD_I64 : Sequence<LOAD_I64, I<OPCODE_LOAD, I64Op, I64Op>> {
 };
 struct LOAD_F32 : Sequence<LOAD_F32, I<OPCODE_LOAD, F32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      e.ldr(e.w0, ptr(e.GetMembaseReg(), addr));
+      GuestLdr(e, ordered, e.w0, addr);
       e.rev(e.w0, e.w0);
       e.fmov(i.dest, e.w0);
     } else {
-      e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
+      GuestLdr(e, ordered, i.dest, addr);
     }
     if (IsTracingData()) {
       addr = ComputeMemoryAddress(e, i.src1);
@@ -610,13 +620,15 @@ struct LOAD_F32 : Sequence<LOAD_F32, I<OPCODE_LOAD, F32Op, I64Op>> {
 };
 struct LOAD_F64 : Sequence<LOAD_F64, I<OPCODE_LOAD, F64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      e.ldr(e.x0, ptr(e.GetMembaseReg(), addr));
+      GuestLdr(e, ordered, e.x0, addr);
       e.rev(e.x0, e.x0);
       e.fmov(i.dest, e.x0);
     } else {
-      e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
+      GuestLdr(e, ordered, i.dest, addr);
     }
     if (IsTracingData()) {
       addr = ComputeMemoryAddress(e, i.src1);
@@ -628,8 +640,15 @@ struct LOAD_F64 : Sequence<LOAD_F64, I<OPCODE_LOAD, F64Op, I64Op>> {
 };
 struct LOAD_V128 : Sequence<LOAD_V128, I<OPCODE_LOAD, V128Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2. No acquire form loads a
+    // q register, so a plain ldr then dmb ishld: no later load or store is
+    // performed before it, which is what LDAPR gives the other widths.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
     e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
+    if (ordered) {
+      GuestOrderBarrier(e, Xbyak_aarch64::ISHLD);
+    }
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       // Reverse bytes within each 32-bit word (PPC BE -> ARM64 LE).
       auto idx = i.dest.reg().getIdx();
@@ -651,16 +670,18 @@ EMITTER_OPCODE_TABLE(OPCODE_LOAD, LOAD_I8, LOAD_I16, LOAD_I32, LOAD_I64,
 // ============================================================================
 struct STORE_I8 : Sequence<STORE_I8, I<OPCODE_STORE, VoidOp, I64Op, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.src2.is_constant) {
       e.mov(e.w17, static_cast<uint64_t>(i.src2.constant() & 0xFF));
-      e.strb(e.w17, ptr(e.GetMembaseReg(), addr));
+      GuestStrb(e, ordered, e.w17, addr);
     } else {
-      e.strb(i.src2, ptr(e.GetMembaseReg(), addr));
+      GuestStrb(e, ordered, i.src2, addr);
     }
     if (IsTracingData()) {
       addr = ComputeMemoryAddress(e, i.src1);
-      e.ldrb(e.w2, ptr(e.GetMembaseReg(), addr));
+      GuestLdrb(e, ordered, e.w2, addr);
       e.mov(e.w1, WReg(addr.getIdx()));
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI8));
     }
@@ -668,6 +689,8 @@ struct STORE_I8 : Sequence<STORE_I8, I<OPCODE_STORE, VoidOp, I64Op, I8Op>> {
 };
 struct STORE_I16 : Sequence<STORE_I16, I<OPCODE_STORE, VoidOp, I64Op, I16Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       if (i.src2.is_constant) {
@@ -676,18 +699,18 @@ struct STORE_I16 : Sequence<STORE_I16, I<OPCODE_STORE, VoidOp, I64Op, I16Op>> {
       } else {
         e.rev16(e.w17, i.src2);
       }
-      e.strh(e.w17, ptr(e.GetMembaseReg(), addr));
+      GuestStrh(e, ordered, e.w17, addr);
     } else {
       if (i.src2.is_constant) {
         e.mov(e.w17, static_cast<uint64_t>(i.src2.constant() & 0xFFFF));
-        e.strh(e.w17, ptr(e.GetMembaseReg(), addr));
+        GuestStrh(e, ordered, e.w17, addr);
       } else {
-        e.strh(i.src2, ptr(e.GetMembaseReg(), addr));
+        GuestStrh(e, ordered, i.src2, addr);
       }
     }
     if (IsTracingData()) {
       addr = ComputeMemoryAddress(e, i.src1);
-      e.ldrh(e.w2, ptr(e.GetMembaseReg(), addr));
+      GuestLdrh(e, ordered, e.w2, addr);
       e.mov(e.w1, WReg(addr.getIdx()));
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI16));
     }
@@ -695,6 +718,8 @@ struct STORE_I16 : Sequence<STORE_I16, I<OPCODE_STORE, VoidOp, I64Op, I16Op>> {
 };
 struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     if (IsPossibleMMIOInstruction(e, i.instr)) {
       void* mmio_fn = (void*)&MMIOAwareStore<uint32_t, false>;
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
@@ -755,14 +780,14 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
           } else {
             e.rev(e.w17, i.src2);
           }
-          e.str(e.w17, ptr(e.GetMembaseReg(), addr));
+          GuestStr(e, ordered, e.w17, addr);
         } else {
           if (i.src2.is_constant) {
             e.mov(e.w17, static_cast<uint64_t>(
                              static_cast<uint32_t>(i.src2.constant())));
-            e.str(e.w17, ptr(e.GetMembaseReg(), addr));
+            GuestStr(e, ordered, e.w17, addr);
           } else {
-            e.str(i.src2, ptr(e.GetMembaseReg(), addr));
+            GuestStr(e, ordered, i.src2, addr);
           }
         }
       }
@@ -777,19 +802,19 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
         } else {
           e.rev(e.w17, i.src2);
         }
-        e.str(e.w17, ptr(e.GetMembaseReg(), addr));
+        GuestStr(e, ordered, e.w17, addr);
       } else {
         if (i.src2.is_constant) {
           e.mov(e.w17, static_cast<uint64_t>(
                            static_cast<uint32_t>(i.src2.constant())));
-          e.str(e.w17, ptr(e.GetMembaseReg(), addr));
+          GuestStr(e, ordered, e.w17, addr);
         } else {
-          e.str(i.src2, ptr(e.GetMembaseReg(), addr));
+          GuestStr(e, ordered, i.src2, addr);
         }
       }
       if (IsTracingData()) {
         addr = ComputeMemoryAddress(e, i.src1);
-        e.ldr(e.w2, ptr(e.GetMembaseReg(), addr));
+        GuestLdr(e, ordered, e.w2, addr);
         e.mov(e.w1, WReg(addr.getIdx()));
         e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI32));
       }
@@ -798,6 +823,8 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
 };
 struct STORE_I64 : Sequence<STORE_I64, I<OPCODE_STORE, VoidOp, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       if (i.src2.is_constant) {
@@ -806,18 +833,18 @@ struct STORE_I64 : Sequence<STORE_I64, I<OPCODE_STORE, VoidOp, I64Op, I64Op>> {
       } else {
         e.rev(e.x17, i.src2);
       }
-      e.str(e.x17, ptr(e.GetMembaseReg(), addr));
+      GuestStr(e, ordered, e.x17, addr);
     } else {
       if (i.src2.is_constant) {
         e.mov(e.x17, static_cast<uint64_t>(i.src2.constant()));
-        e.str(e.x17, ptr(e.GetMembaseReg(), addr));
+        GuestStr(e, ordered, e.x17, addr);
       } else {
-        e.str(i.src2, ptr(e.GetMembaseReg(), addr));
+        GuestStr(e, ordered, i.src2, addr);
       }
     }
     if (IsTracingData()) {
       addr = ComputeMemoryAddress(e, i.src1);
-      e.ldr(e.x2, ptr(e.GetMembaseReg(), addr));
+      GuestLdr(e, ordered, e.x2, addr);
       e.mov(e.w1, WReg(addr.getIdx()));
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI64));
     }
@@ -825,6 +852,8 @@ struct STORE_I64 : Sequence<STORE_I64, I<OPCODE_STORE, VoidOp, I64Op, I64Op>> {
 };
 struct STORE_F32 : Sequence<STORE_F32, I<OPCODE_STORE, VoidOp, I64Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       if (i.src2.is_constant) {
@@ -835,18 +864,18 @@ struct STORE_F32 : Sequence<STORE_F32, I<OPCODE_STORE, VoidOp, I64Op, F32Op>> {
         e.fmov(e.w17, i.src2);
         e.rev(e.w17, e.w17);
       }
-      e.str(e.w17, ptr(e.GetMembaseReg(), addr));
+      GuestStr(e, ordered, e.w17, addr);
     } else {
       if (i.src2.is_constant) {
         e.mov(e.w17, static_cast<uint64_t>(i.src2.value->constant.i32));
-        e.str(e.w17, ptr(e.GetMembaseReg(), addr));
+        GuestStr(e, ordered, e.w17, addr);
       } else {
-        e.str(i.src2, ptr(e.GetMembaseReg(), addr));
+        GuestStr(e, ordered, i.src2, addr);
       }
     }
     if (IsTracingData()) {
       addr = ComputeMemoryAddress(e, i.src1);
-      e.ldr(e.s0, ptr(e.GetMembaseReg(), addr));
+      GuestLdr(e, ordered, e.s0, addr);
       e.mov(e.w1, WReg(addr.getIdx()));
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreF32));
     }
@@ -854,6 +883,8 @@ struct STORE_F32 : Sequence<STORE_F32, I<OPCODE_STORE, VoidOp, I64Op, F32Op>> {
 };
 struct STORE_F64 : Sequence<STORE_F64, I<OPCODE_STORE, VoidOp, I64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1);
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       if (i.src2.is_constant) {
@@ -864,18 +895,18 @@ struct STORE_F64 : Sequence<STORE_F64, I<OPCODE_STORE, VoidOp, I64Op, F64Op>> {
         e.fmov(e.x17, i.src2);
         e.rev(e.x17, e.x17);
       }
-      e.str(e.x17, ptr(e.GetMembaseReg(), addr));
+      GuestStr(e, ordered, e.x17, addr);
     } else {
       if (i.src2.is_constant) {
         e.mov(e.x17, static_cast<uint64_t>(i.src2.value->constant.i64));
-        e.str(e.x17, ptr(e.GetMembaseReg(), addr));
+        GuestStr(e, ordered, e.x17, addr);
       } else {
-        e.str(i.src2, ptr(e.GetMembaseReg(), addr));
+        GuestStr(e, ordered, i.src2, addr);
       }
     }
     if (IsTracingData()) {
       addr = ComputeMemoryAddress(e, i.src1);
-      e.ldr(e.d0, ptr(e.GetMembaseReg(), addr));
+      GuestLdr(e, ordered, e.d0, addr);
       e.mov(e.w1, WReg(addr.getIdx()));
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreF64));
     }
@@ -889,6 +920,13 @@ struct STORE_V128
     bool need_src_load =
         i.src2.is_constant ||
         (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP);
+    // hakuX-Boosted: a64_guest_memory_order = 2. No release form stores a
+    // q register, so dmb ishst then a plain str: every earlier store is
+    // performed first, and every earlier guest load already is (LDAPR orders
+    // what follows it).
+    if (GuestAccessOrdered(e, i.src1)) {
+      GuestOrderBarrier(e, Xbyak_aarch64::ISHST);
+    }
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (need_src_load) {
       e.mov(e.x17, addr);
@@ -941,8 +979,10 @@ EMITTER_OPCODE_TABLE(OPCODE_LOAD_CLOCK, LOAD_CLOCK);
 struct LOAD_OFFSET_I8
     : Sequence<LOAD_OFFSET_I8, I<OPCODE_LOAD_OFFSET, I8Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1, i.src2);
     ComputeMemoryAddressOffset(e, i.src1, i.src2);
-    e.ldrb(i.dest, ptr(e.GetMembaseReg(), e.x0));
+    GuestLdrb(e, ordered, i.dest, e.x0);
     if (IsTracingData()) {
       ComputeMemoryAddressOffset(e, i.src1, i.src2);
       e.mov(e.w2, i.dest);
@@ -954,8 +994,10 @@ struct LOAD_OFFSET_I8
 struct LOAD_OFFSET_I16
     : Sequence<LOAD_OFFSET_I16, I<OPCODE_LOAD_OFFSET, I16Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1, i.src2);
     ComputeMemoryAddressOffset(e, i.src1, i.src2);
-    e.ldrh(i.dest, ptr(e.GetMembaseReg(), e.x0));
+    GuestLdrh(e, ordered, i.dest, e.x0);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       e.rev16(i.dest, i.dest);
     }
@@ -970,6 +1012,8 @@ struct LOAD_OFFSET_I16
 struct LOAD_OFFSET_I32
     : Sequence<LOAD_OFFSET_I32, I<OPCODE_LOAD_OFFSET, I32Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1, i.src2);
     if (IsPossibleMMIOInstruction(e, i.instr)) {
       void* mmio_fn = (void*)&MMIOAwareLoad<uint32_t, false>;
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
@@ -1029,7 +1073,7 @@ struct LOAD_OFFSET_I32
       e.L(normal_access);
       {
         ComputeMemoryAddressOffset(e, i.src1, i.src2);
-        e.ldr(i.dest, ptr(e.GetMembaseReg(), e.x0));
+        GuestLdr(e, ordered, i.dest, e.x0);
         if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
           e.rev(i.dest, i.dest);
         }
@@ -1037,7 +1081,7 @@ struct LOAD_OFFSET_I32
       e.L(done);
     } else {
       ComputeMemoryAddressOffset(e, i.src1, i.src2);
-      e.ldr(i.dest, ptr(e.GetMembaseReg(), e.x0));
+      GuestLdr(e, ordered, i.dest, e.x0);
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
         e.rev(i.dest, i.dest);
       }
@@ -1053,8 +1097,10 @@ struct LOAD_OFFSET_I32
 struct LOAD_OFFSET_I64
     : Sequence<LOAD_OFFSET_I64, I<OPCODE_LOAD_OFFSET, I64Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1, i.src2);
     ComputeMemoryAddressOffset(e, i.src1, i.src2);
-    e.ldr(i.dest, ptr(e.GetMembaseReg(), e.x0));
+    GuestLdr(e, ordered, i.dest, e.x0);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       e.rev(i.dest, i.dest);
     }
@@ -1073,16 +1119,18 @@ struct STORE_OFFSET_I8
     : Sequence<STORE_OFFSET_I8,
                I<OPCODE_STORE_OFFSET, VoidOp, I64Op, I64Op, I8Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1, i.src2);
     ComputeMemoryAddressOffset(e, i.src1, i.src2);
     if (i.src3.is_constant) {
       e.mov(e.w17, static_cast<uint64_t>(i.src3.constant() & 0xFF));
-      e.strb(e.w17, ptr(e.GetMembaseReg(), e.x0));
+      GuestStrb(e, ordered, e.w17, e.x0);
     } else {
-      e.strb(i.src3, ptr(e.GetMembaseReg(), e.x0));
+      GuestStrb(e, ordered, i.src3, e.x0);
     }
     if (IsTracingData()) {
       ComputeMemoryAddressOffset(e, i.src1, i.src2);
-      e.ldrb(e.w2, ptr(e.GetMembaseReg(), e.x0));
+      GuestLdrb(e, ordered, e.w2, e.x0);
       e.mov(e.w1, e.w0);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI8));
     }
@@ -1092,6 +1140,8 @@ struct STORE_OFFSET_I16
     : Sequence<STORE_OFFSET_I16,
                I<OPCODE_STORE_OFFSET, VoidOp, I64Op, I64Op, I16Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1, i.src2);
     ComputeMemoryAddressOffset(e, i.src1, i.src2);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       if (i.src3.is_constant) {
@@ -1100,18 +1150,18 @@ struct STORE_OFFSET_I16
       } else {
         e.rev16(e.w17, i.src3);
       }
-      e.strh(e.w17, ptr(e.GetMembaseReg(), e.x0));
+      GuestStrh(e, ordered, e.w17, e.x0);
     } else {
       if (i.src3.is_constant) {
         e.mov(e.w17, static_cast<uint64_t>(i.src3.constant() & 0xFFFF));
-        e.strh(e.w17, ptr(e.GetMembaseReg(), e.x0));
+        GuestStrh(e, ordered, e.w17, e.x0);
       } else {
-        e.strh(i.src3, ptr(e.GetMembaseReg(), e.x0));
+        GuestStrh(e, ordered, i.src3, e.x0);
       }
     }
     if (IsTracingData()) {
       ComputeMemoryAddressOffset(e, i.src1, i.src2);
-      e.ldrh(e.w2, ptr(e.GetMembaseReg(), e.x0));
+      GuestLdrh(e, ordered, e.w2, e.x0);
       e.mov(e.w1, e.w0);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI16));
     }
@@ -1121,6 +1171,8 @@ struct STORE_OFFSET_I32
     : Sequence<STORE_OFFSET_I32,
                I<OPCODE_STORE_OFFSET, VoidOp, I64Op, I64Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1, i.src2);
     if (IsPossibleMMIOInstruction(e, i.instr)) {
       void* mmio_fn = (void*)&MMIOAwareStore<uint32_t, false>;
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
@@ -1198,14 +1250,14 @@ struct STORE_OFFSET_I32
           } else {
             e.rev(e.w17, i.src3);
           }
-          e.str(e.w17, ptr(e.GetMembaseReg(), e.x0));
+          GuestStr(e, ordered, e.w17, e.x0);
         } else {
           if (i.src3.is_constant) {
             e.mov(e.w17, static_cast<uint64_t>(
                              static_cast<uint32_t>(i.src3.constant())));
-            e.str(e.w17, ptr(e.GetMembaseReg(), e.x0));
+            GuestStr(e, ordered, e.w17, e.x0);
           } else {
-            e.str(i.src3, ptr(e.GetMembaseReg(), e.x0));
+            GuestStr(e, ordered, i.src3, e.x0);
           }
         }
       }
@@ -1220,19 +1272,19 @@ struct STORE_OFFSET_I32
         } else {
           e.rev(e.w17, i.src3);
         }
-        e.str(e.w17, ptr(e.GetMembaseReg(), e.x0));
+        GuestStr(e, ordered, e.w17, e.x0);
       } else {
         if (i.src3.is_constant) {
           e.mov(e.w17, static_cast<uint64_t>(
                            static_cast<uint32_t>(i.src3.constant())));
-          e.str(e.w17, ptr(e.GetMembaseReg(), e.x0));
+          GuestStr(e, ordered, e.w17, e.x0);
         } else {
-          e.str(i.src3, ptr(e.GetMembaseReg(), e.x0));
+          GuestStr(e, ordered, i.src3, e.x0);
         }
       }
       if (IsTracingData()) {
         ComputeMemoryAddressOffset(e, i.src1, i.src2);
-        e.ldr(e.w2, ptr(e.GetMembaseReg(), e.x0));
+        GuestLdr(e, ordered, e.w2, e.x0);
         e.mov(e.w1, e.w0);
         e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI32));
       }
@@ -1243,6 +1295,8 @@ struct STORE_OFFSET_I64
     : Sequence<STORE_OFFSET_I64,
                I<OPCODE_STORE_OFFSET, VoidOp, I64Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // hakuX-Boosted: a64_guest_memory_order = 2.
+    const bool ordered = GuestAccessOrdered(e, i.src1, i.src2);
     ComputeMemoryAddressOffset(e, i.src1, i.src2);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       if (i.src3.is_constant) {
@@ -1251,18 +1305,18 @@ struct STORE_OFFSET_I64
       } else {
         e.rev(e.x17, i.src3);
       }
-      e.str(e.x17, ptr(e.GetMembaseReg(), e.x0));
+      GuestStr(e, ordered, e.x17, e.x0);
     } else {
       if (i.src3.is_constant) {
         e.mov(e.x17, static_cast<uint64_t>(i.src3.constant()));
-        e.str(e.x17, ptr(e.GetMembaseReg(), e.x0));
+        GuestStr(e, ordered, e.x17, e.x0);
       } else {
-        e.str(i.src3, ptr(e.GetMembaseReg(), e.x0));
+        GuestStr(e, ordered, i.src3, e.x0);
       }
     }
     if (IsTracingData()) {
       ComputeMemoryAddressOffset(e, i.src1, i.src2);
-      e.ldr(e.x2, ptr(e.GetMembaseReg(), e.x0));
+      GuestLdr(e, ordered, e.x2, e.x0);
       e.mov(e.w1, e.w0);
       e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI64));
     }
@@ -1285,6 +1339,10 @@ struct MEMSET_I64
     assert_true(i.src2.constant() == 0);
     // memset(membase + guest_addr, 0, length)
     // Only used by dcbz/dcbz128: constant zero value, constant aligned size.
+    // hakuX-Boosted: a64_guest_memory_order = 2, as for a 128-bit store.
+    if (GuestAccessOrdered(e, i.src1)) {
+      GuestOrderBarrier(e, Xbyak_aarch64::ISHST);
+    }
     auto addr = ComputeMemoryAddress(e, i.src1);
     e.add(e.x0, e.GetMembaseReg(), addr);
     const uint64_t len = i.src3.constant();
@@ -1504,7 +1562,12 @@ struct RESERVED_LOAD_I32
       // validates with one CASAL; no hardware monitor spans the window.
       auto addr = ComputeMemoryAddress(e, i.src1);
       e.add(e.x16, e.GetMembaseReg(), addr);
-      e.ldr(i.dest, ptr(e.x16));
+      // hakuX-Boosted: a64_guest_memory_order = 2, an acquire load.
+      if (GuestMemoryOrderLevel() == 2) {
+        e.ldapr(i.dest, ptr(e.x16));
+      } else {
+        e.ldr(i.dest, ptr(e.x16));
+      }
       auto bctx = LoadBackendCtxPtr(e);
       e.str(i.dest, ptr(bctx, static_cast<uint32_t>(offsetof(
                                 A64BackendContext, cached_reserve_value_))));
@@ -1522,7 +1585,8 @@ struct RESERVED_LOAD_I32
     }
     e.CallNativeSafe(e.backend()->try_acquire_reservation_helper_);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
+    // hakuX-Boosted: a64_guest_memory_order = 2, an acquire load.
+    GuestLdr(e, GuestMemoryOrderLevel() == 2, i.dest.reg(), addr);
     auto bctx = LoadBackendCtxPtr(e);
     e.mov(e.w0, i.dest);
     e.str(e.x0, ptr(bctx, static_cast<uint32_t>(offsetof(
@@ -1537,7 +1601,12 @@ struct RESERVED_LOAD_I64
       // validates with one CASAL; no hardware monitor spans the window.
       auto addr = ComputeMemoryAddress(e, i.src1);
       e.add(e.x16, e.GetMembaseReg(), addr);
-      e.ldr(i.dest, ptr(e.x16));
+      // hakuX-Boosted: a64_guest_memory_order = 2, an acquire load.
+      if (GuestMemoryOrderLevel() == 2) {
+        e.ldapr(i.dest, ptr(e.x16));
+      } else {
+        e.ldr(i.dest, ptr(e.x16));
+      }
       auto bctx = LoadBackendCtxPtr(e);
       e.str(i.dest, ptr(bctx, static_cast<uint32_t>(offsetof(
                                 A64BackendContext, cached_reserve_value_))));
@@ -1555,7 +1624,8 @@ struct RESERVED_LOAD_I64
     }
     e.CallNativeSafe(e.backend()->try_acquire_reservation_helper_);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
+    // hakuX-Boosted: a64_guest_memory_order = 2, an acquire load.
+    GuestLdr(e, GuestMemoryOrderLevel() == 2, i.dest.reg(), addr);
     auto bctx = LoadBackendCtxPtr(e);
     e.str(i.dest, ptr(bctx, static_cast<uint32_t>(offsetof(
                                 A64BackendContext, cached_reserve_value_))));

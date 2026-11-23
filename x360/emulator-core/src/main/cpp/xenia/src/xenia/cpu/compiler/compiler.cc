@@ -205,6 +205,12 @@ std::string FormatExtraStats() {
       get(t.linked_call_sites), get(t.linked_call_sites_resolved),
       get(t.address_fixups_emitted), get(t.address_fixups_skipped),
       t.stack_fixup_verify_hits, get(t.verify_mismatches));
+  // hakuX-Boosted: a64_guest_memory_order = 2.
+  line += fmt::format(
+      "; guest memory order: acquire/release accesses {}, plain stack {}, "
+      "plain read-only {}, barriers {}",
+      get(t.memory_order_acquire_release), get(t.memory_order_plain_stack),
+      get(t.memory_order_plain_read_only), get(t.memory_order_barriers));
   // hakuX-Boosted: the translator overhaul's counters (all static, counted
   // as code is emitted, except the last).
   line += fmt::format(
