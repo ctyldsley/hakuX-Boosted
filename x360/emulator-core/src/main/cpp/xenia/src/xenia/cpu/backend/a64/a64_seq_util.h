@@ -558,121 +558,132 @@ inline void GuestOrderBarrier(A64Emitter& e,
 // exactly as before; otherwise x16 = membase + addr (the acquire and release
 // forms take a base register only) and LDAPR/STLR. Floating-point values go
 // through w17/x17, which no caller holds anything in at that point.
+//
+// LDAPR and STLR fault on an address that is not naturally aligned (FEAT_LSE2
+// relaxes that only within a 16-byte granule), and guest code makes such
+// accesses: an 8-byte std to a 4-byte aligned address crashed Gears of War
+// at its first frame. So a 2, 4 or 8-byte ordered access tests the address
+// first; an unaligned one takes the plain instruction with a barrier on the
+// side the access needs instead (dmb ish before a store, which orders it
+// after every earlier access as STLR would; dmb ishld after a load). The
+// flags are free here: no fused compare spans a load or store (see
+// FindFusableBranch) and loads and stores drop the flags cache.
 inline void GuestOrderedBase(A64Emitter& e, const XReg& addr) {
   e.add(e.x16, e.GetMembaseReg(), addr);
 }
-inline void GuestLdrb(A64Emitter& e, bool ordered, const WReg& dest,
-                      const XReg& addr) {
-  if (!ordered) {
-    e.ldrb(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
+template <typename OrderedOp, typename PlainOp>
+inline void GuestOrderedAccess(A64Emitter& e, const XReg& addr, uint32_t size,
+                               bool is_store, OrderedOp ordered_op,
+                               PlainOp plain_op) {
+  if (size <= 1) {
+    GuestOrderedBase(e, addr);
+    ordered_op();
     return;
   }
+  auto& unaligned = e.NewCachedLabel();
+  auto& done = e.NewCachedLabel();
+  e.tst(addr, uint64_t(size - 1));
+  e.b(Xbyak_aarch64::NE, unaligned);
   GuestOrderedBase(e, addr);
-  e.ldaprb(dest, Xbyak_aarch64::ptr(e.x16));
+  ordered_op();
+  e.b(done);
+  e.L(unaligned);
+  if (is_store) {
+    e.dmb(Xbyak_aarch64::ISH);
+  }
+  plain_op();
+  if (!is_store) {
+    e.dmb(Xbyak_aarch64::ISHLD);
+  }
+  e.L(done);
+}
+#define XE_GUEST_ORDERED_ACCESS(SIZE, IS_STORE, PLAIN, ORDERED)          \
+  do {                                                                   \
+    auto plain_op = [&] { PLAIN; };                                      \
+    if (!ordered) {                                                      \
+      plain_op();                                                        \
+      return;                                                            \
+    }                                                                    \
+    GuestOrderedAccess(e, addr, SIZE, IS_STORE, [&] { ORDERED; },        \
+                       plain_op);                                        \
+  } while (0)
+inline void GuestLdrb(A64Emitter& e, bool ordered, const WReg& dest,
+                      const XReg& addr) {
+  XE_GUEST_ORDERED_ACCESS(
+      1, false, e.ldrb(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.ldaprb(dest, Xbyak_aarch64::ptr(e.x16)));
 }
 inline void GuestLdrh(A64Emitter& e, bool ordered, const WReg& dest,
                       const XReg& addr) {
-  if (!ordered) {
-    e.ldrh(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  GuestOrderedBase(e, addr);
-  e.ldaprh(dest, Xbyak_aarch64::ptr(e.x16));
+  XE_GUEST_ORDERED_ACCESS(
+      2, false, e.ldrh(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.ldaprh(dest, Xbyak_aarch64::ptr(e.x16)));
 }
 inline void GuestLdr(A64Emitter& e, bool ordered, const WReg& dest,
                      const XReg& addr) {
-  if (!ordered) {
-    e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  GuestOrderedBase(e, addr);
-  e.ldapr(dest, Xbyak_aarch64::ptr(e.x16));
+  XE_GUEST_ORDERED_ACCESS(
+      4, false, e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.ldapr(dest, Xbyak_aarch64::ptr(e.x16)));
 }
 inline void GuestLdr(A64Emitter& e, bool ordered, const XReg& dest,
                      const XReg& addr) {
-  if (!ordered) {
-    e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  GuestOrderedBase(e, addr);
-  e.ldapr(dest, Xbyak_aarch64::ptr(e.x16));
+  XE_GUEST_ORDERED_ACCESS(
+      8, false, e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.ldapr(dest, Xbyak_aarch64::ptr(e.x16)));
 }
 inline void GuestLdr(A64Emitter& e, bool ordered, const SReg& dest,
                      const XReg& addr) {
-  if (!ordered) {
-    e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  GuestOrderedBase(e, addr);
-  e.ldapr(e.w17, Xbyak_aarch64::ptr(e.x16));
-  e.fmov(dest, e.w17);
+  XE_GUEST_ORDERED_ACCESS(
+      4, false, e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.ldapr(e.w17, Xbyak_aarch64::ptr(e.x16));
+      e.fmov(dest, e.w17));
 }
 inline void GuestLdr(A64Emitter& e, bool ordered, const DReg& dest,
                      const XReg& addr) {
-  if (!ordered) {
-    e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  GuestOrderedBase(e, addr);
-  e.ldapr(e.x17, Xbyak_aarch64::ptr(e.x16));
-  e.fmov(dest, e.x17);
+  XE_GUEST_ORDERED_ACCESS(
+      8, false, e.ldr(dest, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.ldapr(e.x17, Xbyak_aarch64::ptr(e.x16));
+      e.fmov(dest, e.x17));
 }
 inline void GuestStrb(A64Emitter& e, bool ordered, const WReg& src,
                       const XReg& addr) {
-  if (!ordered) {
-    e.strb(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  GuestOrderedBase(e, addr);
-  e.stlrb(src, Xbyak_aarch64::ptr(e.x16));
+  XE_GUEST_ORDERED_ACCESS(
+      1, true, e.strb(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.stlrb(src, Xbyak_aarch64::ptr(e.x16)));
 }
 inline void GuestStrh(A64Emitter& e, bool ordered, const WReg& src,
                       const XReg& addr) {
-  if (!ordered) {
-    e.strh(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  GuestOrderedBase(e, addr);
-  e.stlrh(src, Xbyak_aarch64::ptr(e.x16));
+  XE_GUEST_ORDERED_ACCESS(
+      2, true, e.strh(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.stlrh(src, Xbyak_aarch64::ptr(e.x16)));
 }
 inline void GuestStr(A64Emitter& e, bool ordered, const WReg& src,
                      const XReg& addr) {
-  if (!ordered) {
-    e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  GuestOrderedBase(e, addr);
-  e.stlr(src, Xbyak_aarch64::ptr(e.x16));
+  XE_GUEST_ORDERED_ACCESS(
+      4, true, e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.stlr(src, Xbyak_aarch64::ptr(e.x16)));
 }
 inline void GuestStr(A64Emitter& e, bool ordered, const XReg& src,
                      const XReg& addr) {
-  if (!ordered) {
-    e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  GuestOrderedBase(e, addr);
-  e.stlr(src, Xbyak_aarch64::ptr(e.x16));
+  XE_GUEST_ORDERED_ACCESS(
+      8, true, e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.stlr(src, Xbyak_aarch64::ptr(e.x16)));
 }
 inline void GuestStr(A64Emitter& e, bool ordered, const SReg& src,
                      const XReg& addr) {
-  if (!ordered) {
-    e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  e.fmov(e.w17, src);
-  GuestOrderedBase(e, addr);
-  e.stlr(e.w17, Xbyak_aarch64::ptr(e.x16));
+  XE_GUEST_ORDERED_ACCESS(
+      4, true, e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.fmov(e.w17, src);
+      e.stlr(e.w17, Xbyak_aarch64::ptr(e.x16)));
 }
 inline void GuestStr(A64Emitter& e, bool ordered, const DReg& src,
                      const XReg& addr) {
-  if (!ordered) {
-    e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr));
-    return;
-  }
-  e.fmov(e.x17, src);
-  GuestOrderedBase(e, addr);
-  e.stlr(e.x17, Xbyak_aarch64::ptr(e.x16));
+  XE_GUEST_ORDERED_ACCESS(
+      8, true, e.str(src, Xbyak_aarch64::ptr(e.GetMembaseReg(), addr)),
+      e.fmov(e.x17, src);
+      e.stlr(e.x17, Xbyak_aarch64::ptr(e.x16)));
 }
+#undef XE_GUEST_ORDERED_ACCESS
 
 // Flush denormal float32 lanes to zero in a NEON register (in-place).
 // A float32 is denormal when 0 < abs(val) < 0x00800000.

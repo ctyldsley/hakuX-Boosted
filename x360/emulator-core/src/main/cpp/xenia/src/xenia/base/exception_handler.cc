@@ -65,6 +65,13 @@ bool IsArm64LoadPrefetchStore(uint32_t instruction, bool& is_store_out) {
     }
     return true;
   }
+  // hakuX-Boosted: LDAPR/LDAPRB/LDAPRH (FEAT_LRCPC, emitted by
+  // a64_guest_memory_order = 2) sit in the atomic memory operation space but
+  // only load. STLR is in the exclusive space above and already a store.
+  if ((instruction & UINT32_C(0x3FFFFC00)) == UINT32_C(0x38BFC000)) {
+    is_store_out = false;
+    return true;
+  }
   if ((instruction & kArm64AtomicMemoryFMask) == kArm64AtomicMemoryFixed) {
     is_store_out = true;
     return true;
