@@ -36,8 +36,13 @@ note() {
 for round in $(seq 1 "${ROUNDS:-3}"); do
   for manifest in "${manifests[@]}"; do
     name=$(basename "$manifest" .manifest)
-    BENCH_JIT_MANIFEST="$manifest" "$dir/bench_core" --suite=jit --label=4k "${args[@]}" > /dev/null 2>&1
-    code=$?
+    # Status 75: the translator faulted on a function, whose address is now
+    # in <manifest>.skip; the next try leaves it out (bench_jit.cc).
+    for try in $(seq 1 40); do
+      BENCH_JIT_MANIFEST="$manifest" "$dir/bench_core" --suite=jit --label=4k "${args[@]}" > /dev/null 2>&1
+      code=$?
+      [ $code -eq 75 ] || break
+    done
     if [ $code -ne 0 ]; then
       note "$name (4k)" "NOT MEASURED or WRONG: bench_core stopped with status $code"
       status=1
@@ -48,9 +53,12 @@ if [ -n "${PAGE_16K:-}" ]; then
   if command -v qemu-aarch64 > /dev/null; then
     for manifest in "${manifests[@]}"; do
       name=$(basename "$manifest" .manifest)
-      BENCH_JIT_NO_TIMED=1 BENCH_JIT_MANIFEST="$manifest" \
-        qemu-aarch64 -p 16384 "$dir/bench_core" --suite=jit --label=16k "${args[@]}" > /dev/null 2>&1
-      code=$?
+      for try in $(seq 1 40); do
+        BENCH_JIT_NO_TIMED=1 BENCH_JIT_MANIFEST="$manifest" \
+          qemu-aarch64 -p 16384 "$dir/bench_core" --suite=jit --label=16k "${args[@]}" > /dev/null 2>&1
+        code=$?
+        [ $code -eq 75 ] || break
+      done
       if [ $code -ne 0 ]; then
         note "$name (16k)" "NOT MEASURED or WRONG: bench_core under qemu with 16 KiB pages stopped with status $code"
         status=1
@@ -60,4 +68,7 @@ if [ -n "${PAGE_16K:-}" ]; then
     note "(16k)" "not measured: no qemu-aarch64 on this machine"
   fi
 fi
+for skipped in "$images"/*.skip; do
+  echo "run-jit: functions the translator faulted on, left out: $(basename "$skipped" .manifest.skip) $(tr '\n' ' ' < "$skipped")" >&2
+done
 exit $status

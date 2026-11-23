@@ -199,6 +199,7 @@ static NOINLINE uint32_t sum_halves(const uint16_t *p, uint32_t count) {
 NOINLINE uint32_t wl_memory(uint32_t n, uint32_t seed) {
   uint32_t s = seed | 1, sum = 0;
   for (uint32_t i = 0; i < sizeof mem_a; ++i) mem_a[i] = (uint8_t)xs32(&s);
+  for (uint32_t i = 0; i < sizeof mem_b; ++i) mem_b[i] = 0; /* every call starts the same */
   for (uint32_t pass = 0; pass < n; ++pass) {
     uint32_t off_d = xs32(&s) & 31, off_s = xs32(&s) & 31, len = 4096 + (xs32(&s) & 4095);
     copy_bytes(mem_b + off_d, mem_a + off_s, len);

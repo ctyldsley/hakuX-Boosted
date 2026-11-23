@@ -20,7 +20,14 @@
 // BENCH_JIT_MANIFEST names the manifest. BENCH_JIT_SAMPLES is the number of
 // timed samples a call (7), BENCH_JIT_NO_TIMED=1 leaves the timed calls out
 // (for a run under qemu, where only the code size means anything).
+// BENCH_JIT_ONLY=name makes that workload's checked call only and prints the
+// code cache's address range first: jit/jit-count-qemu.sh counts the host
+// instructions translated code runs with it, for a machine without a
+// counter.
+#include <fcntl.h>
+#include <signal.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -32,6 +39,8 @@
 #include <string>
 #include <vector>
 
+#include "xenia/cpu/backend/backend.h"
+#include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
@@ -107,6 +116,29 @@ bool ReadManifest(const std::string& path, Image* image) {
   return image->base && image->size && !image->file.empty();
 }
 
+// A function list made from a title's file names data as code now and then,
+// and the translator does not survive all of it. A fault while translating
+// writes the function's address to <manifest>.skip and stops the process
+// with status 75; run-jit.sh runs the image again, which leaves the
+// functions in that file out and counts them as refused.
+volatile uint32_t g_translating = 0;
+char g_skip_path[1024];
+
+void TranslateFault(int signal_number) {
+  int fd = open(g_skip_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (fd >= 0) {
+    char line[16];
+    uint32_t address = g_translating;
+    for (int i = 0; i < 8; ++i) {
+      line[i] = "0123456789ABCDEF"[(address >> (28 - 4 * i)) & 0xF];
+    }
+    line[8] = '\n';
+    (void)!write(fd, line, 9);
+    close(fd);
+  }
+  _exit(75);
+}
+
 uint64_t ThreadCpuNs() {
   timespec ts;
   clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
@@ -159,8 +191,28 @@ int RunJitSuite(const std::string& label) {
 
   // --- Translation: every function, once -----------------------------------
   uint64_t guest_insns = 0, host_bytes = 0, refused = 0, translated = 0;
+  std::vector<uint32_t> skip;
+  std::snprintf(g_skip_path, sizeof(g_skip_path), "%s.skip", manifest);
+  {
+    std::ifstream in(g_skip_path);
+    uint32_t address = 0;
+    while (in >> std::hex >> address) {
+      skip.push_back(address);
+    }
+  }
+  struct sigaction fault = {}, old_actions[4];
+  fault.sa_handler = TranslateFault;
+  const int fault_signals[4] = {SIGSEGV, SIGBUS, SIGILL, SIGABRT};
+  for (int i = 0; i < 4; ++i) {
+    sigaction(fault_signals[i], &fault, &old_actions[i]);
+  }
   const uint64_t t0 = ThreadCpuNs();
   for (uint32_t address : image.functions) {
+    if (std::find(skip.begin(), skip.end(), address) != skip.end()) {
+      ++refused;
+      continue;
+    }
+    g_translating = address;
     auto* fn = env->processor->ResolveFunction(address);
     if (!fn || !fn->is_guest()) {
       ++refused;
@@ -172,10 +224,24 @@ int RunJitSuite(const std::string& label) {
       continue;
     }
     ++translated;
+    // BENCH_JIT_DUMP=dir: each function's machine code, for a disassembler.
+    if (const char* dump = std::getenv("BENCH_JIT_DUMP")) {
+      char path[512];
+      std::snprintf(path, sizeof(path), "%s/%s-%08X.bin", dump,
+                    image.name.c_str(), address);
+      if (FILE* out = std::fopen(path, "wb")) {
+        std::fwrite(guest->machine_code(), 1, guest->machine_code_length(),
+                    out);
+        std::fclose(out);
+      }
+    }
     guest_insns += (fn->end_address() - fn->address()) / 4 + 1;
     host_bytes += guest->machine_code_length();
   }
   const uint64_t t1 = ThreadCpuNs();
+  for (int i = 0; i < 4; ++i) {
+    sigaction(fault_signals[i], &old_actions[i], nullptr);
+  }
   const std::string all = image.name + " (whole image)";
   Emit(s, all, label, "functions", double(translated));
   Emit(s, all, label, "functions_refused", double(refused));
@@ -199,11 +265,22 @@ int RunJitSuite(const std::string& label) {
     fn->Call(thread_state, uint32_t(ctx->lr));
     return uint32_t(ctx->r[3]);
   };
+  const char* only = std::getenv("BENCH_JIT_ONLY");
   const char* samples_env = std::getenv("BENCH_JIT_SAMPLES");
   const int samples = samples_env ? std::max(1, std::atoi(samples_env)) : 7;
-  const bool no_timed = std::getenv("BENCH_JIT_NO_TIMED") != nullptr;
+  const bool no_timed = only || std::getenv("BENCH_JIT_NO_TIMED") != nullptr;
+  if (only) {
+    auto* cache = env->processor->backend()->code_cache();
+    std::printf("jit-count code_cache=0x%llx..0x%llx\n",
+                (unsigned long long)cache->execute_base_address(),
+                (unsigned long long)(cache->execute_base_address() +
+                                     cache->total_size()));
+  }
   std::vector<std::string> wrong;
   for (const Call& c : image.calls) {
+    if (only && (c.name != only || c.timed)) {
+      continue;
+    }
     const std::string name = image.name + "/" + c.name;
     if (std::find(wrong.begin(), wrong.end(), c.name) != wrong.end()) {
       continue;
@@ -219,6 +296,8 @@ int RunJitSuite(const std::string& label) {
         EmitNote(s, name + " (" + label + ")", text);
         wrong.push_back(c.name);
         status = 1;
+      } else if (only) {
+        std::printf("jit-count %s ok=1\n", c.name.c_str());
       }
       continue;
     }
