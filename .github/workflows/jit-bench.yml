@@ -1,0 +1,212 @@
+# hakuX-Boosted: the translator benchmark (boosted/bench/jit,
+# boosted/bench/core/bench_jit.cc; notes in boosted/notes/jit-speed.md).
+#
+# Builds the Xbox 360 core's CPU sources headless for GitHub's ARM64 Linux
+# runner, twice: from the commit pushed and from the branch's base. Both
+# translate and run the same PowerPC images and the table compares them:
+# host bytes per PowerPC instruction, translation time, run time and host
+# instructions per workload.
+#
+# The images:
+#  - boosted/bench/jit/workloads.c, compiled here for PowerPC (-mcpu=cell)
+#    and for the runner, whose results are what the translated code must
+#    return;
+#  - the homebrew titles of xenosworks/xsdk, from the newest green run of
+#    .github/workflows/xsdk-probes.yml on xsdk/probes (pinned there at
+#    9e6de98). Translated whole, not run: they need the kernel. If that
+#    artifact has expired the table says so and has the workloads only;
+#    running "xsdk probes" on xsdk/probes again brings it back.
+name: jit bench
+
+on:
+  push:
+    branches:
+      - 'claude/jit-**'
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Commit or branch to compare against (empty = the merge base with claude/merge-1123)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: jit-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # What the branch was cut from. The comparison is against the merge base
+  # with it, so it stays the branch's base after either side moves.
+  BASE_BRANCH: claude/merge-1123
+  CORE: x360/emulator-core/src/main/cpp
+  CCACHE_COMPILERCHECK: content
+  CCACHE_NOHASHDIR: 'true'
+  CCACHE_MAXSIZE: 600M
+  # The xsdk titles measured, by file name in the xsdk-probes artifact: the
+  # SDK's whole test title and its CPU probes.
+  XSDK_IMAGES: xsdk_test probe_ctr probe_atomics probe_byterev probe_unroll probe_spin probe_exec m55_check
+
+jobs:
+  bench:
+    name: Translator benchmark
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: The runner
+        run: |
+          uname -a
+          lscpu | head -20
+          getconf PAGESIZE
+
+      - name: Sources to measure
+        env:
+          INPUT_BASE: ${{ inputs.base }}
+        run: |
+          set -e
+          git fetch --no-tags origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+          if [ -n "$INPUT_BASE" ]; then
+            git fetch --no-tags origin "$INPUT_BASE" || true
+            base=$(git rev-parse "origin/$INPUT_BASE" 2> /dev/null || git rev-parse "$INPUT_BASE")
+          else
+            base=$(git merge-base HEAD "origin/$BASE_BRANCH")
+          fi
+          paths=()
+          while read -r sub; do
+            case "$sub" in ''|\#*) continue ;; esac
+            paths+=("$CORE/xenia/third_party/$sub")
+          done < boosted/bench/tools/submodules.txt
+          git submodule update --init --depth 1 --jobs 8 -- "${paths[@]}"
+          boosted/bench/tools/prepare-tree.sh HEAD "$RUNNER_TEMP/trees/head"
+          boosted/bench/tools/prepare-tree.sh "$base" "$RUNNER_TEMP/trees/base"
+          echo "HEAD_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "BASE_SHA=$(git rev-parse --short "$base")" >> "$GITHUB_ENV"
+          if [ "$(git rev-parse "HEAD:$CORE")" = "$(git rev-parse "$base:$CORE")" ]; then
+            echo "SAME_SOURCES=true" >> "$GITHUB_ENV"
+          else
+            echo "SAME_SOURCES=false" >> "$GITHUB_ENV"
+            git diff --stat "$base" HEAD -- "$CORE" | tail -30 || true
+          fi
+
+      - name: Tools
+        run: |
+          missing=(gcc-powerpc-linux-gnu qemu-user)
+          for tool in clang:clang ninja:ninja-build ccache:ccache cmake:cmake; do
+            command -v "${tool%%:*}" > /dev/null || missing+=("${tool##*:}")
+          done
+          if ! echo 'int main(){}' | clang++ -x c++ -stdlib=libc++ - -o /tmp/libcxx-probe 2> /dev/null; then
+            missing+=(libc++-dev libc++abi-dev)
+          fi
+          sudo timeout 240 apt-get -o Acquire::Retries=2 update || true
+          sudo timeout 480 apt-get install -y --no-install-recommends "${missing[@]}"
+          clang --version | head -1
+          powerpc-linux-gnu-gcc --version | head -1
+          qemu-aarch64 --version | head -1
+          # lets the benchmark count instructions where the CPU allows it
+          sudo sysctl -w kernel.perf_event_paranoid=1 || true
+
+      - name: The workloads
+        run: |
+          python3 boosted/bench/jit/build-workloads.py "$RUNNER_TEMP/images"
+
+      - name: The xsdk titles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow xsdk-probes.yml --branch xsdk/probes \
+                  --status success --limit 1 --json databaseId --jq '.[0].databaseId' 2> /dev/null || true)
+          if [ -z "$run" ] || ! gh run download "$run" --repo "$GITHUB_REPOSITORY" -n xsdk-probes -D "$RUNNER_TEMP/xsdk"; then
+            echo "::warning::no xsdk-probes artifact could be fetched (run '$run'); the table has the workloads only"
+            echo "XSDK_NOTE=The xsdk titles are missing: no artifact of a green xsdk-probes run could be fetched." >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "xsdk-probes run $run, xsdk at $(cat "$RUNNER_TEMP/xsdk/xsdk-commit.txt" 2> /dev/null)"
+          found=0
+          for name in $XSDK_IMAGES; do
+            file=$(find "$RUNNER_TEMP/xsdk/xex" -name "$name.xex" | head -1)
+            if [ -n "$file" ] && python3 boosted/bench/jit/xex2img.py "$file" "$RUNNER_TEMP/images" "xsdk_${name#xsdk_}"; then
+              found=$((found + 1))
+            else
+              echo "::warning::xsdk title $name is not in the artifact or could not be read"
+            fi
+          done
+          echo "XSDK_NOTE=xsdk titles: $found of $(echo $XSDK_IMAGES | wc -w), from xsdk-probes run $run." >> "$GITHUB_ENV"
+
+      - name: Compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: jit-bench-ccache-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            jit-bench-ccache-${{ github.ref_name }}-
+            jit-bench-ccache-
+
+      # Both builds use the same build directory and reach their sources
+      # through the same link, so the compiler cache serves the second build
+      # every file the two commits share. The rig (boosted/bench) is this
+      # commit's for both.
+      - name: Build this commit
+        run: |
+          export CCACHE_BASEDIR="$RUNNER_TEMP" CCACHE_DIR="$HOME/.cache/ccache"
+          ln -sfn "$RUNNER_TEMP/trees/head" "$RUNNER_TEMP/tree"
+          boosted/bench/tools/ci-build.sh "$PWD/boosted/bench" "$RUNNER_TEMP/tree" \
+            "$RUNNER_TEMP/build" "$RUNNER_TEMP/bin/head"
+          test ! -e "$RUNNER_TEMP/bin/head/FAILED" || { cat "$RUNNER_TEMP/bin/head/FAILED"; exit 1; }
+
+      - name: Build the base
+        if: env.SAME_SOURCES != 'true'
+        run: |
+          export CCACHE_BASEDIR="$RUNNER_TEMP" CCACHE_DIR="$HOME/.cache/ccache"
+          ln -sfn "$RUNNER_TEMP/trees/base" "$RUNNER_TEMP/tree"
+          boosted/bench/tools/ci-build.sh "$PWD/boosted/bench" "$RUNNER_TEMP/tree" \
+            "$RUNNER_TEMP/build" "$RUNNER_TEMP/bin/base"
+          ccache -s | head -12 || true
+          test ! -e "$RUNNER_TEMP/bin/base/FAILED" || { cat "$RUNNER_TEMP/bin/base/FAILED"; exit 1; }
+
+      - name: Run
+        run: |
+          mkdir -p results
+          status=0
+          if [ "$SAME_SOURCES" = true ]; then
+            ln -sfn "$RUNNER_TEMP/bin/head" "$RUNNER_TEMP/bin/base"
+          fi
+          # Turn about, so that a slow minute of the runner falls on both.
+          for round in 1 2 3; do
+            for side in base head; do
+              pages=""
+              [ "$round" = 1 ] && pages=1
+              ROUNDS=1 PAGE_16K=$pages boosted/bench/jit/run-jit.sh "$RUNNER_TEMP/bin/$side/core" \
+                "$RUNNER_TEMP/images" "results/$side.jsonl" || { [ "$side" = head ] && status=1; }
+            done
+          done
+          echo "RUN_STATUS=$status" >> "$GITHUB_ENV"
+
+      - name: Report
+        run: |
+          status=0
+          python3 boosted/bench/jit/jit-report.py --head results/head.jsonl --base results/base.jsonl \
+            --head-name "$GITHUB_REF_NAME at $HEAD_SHA" --base-name "base $BASE_SHA" > results/report.md || status=1
+          echo >> results/report.md
+          echo "$XSDK_NOTE" >> results/report.md
+          cat results/report.md
+          cat results/report.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" != 0 ] || [ "$RUN_STATUS" != 0 ]; then
+            echo "::error::the benchmark of this commit has a wrong result or did not run; see the notes in the table"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jit-bench-${{ env.HEAD_SHA }}
+          path: |
+            results
+            ${{ runner.temp }}/bin/*/*.log
+          retention-days: 30

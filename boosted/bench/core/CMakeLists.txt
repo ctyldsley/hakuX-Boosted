@@ -62,6 +62,7 @@ add_library(xecore SHARED
   "${XE_SRC}/memory.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/bench_env.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/bench_xlat.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/bench_jit.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/bench_sched.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/core_main.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/kernel_shim.cc"

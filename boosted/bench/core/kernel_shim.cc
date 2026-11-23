@@ -265,3 +265,19 @@ xe::kernel::KernelState* CreateKernelState(Env* env) {
 }
 
 }  // namespace bench
+
+// kernel/stall_watchdog.cc (the kernel call ring of the stall watchdog) is
+// not built here: it needs the whole kernel state. The export shims test
+// this flag before they call the two functions, and it stays false.
+namespace xe {
+namespace kernel {
+__attribute__((weak)) bool g_kernel_call_trace_enabled = false;
+__attribute__((weak)) uint32_t KernelCallTraceEnter(
+    cpu::ppc::PPCContext* /*ppc_context*/, const char* /*name*/) {
+  return 0;
+}
+__attribute__((weak)) void KernelCallTraceLeave(
+    cpu::ppc::PPCContext* /*ppc_context*/, uint32_t /*seq*/,
+    uint32_t /*result*/) {}
+}  // namespace kernel
+}  // namespace xe

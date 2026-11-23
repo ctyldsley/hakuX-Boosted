@@ -2,7 +2,7 @@
 // own sources. One suite and one set of settings per process, because the
 // core reads several of its settings once, at start-up.
 //
-//   bench_core --suite=fiber|sched|xlat [--label=TEXT] [--set name=value]...
+//   bench_core --suite=fiber|sched|xlat|jit [--label=TEXT] [--set name=value]...
 //
 // Settings are the core's own configuration variables, looked up by name in
 // its registry. A name this tree does not have is reported and the process
@@ -24,6 +24,7 @@
 
 namespace bench {
 int RunXlatSuite(const std::string& label);
+int RunJitSuite(const std::string& label);
 int RunSchedSuite(const std::string& label, void* slot_address);
 int RunFiberSuite(const std::string& label, void* slot_address);
 }  // namespace bench
@@ -92,12 +93,14 @@ extern "C" __attribute__((visibility("default"))) int bench_core_main(
   int status;
   if (suite == "xlat") {
     status = bench::RunXlatSuite(label);
+  } else if (suite == "jit") {
+    status = bench::RunJitSuite(label);
   } else if (suite == "sched") {
     status = bench::RunSchedSuite(label, slot_address);
   } else if (suite == "fiber") {
     status = bench::RunFiberSuite(label, slot_address);
   } else {
-    std::fprintf(stderr, "bench_core: --suite=fiber, sched or xlat\n");
+    std::fprintf(stderr, "bench_core: --suite=fiber, sched, xlat or jit\n");
     return 2;
   }
   std::fflush(nullptr);

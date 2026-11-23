@@ -65,7 +65,10 @@ struct Env {
 };
 
 // Builds the environment. with_kernel adds the kernel state.
-Env* CreateEnv(bool with_kernel);
+// code_base and code_size: the range of guest code (bench_jit.cc loads whole
+// images; the other suites use the default).
+Env* CreateEnv(bool with_kernel, uint32_t code_base = Env::kCodeBase,
+               uint32_t code_size = Env::kCodeSize);
 
 // kernel_shim.cc
 xe::kernel::KernelState* CreateKernelState(Env* env);

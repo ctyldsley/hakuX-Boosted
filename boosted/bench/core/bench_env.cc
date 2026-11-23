@@ -77,7 +77,7 @@ uint32_t Env::ImportKernelExport(const std::string& name) {
       export_data);
 }
 
-Env* CreateEnv(bool with_kernel) {
+Env* CreateEnv(bool with_kernel, uint32_t code_base, uint32_t code_size) {
   auto* env = new Env();
   env->memory = new xe::Memory();
   if (!env->memory->Initialize()) {
@@ -90,9 +90,10 @@ Env* CreateEnv(bool with_kernel) {
     std::fprintf(stderr, "bench: the ARM64 backend could not be set up\n");
     std::abort();
   }
-  auto* heap = env->memory->LookupHeap(Env::kCodeBase);
+  env->code_cursor = code_base;
+  auto* heap = env->memory->LookupHeap(code_base);
   if (!heap ||
-      !heap->AllocFixed(Env::kCodeBase, Env::kCodeSize, 0,
+      !heap->AllocFixed(code_base, code_size, 0,
                         xe::kMemoryAllocationReserve |
                             xe::kMemoryAllocationCommit,
                         xe::kMemoryProtectRead | xe::kMemoryProtectWrite)) {
@@ -102,7 +103,7 @@ Env* CreateEnv(bool with_kernel) {
   auto module = std::make_unique<xe::cpu::RawModule>(env->processor);
   module->set_name("bench");
   module->set_executable(true);
-  module->SetAddressRange(Env::kCodeBase, Env::kCodeSize);
+  module->SetAddressRange(code_base, code_size);
   env->module = module.get();
   env->processor->AddModule(std::move(module));
   if (with_kernel) {
