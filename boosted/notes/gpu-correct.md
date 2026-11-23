@@ -214,3 +214,64 @@ was found in the code. Needed to tell: a console screenshot of the same spot.
 Phone A/Bs for the darkness (each against the same Gears spot, one change at
 a time): `gamma_render_target_as_unorm16 = false`;
 `kernel_display_gamma_type = 1`; `value_convert_7e3_8888_reuse = false`.
+
+## Banjo-Kazooie Nuts & Bolts: device lost on a cold cache (asked by the lead)
+
+Logs: `device-logs/run148/pl-banjo-off`, `pl-banjo-on`, `banjo158-cold`
+(build 150 with pipeline libraries off and on, and `claude/merge-1123`).
+
+**What the logs say.** The same submission hangs in all three runs, frame
+844, 916 and 910: the first frame of the level (a loading pause before it),
+one submission of 2081 to 2085 draws and 17 resolves into render pass `0x08`,
+last pair VS `9AA6886B4288044A` / PS `976ABFBF89AF47FA`. The ones before it
+in the same frame are small (26 to 241 draws), and the frames before are the
+same few submissions each time. Logcat has no kgsl or page fault line; HWUI's
+"Timeout (500ms) exceeded waiting for buffer fence" comes 4 s before the
+abort, so the GPU ran that submission until the driver gave up: a hang, not a
+bad address. KGSL ends a command batch that runs about 2 s.
+
+In that frame, 269 placeholders had been drawn and 183 were never replaced
+before the loss; all but about 25 run the guest pixel shader through the pixel
+interpreter (`vulkan_placeholder_ps_mode = 3`, the build's default) and all
+use the interpreter's vertex shader. Banjo's pixel shaders are very large
+(200 to 220 KB of SPIR-V each, real pipelines 600 to 1,300 ms to compile).
+The interpreter keeps the 64 guest registers in a dynamically indexed array
+(on Adreno, private memory), fetches and decodes every instruction from a
+uniform buffer, and runs up to 4,096 control-flow steps per pixel. So a few
+large full-screen draws of big uber-shaders through it can take seconds of
+GPU time. The run that lost the device with shared stand-ins
+(`boosted/notes/standin-device-lost.md`) had the same shape: a load surge of
+pixel-interpreter placeholders, then a hang 1.6 s after HWUI's timeout. Fable
+II's shaders are smaller and it does not lose the device.
+
+**Most likely cause: GPU time of the pixel interpreter in one submission,
+past the driver's limit.** Not proven: nothing in the log says how long each
+draw took. No infinite loop is possible in the interpreter (bounded at 4,096
+steps); I found no out-of-bounds descriptor path for these draws.
+
+**The diagnostic (commit after `beb3e46`).** The submission history printed
+on device loss now gives, per submission: draws with a placeholder, draws
+with the interpreter's vertex shader and their vertices, draws with the pixel
+interpreter, how many of those have loops, the largest program, and a cost
+(program elements times scissor area / 1024, an upper bound). If the hanging
+submission's pixel-interpreter cost stands far above the others', the cause
+is confirmed.
+
+**Phone runs** (each cold: shader cache cleared, as before; `COOL=35`):
+1. The diagnostic, defaults:
+   `tools/run-one.sh banjo-diag device-logs/run148/cfg/pl-off.toml 4D5307ED "/storage/emulated/0/Roms/Banjo-Kazooie Nuts & Bolts.iso" 90 1`
+   Read the `recent submission history` lines at the end of `xe.log`.
+2. The A/B that tests the cause with settings that exist: the same config
+   with `vulkan_placeholder_ps_mode = 2` (placeholders kept, pixel
+   interpreter off: the cheap stand-in pixel shader instead). Label
+   `banjo-ps2`. If the device survives where run 1 did not, the pixel
+   interpreter's GPU time is the cause.
+3. If 2 still loses the device: `vulkan_placeholder_interpreter = 0` (no
+   interpreter vertex shader either), label `banjo-interp0`.
+
+**The fix, once confirmed** (not written yet: a new setting in this area
+before the others are measured breaks the plan's rule 1): bound the pixel
+interpreter's work per submission. Either refuse it for programs over a size
+or with loops (a new refusal reason next to "too large") so those get the
+stand-in, or end the submission (as `vulkan_mid_frame_submission_draws`
+does) once the summed cost passes a budget. Run 1's numbers pick the budget.

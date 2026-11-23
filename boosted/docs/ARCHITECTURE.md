@@ -200,6 +200,7 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/base/mutex.cc` | On Android `gettid()` is bionic's, which does not go through the TLS resolver (asked for by `claude/guest-waits`) |
 | `xenia/gpu/vulkan/vulkan_command_processor.cc` (`IssueCopy`) | `readback_resolve = uma`: a later resolve of a destination the CPU reads is drained and read at once (its own pixels, not the previous resolve's), as upstream's fast mode with `readback_resolve_sync`; destinations the CPU never reads are not copied; `readback_resolve_sync = false` keeps the old one-behind read (`boosted/notes/gpu-correct.md`) |
 | `xenia/gpu/shaders/ucode_program.glsli`, `ucode_program_vertex.glsli`, `ucode_interpreter.vs.glsl`, `ucode_interpreter_stand_in.vs.glsl` | The placeholder vertex interpreters' position `invariant` and their arithmetic `precise`, as the translator's Invariant and NoContraction, so placeholder and real draws of one mesh give the same depth (`boosted/notes/gpu-correct.md`) |
+| `xenia/gpu/vulkan/vulkan_command_processor.cc`, `.h` (`SubmissionSummary`) | The device-loss submission history also gives each submission's placeholder load: placeholder draws, interpreter vertex shader draws and vertices, pixel interpreter draws, those with loops, the largest program and a cost bound (`boosted/notes/gpu-correct.md`, Banjo) |
 
 ## Taking a newer hakuX
 
