@@ -26,8 +26,8 @@ functions translated after it is set (set it in the config before the title).
 
 | Guest access | Level 0 | Level 1 | Level 2 |
 |---|---|---|---|
-| Load, 8/16/32/64-bit (incl. floating point, byte-swapped) | `ldr` | `ldr; dmb ishld` | `add x16, membase, addr; ldapr` (then `rev`/`fmov` as before) |
-| Store, 8/16/32/64-bit | `str` | `dmb ishst; str` | `add x16, membase, addr; stlr` (value `rev`ed or `fmov`ed into w17/x17 first, as before) |
+| Load, 8/16/32/64-bit (incl. floating point, byte-swapped) | `ldr` | `ldr; dmb ishld` | `tst` alignment; aligned: `add x16, membase, addr; ldapr`; unaligned: `ldr; dmb ishld` (then `rev`/`fmov` as before) |
+| Store, 8/16/32/64-bit | `str` | `dmb ishst; str` | `tst` alignment; aligned: `add x16, membase, addr; stlr`; unaligned: `dmb ish; str` (value `rev`ed or `fmov`ed as before) |
 | Load, 128-bit (`lvx`, `lvlx`, `lvrx`) | `ldr q` | `ldr q; dmb ishld` | `ldr q; dmb ishld` |
 | Store, 128-bit (`stvx`, `stvlx`, `stvrx`) | `str q` | `dmb ishst; str q` | `dmb ishst; str q` |
 | `dcbz` (MEMSET) | stores | `dmb ishst` first | `dmb ishst` first |
@@ -42,6 +42,34 @@ them). Level 2 is emitted inside the sequences (`a64_seq_memory.cc`,
 `a64_seq_vector.cc`) through `GuestLdr`/`GuestStr` and friends in
 `a64_seq_util.h`, which emit exactly the old instruction when an access is not
 ordered.
+
+### Unaligned accesses (the first phone run crashed)
+
+The first build crashed Gears of War at frame 0, 6 of 6 launches (combined
+build `claude/merge-1123`, aa51fa3; level 0 on the same build ran). The
+guest instruction was `std r10, 0x10(r11)` at 0x82AA7668 with r11 =
+0x82BC52BC: an 8-byte store to 0x82BC52CC, which is 4-byte aligned only and
+crosses a 16-byte boundary. `STLR` and `LDAPR` need natural alignment
+(FEAT_LSE2 relaxes that only inside a 16-byte granule), so it took an
+alignment fault. The crash dump called it "Access Violation: write": the
+POSIX handler turns SIGBUS and SIGSEGV alike into an access violation and
+takes the direction from the ESR, so the label is generic, not wrong about
+the direction. Its "Faulting instruction: 0xF94B0010" is the guest word at
+the guest PC (that `std`), not a host instruction.
+
+Fix: every 2, 4 or 8-byte ordered access now emits
+`tst addr, #size-1; b.ne unaligned`, then `add x16; LDAPR/STLR` on the
+aligned path. The unaligned path is the plain instruction with
+`dmb ish` before a store or `dmb ishld` after a load, so it stays ordered.
+Byte accesses need no test. One `tst` and one predicted branch per ordered
+access is the added cost; unaligned accesses pay a barrier.
+
+Write watches (shared memory, code-write watch): the fault address of an
+`LDAPR`/`STLR` is the exact guest byte as for `ldr`/`str`, and on Android the
+direction comes from the ESR, so they are recognised. Where no ESR is
+available (and on Mac) the direction is decoded from the instruction:
+`IsArm64LoadPrefetchStore` read `LDAPR` as a store (it sits in the atomic
+operation space); it now reads it as a load. `STLR` was already a store.
 
 ### Why LDAPR and STLR give TSO
 
