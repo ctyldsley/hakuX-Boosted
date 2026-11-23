@@ -13,6 +13,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/ppc/ppc_frontend.h"  // hakuX-Boosted: PPCBuiltins for icbi
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 
 DEFINE_bool(
