@@ -54,6 +54,11 @@ layout(std430, set = 0, binding = 0) readonly buffer xe_up_shared_memory_block {
 #define XE_UP_VERTEX_KILL_OR 0x1u
 
 layout(location = 0) out vec4 xe_up_out_interpolators[16];
+// hakuX-Boosted: as the translator decorates the position Invariant and its
+// arithmetic NoContraction, so a mesh drawn once through a placeholder and
+// once through its real pipeline (a depth pre-pass, a stencil shadow volume's
+// cap, a decal at equal depth) gets the same depth to the last bit.
+invariant gl_Position;
 #if XE_UP_HOST == XE_UP_HOST_POINT_STRIP
 layout(location = 16) out vec2 xe_up_out_point_coordinates;
 #endif
@@ -349,11 +354,12 @@ void main() {
 
   // The guest's position to the host's clip space.
   uint flags = xe_up_sys[0].x;
-  float w = xe_up_position.w;
+  // hakuX-Boosted: precise, see gl_Position's declaration.
+  precise float w = xe_up_position.w;
   if ((flags & XE_UP_SYS_FLAG_W_NOT_RECIPROCAL) == 0u) {
     w = 1.0 / w;
   }
-  vec3 xyz = xe_up_position.xyz;
+  precise vec3 xyz = xe_up_position.xyz;
   if ((flags & XE_UP_SYS_FLAG_XY_DIVIDED_BY_W) != 0u) {
     xyz.xy *= w;
   }

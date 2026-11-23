@@ -198,6 +198,8 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/kernel/stall_watchdog.cc`, `.h` (new), `kernel/kernel_state.cc` | `stall_watchdog` (default on, observes only) and `stall_watchdog_seconds` (10): a 1 s host thread writes one `STALL REPORT` when frames present but no guest thread other than the swap thread has made a kernel call for that long; started in `KernelState`'s constructor, stopped first in its destructor |
 | `xenia/kernel/util/shim_utils.h`, `kernel/xthread.h` | `X::Trampoline` records every kernel call in the calling thread's 16-entry ring; `XThread::kernel_call_trace_` holds it |
 | `xenia/base/mutex.cc` | On Android `gettid()` is bionic's, which does not go through the TLS resolver (asked for by `claude/guest-waits`) |
+| `xenia/gpu/vulkan/vulkan_command_processor.cc` (`IssueCopy`) | `readback_resolve = uma`: a later resolve of a destination the CPU reads is drained and read at once (its own pixels, not the previous resolve's), as upstream's fast mode with `readback_resolve_sync`; destinations the CPU never reads are not copied; `readback_resolve_sync = false` keeps the old one-behind read (`boosted/notes/gpu-correct.md`) |
+| `xenia/gpu/shaders/ucode_program.glsli`, `ucode_program_vertex.glsli`, `ucode_interpreter.vs.glsl`, `ucode_interpreter_stand_in.vs.glsl` | The placeholder vertex interpreters' position `invariant` and their arithmetic `precise`, as the translator's Invariant and NoContraction, so placeholder and real draws of one mesh give the same depth (`boosted/notes/gpu-correct.md`) |
 
 ## Taking a newer hakuX
 

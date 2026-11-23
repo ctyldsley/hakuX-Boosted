@@ -479,6 +479,10 @@ void XeRunInterp(uint cf_instr_count, float vertex_index) {
 #define XE_SYS_FLAG_Z_DIVIDED_BY_W 0x10u
 #define XE_SYS_FLAG_W_NOT_RECIPROCAL 0x20u
 
+// hakuX-Boosted: as the translator's position, Invariant and computed without
+// fused multiply-adds (ucode_program_vertex.glsli says why).
+invariant gl_Position;
+
 void main() {
   // Match the SPIR-V VS r0 seed: endian-swapped host index plus the base index.
   int index =
@@ -489,13 +493,13 @@ void main() {
   // Guest clip-space position to host NDC, matching the translated VS output.
   uint flags = XeFlags();
   vec4 p = xe_out_pos;
-  float w = p.w;
+  precise float w = p.w;
   if ((flags & XE_SYS_FLAG_W_NOT_RECIPROCAL) == 0u) w = 1.0 / w;  // guest 1/W
-  vec2 xy = p.xy;
+  precise vec2 xy = p.xy;
   if ((flags & XE_SYS_FLAG_XY_DIVIDED_BY_W) != 0u) xy = xy * w;   // revert XY/W
-  float z = p.z;
+  precise float z = p.z;
   if ((flags & XE_SYS_FLAG_Z_DIVIDED_BY_W) != 0u) z = z * w;      // revert Z/W
-  vec3 xyz = vec3(xy, z) * XeNdcScale() + XeNdcOffset() * w;
+  precise vec3 xyz = vec3(xy, z) * XeNdcScale() + XeNdcOffset() * w;
 
   // Vertex kill: a non-zero oPts.z degenerates the vertex to NaN (OR-mode cull).
   if ((floatBitsToUint(xe_kill) & 0x7FFFFFFFu) != 0u)

@@ -176,8 +176,9 @@ void XeUpAlu(uvec4 ins) {
   bool abs_constants = (ins.x & 0x80u) != 0u;
   bool a0_relative = (ins.y & 0x20000000u) != 0u;
 
-  // The vector operation.
-  vec4 vector_result = vec4(0.0);
+  // The vector operation. hakuX-Boosted: this and the scalar result
+  // precise, as the translator's NoContraction: no multiply and add fused.
+  precise vec4 vector_result = vec4(0.0);
   if ((info & XE_UP_ALU_VECTOR_RUNS) != 0u) {
     uint operand_count = (info >> XE_UP_ALU_VECTOR_OPERANDS_SHIFT) & 3u;
     vec4 a = XeUpOperand((ins.z >> 16) & 0xFFu, (ins.z & 0x80000000u) != 0u,
@@ -349,7 +350,7 @@ void XeUpAlu(uvec4 ins) {
         b = -b;
       }
     }
-    float ps = xe_up_ps;
+    precise float ps = xe_up_ps;
     if (scalar_op < 16u) {
       if (scalar_op < 8u) {
         if (scalar_op < 4u) {
