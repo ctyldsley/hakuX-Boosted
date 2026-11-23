@@ -56,6 +56,14 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
    public:
     virtual ~PipelineLayoutProvider() {}
     virtual VkPipelineLayout GetPipelineLayout() const = 0;
+    // hakuX-Boosted: the layout a pipeline library of this layout's shaders
+    // is created with (boosted/notes/pipeline-libraries.md): for the
+    // fragment shader's library or for the library of the stages before
+    // rasterisation. With independent sets it names only the sets those
+    // stages use; otherwise it is the whole layout.
+    virtual VkPipelineLayout GetLibraryPipelineLayout(bool fragment) const {
+      return GetPipelineLayout();
+    }
 
    protected:
     PipelineLayoutProvider() = default;
@@ -539,6 +547,18 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   };
   uint32_t standin_static_mask() const { return standin_static_mask_; }
 
+  // hakuX-Boosted: boosted/notes/pipeline-libraries.md. Whether real
+  // pipelines are linked from libraries on this device
+  // (vulkan_pipeline_libraries, with the extension, its feature and
+  // independent interpolation decoration), and whether the libraries'
+  // layouts name only their own stages' sets
+  // (vulkan_pipeline_libraries_independent_sets), in which case every guest
+  // pipeline layout is created with the independent sets flag. Any thread.
+  static bool ArePipelineLibrariesUsable(
+      const ui::vulkan::VulkanDevice* vulkan_device);
+  static bool ArePipelineLibraryLayoutsIndependent(
+      const ui::vulkan::VulkanDevice* vulkan_device);
+
   // True while this draw must be fed the ucode interpreter's inputs (full float
   // constants + ucode location). False once hot-swapped to the real VS.
   static bool IsInterpreterPlaceholder(const Pipeline* pipeline) {
@@ -742,6 +762,10 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     const PipelineLayoutProvider* placeholder_layout = nullptr;
     // hakuX-Boosted: for Kind::kStandIn, a SharedStandIn.
     void* stand_in = nullptr;
+    // hakuX-Boosted: only link the pipeline from libraries that are ready
+    // (vulkan_pipeline_libraries_inline_link): EnsurePipelineCreated returns
+    // false, having compiled nothing, if a shader's library is not.
+    bool link_only = false;
   };
 
   // hakuX-Boosted: priorities of the jobs this fork adds, above every real
@@ -1123,6 +1147,117 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
   uint64_t stand_in_slots_later_ = 0;
   uint64_t stand_in_slots_never_ = 0;
   uint64_t stand_in_record_loaded_ = 0;
+
+  // hakuX-Boosted: pipelines linked from libraries
+  // (vulkan_pipeline_libraries, boosted/notes/pipeline-libraries.md).
+  enum PipelineLibraryPart : uint32_t {
+    kLibraryVertexInput,
+    kLibraryPreRasterization,
+    kLibraryFragmentShader,
+    kLibraryFragmentOutput,
+    kLibraryPartCount,
+  };
+  // Exactly what the driver is given for one library: the modules, the
+  // layout and the render pass by their handles, and every static value in
+  // the order CreatePipelineFromLibraries writes them.
+  struct PipelineLibraryKey {
+    static constexpr uint32_t kMaxWords = 64;
+    uint64_t modules[4];
+    uint64_t layout;
+    uint64_t render_pass;
+    uint32_t part;
+    uint32_t word_count;
+    uint32_t words[kMaxWords];
+
+    PipelineLibraryKey() { std::memset(this, 0, sizeof(*this)); }
+    PipelineLibraryKey(const PipelineLibraryKey& key) {
+      std::memcpy(this, &key, sizeof(*this));
+    }
+    PipelineLibraryKey& operator=(const PipelineLibraryKey& key) {
+      std::memcpy(this, &key, sizeof(*this));
+      return *this;
+    }
+    bool operator==(const PipelineLibraryKey& key) const {
+      return std::memcmp(this, &key, sizeof(*this)) == 0;
+    }
+    // False if the key is full: the caller then makes no library.
+    bool Add(uint32_t word) {
+      if (word_count >= kMaxWords) {
+        return false;
+      }
+      words[word_count++] = word;
+      return true;
+    }
+    struct Hasher {
+      size_t operator()(const PipelineLibraryKey& key) const {
+        return size_t(XXH3_64bits(&key, sizeof(key)));
+      }
+    };
+  };
+  struct PipelineLibrary {
+    enum : uint32_t { kCreating, kReady, kFailed };
+    // Both under pipeline_libraries_lock_.
+    uint32_t state = kCreating;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+  };
+  // The library of the key, made here (with create_info) if no thread has
+  // made it or is making it; a thread that finds it being made waits for it.
+  // VK_NULL_HANDLE if it could not be made. With find_only a shader library
+  // (not an interface one, which compiles nothing) is never made or waited
+  // for here: not_ready_out is then set and VK_NULL_HANDLE returned. Any
+  // thread.
+  VkPipeline GetOrCreatePipelineLibrary(
+      const PipelineLibraryKey& key,
+      const VkGraphicsPipelineCreateInfo& create_info, bool find_only,
+      bool& not_ready_out);
+  // Links a real pipeline from its four libraries, given the create info
+  // EnsurePipelineCreated has filled for the whole pipeline. False, with
+  // nothing to undo, if a library or the link failed (the caller then
+  // compiles the pipeline whole) or, with link_only, if a shader's library
+  // is not ready. Any thread.
+  bool CreatePipelineFromLibraries(
+      const VkGraphicsPipelineCreateInfo& pipeline_create_info,
+      const VkPipelineRenderingCreateInfo* rendering_create_info,
+      const PipelineLayoutProvider* layout_provider, bool link_only,
+      VkPipeline& pipeline_out);
+  // A new slot whose shaders are translated is linked on the GPU command
+  // thread if its libraries are ready and the frame's budget is not spent
+  // (vulkan_pipeline_libraries_inline_link). GPU command thread only.
+  bool TryLinkPipelineInline(PipelineCreationArguments creation_arguments,
+                             bool layout_counts_complete);
+  // Set once in Initialize.
+  bool pipeline_libraries_active_ = false;
+  bool pipeline_libraries_independent_sets_ = false;
+  bool pipeline_libraries_fast_linking_ = false;
+  std::mutex pipeline_libraries_lock_;
+  std::condition_variable pipeline_libraries_cond_;
+  std::unordered_map<PipelineLibraryKey, PipelineLibrary,
+                     PipelineLibraryKey::Hasher>
+      pipeline_libraries_;
+  // What is left of vulkan_pipeline_libraries_inline_link_frame_us in this
+  // guest frame. The GPU command thread's alone.
+  int64_t inline_link_left_us_ = 0;
+  // Counters for the 'placeholder cover: pipeline libraries:' line.
+  std::atomic<uint64_t> libraries_created_[kLibraryPartCount] = {};
+  std::atomic<uint64_t> libraries_created_us_[kLibraryPartCount] = {};
+  std::atomic<uint64_t> libraries_slowest_us_[kLibraryPartCount] = {};
+  std::atomic<uint64_t> libraries_found_[kLibraryPartCount] = {};
+  std::atomic<uint64_t> libraries_waited_[kLibraryPartCount] = {};
+  std::atomic<uint64_t> libraries_failed_[kLibraryPartCount] = {};
+  std::atomic<uint64_t> library_links_{0};
+  std::atomic<uint64_t> library_links_us_{0};
+  std::atomic<uint64_t> library_links_slowest_us_{0};
+  std::atomic<uint64_t> library_links_compiled_nothing_{0};
+  std::atomic<uint64_t> library_fallbacks_library_{0};
+  std::atomic<uint64_t> library_fallbacks_link_{0};
+  std::atomic<uint64_t> library_fallbacks_key_{0};
+  // The GPU command thread's alone.
+  uint64_t inline_links_ = 0;
+  uint64_t inline_links_us_ = 0;
+  uint64_t inline_links_slowest_us_ = 0;
+  uint64_t inline_links_not_ready_ = 0;
+  uint64_t inline_links_over_budget_ = 0;
+  uint64_t inline_links_untranslated_ = 0;
   uint32_t stand_in_render_pass_last_ = UINT32_MAX;
 
   VulkanCommandProcessor& command_processor_;

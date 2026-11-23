@@ -410,6 +410,38 @@ DEFINE_int32(
     "all of them, 0 none.",
     "Vulkan");
 
+// hakuX-Boosted: boosted/notes/pipeline-libraries.md. The master switch,
+// vulkan_pipeline_libraries, is defined with the device
+// (ui/vulkan/vulkan_device.cc), which has to enable the extensions.
+DECLARE_bool(vulkan_pipeline_libraries);
+DEFINE_bool(
+    vulkan_pipeline_libraries_independent_sets, true,
+    "With vulkan_pipeline_libraries: a shader's library is created with a "
+    "pipeline layout that names only the descriptor sets of its own stage, "
+    "so that the library of a vertex shader does not depend on how many "
+    "textures the pixel shader it is paired with has (and the other way "
+    "round), and every guest pipeline layout is created with the "
+    "independent sets flag, as the specification then asks. Off: a library "
+    "is created with the whole layout of the pair of shaders it was first "
+    "needed for, and a vertex shader paired with pixel shaders of other "
+    "texture counts gets another library. Needs a restart.",
+    "Vulkan");
+DEFINE_bool(
+    vulkan_pipeline_libraries_inline_link, false,
+    "With vulkan_pipeline_libraries, on a device whose driver says linking "
+    "is fast: a new pipeline whose shaders are translated and whose "
+    "libraries are all ready is linked on the GPU command thread at the "
+    "draw that first needs it, instead of on a creation thread, so that "
+    "draw is drawn with the real pipeline and needs no placeholder. Bounded "
+    "by vulkan_pipeline_libraries_inline_link_frame_us.",
+    "Vulkan");
+DEFINE_int32(
+    vulkan_pipeline_libraries_inline_link_frame_us, 2000,
+    "With vulkan_pipeline_libraries_inline_link: the most time, in "
+    "microseconds, links on the GPU command thread may take in one guest "
+    "frame. Once it is spent, the frame's other new pipelines go to the "
+    "creation threads as without the setting.",
+    "Vulkan");
 DEFINE_bool(
     vulkan_dynamic_pipeline_state, true,
     "Use VK_EXT_extended_dynamic_state (and state 2/3 where available) to move "
@@ -630,6 +662,34 @@ bool VulkanPipelineCache::Initialize() {
     }
     standin_static_mask_ =
         uint32_t(cvars::vulkan_standin_dynamic_state_mask) & supported_static;
+  }
+
+  // hakuX-Boosted: pipelines from libraries
+  // (boosted/notes/pipeline-libraries.md).
+  pipeline_libraries_active_ = ArePipelineLibrariesUsable(vulkan_device);
+  pipeline_libraries_independent_sets_ =
+      ArePipelineLibraryLayoutsIndependent(vulkan_device);
+  pipeline_libraries_fast_linking_ =
+      pipeline_libraries_active_ &&
+      vulkan_device->properties().graphicsPipelineLibraryFastLinking;
+  inline_link_left_us_ = int64_t(
+      std::max(int32_t(0), cvars::vulkan_pipeline_libraries_inline_link_frame_us));
+  if (cvars::vulkan_pipeline_libraries) {
+    XELOGI(
+        "pipeline libraries: vulkan_pipeline_libraries is set: real pipelines "
+        "are {} (independent sets {}, links on the GPU command thread {})",
+        pipeline_libraries_active_
+            ? "linked from libraries"
+            : "built whole as before, because the device does not offer "
+              "VK_EXT_graphics_pipeline_library with independent "
+              "interpolation decoration",
+        pipeline_libraries_independent_sets_ ? "yes" : "no",
+        pipeline_libraries_active_ &&
+                cvars::vulkan_pipeline_libraries_inline_link
+            ? (pipeline_libraries_fast_linking_
+                   ? "yes"
+                   : "no: the driver does not say linking is fast")
+            : "no");
   }
 
   if (!guest_shader_cache_.Initialize()) {
@@ -975,6 +1035,14 @@ void VulkanPipelineCache::Shutdown() {
   shared_stand_ins_.clear();
   stand_in_render_passes_.clear();
   stand_in_render_pass_last_ = UINT32_MAX;
+  // hakuX-Boosted: the pipeline libraries, after the pipelines linked from
+  // them. The creation threads are gone, so nothing is being made.
+  for (const auto& library_pair : pipeline_libraries_) {
+    if (library_pair.second.pipeline != VK_NULL_HANDLE) {
+      dfn.vkDestroyPipeline(device, library_pair.second.pipeline, nullptr);
+    }
+  }
+  pipeline_libraries_.clear();
 
   // Destroy the pipeline cache.
   if (vk_pipeline_cache_ != VK_NULL_HANDLE) {
@@ -1447,6 +1515,22 @@ bool VulkanPipelineCache::ConfigurePipeline(
   creation_arguments.tessellation_control_shader = tessellation_control_shader;
   creation_arguments.render_pass = render_pass;
   creation_arguments.render_pass_key = render_pass_key;
+
+  // hakuX-Boosted: with vulkan_pipeline_libraries_inline_link, a new slot
+  // whose libraries are ready is linked here and now: it never has a
+  // placeholder and no job is queued for it
+  // (boosted/notes/pipeline-libraries.md). Otherwise everything below is as
+  // it was.
+  if (pipeline_libraries_active_ && pipeline_libraries_fast_linking_ &&
+      cvars::vulkan_pipeline_libraries_inline_link &&
+      TryLinkPipelineInline(creation_arguments, layout_counts_complete)) {
+    if (IsAheadActive()) {
+      NoteRealPipeline(pipeline_pair, false);
+    }
+    last_pipeline_ = &pipeline_pair;
+    *pipeline_out = &pipeline_pair.second;
+    return true;
+  }
 
   if (cvars::vulkan_placeholder_pipelines) {
     // === UPSTREAM: placeholder hot-swap async model ===
@@ -2759,6 +2843,9 @@ bool VulkanPipelineCache::IsFullscreenRealPipelineWaited() const {
 void VulkanPipelineCache::NoteFrameBoundary() {
   placeholder_wait_left_ms_ =
       double(std::max(int32_t(0), cvars::vulkan_placeholder_async_wait_ms));
+  // hakuX-Boosted: vulkan_pipeline_libraries_inline_link.
+  inline_link_left_us_ = int64_t(
+      std::max(int32_t(0), cvars::vulkan_pipeline_libraries_inline_link_frame_us));
   UpdateCreationPolicy(true);
 }
 
@@ -3536,7 +3623,10 @@ void VulkanPipelineCache::LogStatsIfDue() {
   const bool ahead = cvars::shader_ahead;
   const bool cover = cvars::vulkan_placeholder_pipelines &&
                      cvars::shader_profiling;
-  if (!ahead && !cover) {
+  // hakuX-Boosted: the line of boosted/notes/pipeline-libraries.md, whichever
+  // model the placeholders are.
+  const bool libraries = pipeline_libraries_active_ && cvars::shader_profiling;
+  if (!ahead && !cover && !libraries) {
     return;
   }
   uint64_t now_ms = xe::Clock::QueryHostUptimeMillis();
@@ -3584,6 +3674,22 @@ void VulkanPipelineCache::LogStatsIfDue() {
                stand_in_slots_ready_ * 61 + stand_in_slots_waited_ * 67 +
                stand_in_slots_later_ * 71 + stand_in_slots_never_ * 73 +
                stand_ins_failed_.load(std::memory_order_relaxed) * 79;
+  // hakuX-Boosted: and the pipeline libraries.
+  uint64_t libraries_created_all = 0, libraries_found_all = 0;
+  for (uint32_t i = 0; i < kLibraryPartCount; ++i) {
+    libraries_created_all +=
+        libraries_created_[i].load(std::memory_order_relaxed);
+    libraries_found_all += libraries_found_[i].load(std::memory_order_relaxed);
+  }
+  signature += libraries_created_all * 83 + libraries_found_all * 89 +
+               library_links_.load(std::memory_order_relaxed) * 97 +
+               (inline_links_not_ready_ + inline_links_over_budget_ +
+                inline_links_untranslated_) *
+                   101 +
+               (library_fallbacks_library_.load(std::memory_order_relaxed) +
+                library_fallbacks_link_.load(std::memory_order_relaxed) +
+                library_fallbacks_key_.load(std::memory_order_relaxed)) *
+                   103;
   if (signature == stats_logged_signature_) {
     return;
   }
@@ -3622,7 +3728,7 @@ void VulkanPipelineCache::LogStatsIfDue() {
         speculative_dropped_.load(std::memory_order_relaxed),
         speculative_refused_budget_);
   }
-  if (cover) {
+  if (cover || libraries) {
     uint64_t by_seen_count[3];
     double by_seen_ms[3];
     {
@@ -3641,6 +3747,85 @@ void VulkanPipelineCache::LogStatsIfDue() {
         by_seen_count[1] ? by_seen_ms[1] / double(by_seen_count[1]) : 0.0,
         by_seen_count[2], by_seen_ms[2],
         by_seen_count[2] ? by_seen_ms[2] / double(by_seen_count[2]) : 0.0);
+  }
+  // hakuX-Boosted: boosted/notes/pipeline-libraries.md. A third line with the
+  // same first words.
+  if (libraries) {
+    uint64_t created[kLibraryPartCount], found[kLibraryPartCount],
+        waited[kLibraryPartCount], failed[kLibraryPartCount];
+    double created_ms[kLibraryPartCount], slowest_ms[kLibraryPartCount];
+    for (uint32_t i = 0; i < kLibraryPartCount; ++i) {
+      created[i] = libraries_created_[i].load(std::memory_order_relaxed);
+      found[i] = libraries_found_[i].load(std::memory_order_relaxed);
+      waited[i] = libraries_waited_[i].load(std::memory_order_relaxed);
+      failed[i] = libraries_failed_[i].load(std::memory_order_relaxed);
+      created_ms[i] =
+          double(libraries_created_us_[i].load(std::memory_order_relaxed)) /
+          1000.0;
+      slowest_ms[i] =
+          double(libraries_slowest_us_[i].load(std::memory_order_relaxed)) /
+          1000.0;
+    }
+    uint64_t links = library_links_.load(std::memory_order_relaxed);
+    double links_ms =
+        double(library_links_us_.load(std::memory_order_relaxed)) / 1000.0;
+    XELOGI(
+        "placeholder cover: pipeline libraries: on (independent sets {}, "
+        "fast linking {}, links on the GPU command thread {}); libraries "
+        "created: vertex input {} ({:.1f} ms), vertex side {} ({:.0f} ms, "
+        "mean {:.1f}, slowest {:.1f}), fragment {} ({:.0f} ms, mean {:.1f}, "
+        "slowest {:.1f}), fragment output {} ({:.1f} ms, slowest {:.1f}); "
+        "found ready: vertex side {}, fragment {}, fragment output {}; "
+        "waited for another thread's: vertex side {}, fragment {}; failed: "
+        "vertex input {}, vertex side {}, fragment {}, fragment output {}; "
+        "pipelines linked {} ({:.1f} ms, mean {:.3f}, slowest {:.3f}), of "
+        "those with every library found ready {}, of those on the GPU "
+        "command thread {} ({:.1f} ms, slowest {:.3f}); links on the GPU "
+        "command thread refused: a library not ready {}, over the frame's "
+        "budget {}, shaders not translated {}; pipelines that fell back to a "
+        "whole compile {} (a library failed {}, the link failed {}, the key "
+        "was full {})",
+        pipeline_libraries_independent_sets_ ? "yes" : "no",
+        pipeline_libraries_fast_linking_ ? "yes" : "no",
+        cvars::vulkan_pipeline_libraries_inline_link &&
+                pipeline_libraries_fast_linking_
+            ? "yes"
+            : "no",
+        created[kLibraryVertexInput], created_ms[kLibraryVertexInput],
+        created[kLibraryPreRasterization],
+        created_ms[kLibraryPreRasterization],
+        created[kLibraryPreRasterization]
+            ? created_ms[kLibraryPreRasterization] /
+                  double(created[kLibraryPreRasterization])
+            : 0.0,
+        slowest_ms[kLibraryPreRasterization], created[kLibraryFragmentShader],
+        created_ms[kLibraryFragmentShader],
+        created[kLibraryFragmentShader]
+            ? created_ms[kLibraryFragmentShader] /
+                  double(created[kLibraryFragmentShader])
+            : 0.0,
+        slowest_ms[kLibraryFragmentShader], created[kLibraryFragmentOutput],
+        created_ms[kLibraryFragmentOutput], slowest_ms[kLibraryFragmentOutput],
+        found[kLibraryPreRasterization], found[kLibraryFragmentShader],
+        found[kLibraryFragmentOutput], waited[kLibraryPreRasterization],
+        waited[kLibraryFragmentShader], failed[kLibraryVertexInput],
+        failed[kLibraryPreRasterization], failed[kLibraryFragmentShader],
+        failed[kLibraryFragmentOutput], links, links_ms,
+        links ? links_ms / double(links) : 0.0,
+        double(library_links_slowest_us_.load(std::memory_order_relaxed)) /
+            1000.0,
+        library_links_compiled_nothing_.load(std::memory_order_relaxed),
+        inline_links_, double(inline_links_us_) / 1000.0,
+        double(inline_links_slowest_us_) / 1000.0, inline_links_not_ready_,
+        inline_links_over_budget_, inline_links_untranslated_,
+        library_fallbacks_library_.load(std::memory_order_relaxed) +
+            library_fallbacks_link_.load(std::memory_order_relaxed) +
+            library_fallbacks_key_.load(std::memory_order_relaxed),
+        library_fallbacks_library_.load(std::memory_order_relaxed),
+        library_fallbacks_link_.load(std::memory_order_relaxed),
+        library_fallbacks_key_.load(std::memory_order_relaxed));
+  }
+  if (cover) {
     XELOGI(
         "placeholder cover: draws skipped {} (vertex shader not translated "
         "{}, no placeholder {}, placeholder compiling {}, over the "
@@ -6109,9 +6294,34 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   if (profile) {
     pso_create_start = std::chrono::steady_clock::now();
   }
-  VkPipeline pipeline;
-  VkResult result = dfn.vkCreateGraphicsPipelines(
-      device, vk_pipeline_cache_, 1, &pipeline_create_info, nullptr, &pipeline);
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  // hakuX-Boosted: a real pipeline (no module or layout of a placeholder or
+  // a stand-in) is linked from libraries with vulkan_pipeline_libraries
+  // (boosted/notes/pipeline-libraries.md). If a library or the link fails,
+  // the pipeline is compiled whole below, as without the setting; a slot
+  // that only wanted a link (link_only) is left for its creation job.
+  bool pipeline_from_libraries = false;
+  if (pipeline_libraries_active_ && !creating_placeholder &&
+      vertex_shader_override == VK_NULL_HANDLE && layout_override == nullptr &&
+      creation_arguments.kind == PipelineCreationArguments::Kind::kReal) {
+    pipeline_from_libraries = CreatePipelineFromLibraries(
+        pipeline_create_info,
+        use_dynamic_rendering ? &pipeline_rendering_create_info : nullptr,
+        creation_arguments.pipeline->second.pipeline_layout.load(
+            std::memory_order_acquire),
+        creation_arguments.link_only, pipeline);
+    if (!pipeline_from_libraries && creation_arguments.link_only) {
+      return false;
+    }
+  } else if (creation_arguments.link_only) {
+    return false;
+  }
+  VkResult result =
+      pipeline_from_libraries
+          ? VK_SUCCESS
+          : dfn.vkCreateGraphicsPipelines(device, vk_pipeline_cache_, 1,
+                                          &pipeline_create_info, nullptr,
+                                          &pipeline);
   if (result == VK_SUCCESS) {
     // Mark the persistent VkPipelineCache dirty so EndSubmission re-saves it.
     vk_pipeline_cache_dirty_.store(true, std::memory_order_relaxed);
@@ -6301,6 +6511,548 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
                : 0);
   }
 
+  return true;
+}
+
+// hakuX-Boosted: from here to ProcessDeferredDestructions, pipelines linked
+// from libraries (vulkan_pipeline_libraries,
+// boosted/notes/pipeline-libraries.md).
+
+bool VulkanPipelineCache::ArePipelineLibrariesUsable(
+    const ui::vulkan::VulkanDevice* vulkan_device) {
+  // The device's graphicsPipelineLibrary is only true when the setting had
+  // the extensions enabled. Without independent interpolation decoration a
+  // vertex shader's outputs and a pixel shader's inputs would have to carry
+  // the same interpolation decorations to be linked, which the translator
+  // does not promise.
+  const ui::vulkan::VulkanDevice::Properties& device_properties =
+      vulkan_device->properties();
+  return cvars::vulkan_pipeline_libraries &&
+         device_properties.graphicsPipelineLibrary &&
+         device_properties
+             .graphicsPipelineLibraryIndependentInterpolationDecoration;
+}
+
+bool VulkanPipelineCache::ArePipelineLibraryLayoutsIndependent(
+    const ui::vulkan::VulkanDevice* vulkan_device) {
+  return cvars::vulkan_pipeline_libraries_independent_sets &&
+         ArePipelineLibrariesUsable(vulkan_device);
+}
+
+namespace {
+// A Vulkan handle as a number, whether handles are pointers or integers in
+// this build.
+template <typename Handle>
+uint64_t PipelineLibraryHandleValue(Handle handle) {
+  uint64_t value = 0;
+  static_assert(sizeof(handle) <= sizeof(value));
+  std::memcpy(&value, &handle, sizeof(handle));
+  return value;
+}
+void PipelineLibraryNoteSlowest(std::atomic<uint64_t>& slowest, uint64_t us) {
+  uint64_t current = slowest.load(std::memory_order_relaxed);
+  while (us > current && !slowest.compare_exchange_weak(
+                             current, us, std::memory_order_relaxed)) {
+  }
+}
+}  // namespace
+
+VkPipeline VulkanPipelineCache::GetOrCreatePipelineLibrary(
+    const PipelineLibraryKey& key,
+    const VkGraphicsPipelineCreateInfo& create_info, bool find_only,
+    bool& not_ready_out) {
+  not_ready_out = false;
+  const uint32_t part = key.part < kLibraryPartCount ? key.part : 0;
+  const bool has_shaders =
+      part == kLibraryPreRasterization || part == kLibraryFragmentShader;
+  PipelineLibrary* library;
+  {
+    std::unique_lock<std::mutex> lock(pipeline_libraries_lock_);
+    auto it = pipeline_libraries_.find(key);
+    if (it != pipeline_libraries_.end()) {
+      library = &it->second;
+      if (library->state == PipelineLibrary::kCreating) {
+        if (find_only) {
+          not_ready_out = true;
+          return VK_NULL_HANDLE;
+        }
+        libraries_waited_[part].fetch_add(1, std::memory_order_relaxed);
+        pipeline_libraries_cond_.wait(lock, [library]() {
+          return library->state != PipelineLibrary::kCreating;
+        });
+      } else {
+        libraries_found_[part].fetch_add(1, std::memory_order_relaxed);
+      }
+      return library->state == PipelineLibrary::kReady ? library->pipeline
+                                                       : VK_NULL_HANDLE;
+    }
+    if (find_only && has_shaders) {
+      not_ready_out = true;
+      return VK_NULL_HANDLE;
+    }
+    // References to the map's elements stay valid as it grows, and nothing
+    // is erased before Shutdown.
+    library = &pipeline_libraries_.emplace(key, PipelineLibrary()).first->second;
+  }
+
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  const auto create_start = std::chrono::steady_clock::now();
+  VkPipeline library_pipeline = VK_NULL_HANDLE;
+  VkResult result = dfn.vkCreateGraphicsPipelines(
+      device, vk_pipeline_cache_, 1, &create_info, nullptr, &library_pipeline);
+  uint64_t create_us =
+      uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now() - create_start)
+                   .count());
+  if (result != VK_SUCCESS) {
+    library_pipeline = VK_NULL_HANDLE;
+    libraries_failed_[part].fetch_add(1, std::memory_order_relaxed);
+    XELOGE(
+        "pipeline libraries: failed to create a library (part {}, result {}); "
+        "pipelines that need it are compiled whole",
+        part, static_cast<int>(result));
+  } else {
+    libraries_created_[part].fetch_add(1, std::memory_order_relaxed);
+    libraries_created_us_[part].fetch_add(create_us,
+                                          std::memory_order_relaxed);
+    PipelineLibraryNoteSlowest(libraries_slowest_us_[part], create_us);
+    if (has_shaders) {
+      vk_pipeline_cache_dirty_.store(true, std::memory_order_relaxed);
+      if (cvars::shader_profiling) {
+        XELOGI(
+            "shader_profiling: pipeline library ({}) created in {:.3f} ms",
+            part == kLibraryPreRasterization ? "vertex side" : "fragment",
+            double(create_us) / 1000.0);
+      }
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(pipeline_libraries_lock_);
+    library->pipeline = library_pipeline;
+    library->state = library_pipeline != VK_NULL_HANDLE
+                         ? PipelineLibrary::kReady
+                         : PipelineLibrary::kFailed;
+  }
+  pipeline_libraries_cond_.notify_all();
+  return library_pipeline;
+}
+
+bool VulkanPipelineCache::CreatePipelineFromLibraries(
+    const VkGraphicsPipelineCreateInfo& pipeline_create_info,
+    const VkPipelineRenderingCreateInfo* rendering_create_info,
+    const PipelineLayoutProvider* layout_provider, bool link_only,
+    VkPipeline& pipeline_out) {
+  pipeline_out = VK_NULL_HANDLE;
+  if (!layout_provider || !pipeline_create_info.pInputAssemblyState ||
+      !pipeline_create_info.pRasterizationState ||
+      !pipeline_create_info.pMultisampleState ||
+      !pipeline_create_info.pDepthStencilState ||
+      !pipeline_create_info.pColorBlendState) {
+    library_fallbacks_key_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
+  // The stages: the fragment shader's, if there is one, and the others.
+  static constexpr uint32_t kMaxPreRasterizationStages = 4;
+  VkPipelineShaderStageCreateInfo
+      pre_rasterization_stages[kMaxPreRasterizationStages];
+  uint32_t pre_rasterization_stage_count = 0;
+  VkPipelineShaderStageCreateInfo fragment_stage = {};
+  uint32_t fragment_stage_count = 0;
+  for (uint32_t i = 0; i < pipeline_create_info.stageCount; ++i) {
+    const VkPipelineShaderStageCreateInfo& stage =
+        pipeline_create_info.pStages[i];
+    if (stage.stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
+      fragment_stage = stage;
+      fragment_stage_count = 1;
+    } else {
+      if (pre_rasterization_stage_count >= kMaxPreRasterizationStages) {
+        library_fallbacks_key_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+      }
+      pre_rasterization_stages[pre_rasterization_stage_count++] = stage;
+    }
+  }
+  if (!pre_rasterization_stage_count) {
+    library_fallbacks_key_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
+  bool key_ok = true;
+  const uint64_t render_pass_value =
+      PipelineLibraryHandleValue(pipeline_create_info.renderPass);
+
+  // With dynamic rendering the two shader libraries are only told the view
+  // mask: the formats belong to the fragment output library alone, which is
+  // what lets a shader's library be shared by every render target format.
+  VkPipelineRenderingCreateInfo shader_rendering_create_info = {};
+  shader_rendering_create_info.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  if (rendering_create_info) {
+    shader_rendering_create_info.viewMask = rendering_create_info->viewMask;
+  }
+
+  // The multisample state is given, identically, to the fragment shader's
+  // library and to the fragment output one, as the specification asks.
+  const VkPipelineMultisampleStateCreateInfo& multisample_state =
+      *pipeline_create_info.pMultisampleState;
+  const auto add_multisample_state = [&multisample_state](
+                                         PipelineLibraryKey& key) {
+    bool ok = key.Add(uint32_t(multisample_state.rasterizationSamples));
+    ok &= key.Add(multisample_state.sampleShadingEnable);
+    ok &= key.Add(multisample_state.pSampleMask ? 1 : 0);
+    ok &= key.Add(multisample_state.pSampleMask
+                      ? uint32_t(*multisample_state.pSampleMask)
+                      : 0);
+    ok &= key.Add(multisample_state.alphaToCoverageEnable);
+    ok &= key.Add(multisample_state.alphaToOneEnable);
+    return ok;
+  };
+
+  // --- Vertex input interface. ---
+  PipelineLibraryKey vertex_input_key;
+  vertex_input_key.part = kLibraryVertexInput;
+  key_ok &= vertex_input_key.Add(
+      uint32_t(pipeline_create_info.pInputAssemblyState->topology));
+  key_ok &= vertex_input_key.Add(
+      pipeline_create_info.pInputAssemblyState->primitiveRestartEnable);
+  VkGraphicsPipelineLibraryCreateInfoEXT vertex_input_library_info = {};
+  vertex_input_library_info.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  vertex_input_library_info.flags =
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT;
+  VkGraphicsPipelineCreateInfo vertex_input_create_info = {};
+  vertex_input_create_info.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  vertex_input_create_info.pNext = &vertex_input_library_info;
+  vertex_input_create_info.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  vertex_input_create_info.pVertexInputState =
+      pipeline_create_info.pVertexInputState;
+  vertex_input_create_info.pInputAssemblyState =
+      pipeline_create_info.pInputAssemblyState;
+  vertex_input_create_info.pDynamicState = pipeline_create_info.pDynamicState;
+  vertex_input_create_info.basePipelineIndex = -1;
+
+  // --- The stages before rasterisation. ---
+  PipelineLibraryKey pre_rasterization_key;
+  pre_rasterization_key.part = kLibraryPreRasterization;
+  for (uint32_t i = 0; i < pre_rasterization_stage_count; ++i) {
+    pre_rasterization_key.modules[i] =
+        PipelineLibraryHandleValue(pre_rasterization_stages[i].module);
+    key_ok &=
+        pre_rasterization_key.Add(uint32_t(pre_rasterization_stages[i].stage));
+  }
+  const VkPipelineLayout pre_rasterization_layout =
+      layout_provider->GetLibraryPipelineLayout(false);
+  pre_rasterization_key.layout =
+      PipelineLibraryHandleValue(pre_rasterization_layout);
+  pre_rasterization_key.render_pass = render_pass_value;
+  {
+    const VkPipelineRasterizationStateCreateInfo& rasterization_state =
+        *pipeline_create_info.pRasterizationState;
+    key_ok &= pre_rasterization_key.Add(rasterization_state.depthClampEnable);
+    key_ok &=
+        pre_rasterization_key.Add(rasterization_state.rasterizerDiscardEnable);
+    key_ok &=
+        pre_rasterization_key.Add(uint32_t(rasterization_state.polygonMode));
+    key_ok &= pre_rasterization_key.Add(uint32_t(rasterization_state.cullMode));
+    key_ok &=
+        pre_rasterization_key.Add(uint32_t(rasterization_state.frontFace));
+    key_ok &= pre_rasterization_key.Add(rasterization_state.depthBiasEnable);
+    key_ok &= pre_rasterization_key.Add(
+        pipeline_create_info.pTessellationState
+            ? pipeline_create_info.pTessellationState->patchControlPoints
+            : 0);
+    key_ok &= pre_rasterization_key.Add(
+        pipeline_create_info.pViewportState
+            ? pipeline_create_info.pViewportState->viewportCount
+            : 0);
+    key_ok &= pre_rasterization_key.Add(
+        pipeline_create_info.pViewportState
+            ? pipeline_create_info.pViewportState->scissorCount
+            : 0);
+    key_ok &= pre_rasterization_key.Add(shader_rendering_create_info.viewMask);
+  }
+  VkGraphicsPipelineLibraryCreateInfoEXT pre_rasterization_library_info = {};
+  pre_rasterization_library_info.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  pre_rasterization_library_info.pNext =
+      rendering_create_info ? &shader_rendering_create_info : nullptr;
+  pre_rasterization_library_info.flags =
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT;
+  VkGraphicsPipelineCreateInfo pre_rasterization_create_info = {};
+  pre_rasterization_create_info.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  pre_rasterization_create_info.pNext = &pre_rasterization_library_info;
+  pre_rasterization_create_info.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  pre_rasterization_create_info.stageCount = pre_rasterization_stage_count;
+  pre_rasterization_create_info.pStages = pre_rasterization_stages;
+  pre_rasterization_create_info.pTessellationState =
+      pipeline_create_info.pTessellationState;
+  pre_rasterization_create_info.pViewportState =
+      pipeline_create_info.pViewportState;
+  pre_rasterization_create_info.pRasterizationState =
+      pipeline_create_info.pRasterizationState;
+  pre_rasterization_create_info.pDynamicState =
+      pipeline_create_info.pDynamicState;
+  pre_rasterization_create_info.layout = pre_rasterization_layout;
+  pre_rasterization_create_info.renderPass = pipeline_create_info.renderPass;
+  pre_rasterization_create_info.subpass = pipeline_create_info.subpass;
+  pre_rasterization_create_info.basePipelineIndex = -1;
+
+  // --- The fragment shader. A draw without one still has the library: it
+  // holds the depth and stencil state. ---
+  PipelineLibraryKey fragment_key;
+  fragment_key.part = kLibraryFragmentShader;
+  if (fragment_stage_count) {
+    fragment_key.modules[0] =
+        PipelineLibraryHandleValue(fragment_stage.module);
+  }
+  const VkPipelineLayout fragment_layout =
+      layout_provider->GetLibraryPipelineLayout(true);
+  fragment_key.layout = PipelineLibraryHandleValue(fragment_layout);
+  fragment_key.render_pass = render_pass_value;
+  key_ok &= fragment_key.Add(fragment_stage_count);
+  key_ok &= add_multisample_state(fragment_key);
+  {
+    const VkPipelineDepthStencilStateCreateInfo& depth_stencil_state =
+        *pipeline_create_info.pDepthStencilState;
+    key_ok &= fragment_key.Add(depth_stencil_state.depthTestEnable);
+    key_ok &= fragment_key.Add(depth_stencil_state.depthWriteEnable);
+    key_ok &= fragment_key.Add(uint32_t(depth_stencil_state.depthCompareOp));
+    key_ok &= fragment_key.Add(depth_stencil_state.depthBoundsTestEnable);
+    key_ok &= fragment_key.Add(depth_stencil_state.stencilTestEnable);
+    for (const VkStencilOpState* stencil_side :
+         {&depth_stencil_state.front, &depth_stencil_state.back}) {
+      key_ok &= fragment_key.Add(uint32_t(stencil_side->failOp));
+      key_ok &= fragment_key.Add(uint32_t(stencil_side->passOp));
+      key_ok &= fragment_key.Add(uint32_t(stencil_side->depthFailOp));
+      key_ok &= fragment_key.Add(uint32_t(stencil_side->compareOp));
+      key_ok &= fragment_key.Add(stencil_side->compareMask);
+      key_ok &= fragment_key.Add(stencil_side->writeMask);
+      key_ok &= fragment_key.Add(stencil_side->reference);
+    }
+    key_ok &= fragment_key.Add(shader_rendering_create_info.viewMask);
+  }
+  VkGraphicsPipelineLibraryCreateInfoEXT fragment_library_info = {};
+  fragment_library_info.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  fragment_library_info.pNext =
+      rendering_create_info ? &shader_rendering_create_info : nullptr;
+  fragment_library_info.flags =
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT;
+  VkGraphicsPipelineCreateInfo fragment_create_info = {};
+  fragment_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  fragment_create_info.pNext = &fragment_library_info;
+  fragment_create_info.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  fragment_create_info.stageCount = fragment_stage_count;
+  fragment_create_info.pStages = &fragment_stage;
+  fragment_create_info.pMultisampleState =
+      pipeline_create_info.pMultisampleState;
+  fragment_create_info.pDepthStencilState =
+      pipeline_create_info.pDepthStencilState;
+  fragment_create_info.pDynamicState = pipeline_create_info.pDynamicState;
+  fragment_create_info.layout = fragment_layout;
+  fragment_create_info.renderPass = pipeline_create_info.renderPass;
+  fragment_create_info.subpass = pipeline_create_info.subpass;
+  fragment_create_info.basePipelineIndex = -1;
+
+  // --- Fragment output interface. ---
+  PipelineLibraryKey fragment_output_key;
+  fragment_output_key.part = kLibraryFragmentOutput;
+  fragment_output_key.render_pass = render_pass_value;
+  key_ok &= add_multisample_state(fragment_output_key);
+  if (rendering_create_info) {
+    key_ok &= fragment_output_key.Add(rendering_create_info->viewMask);
+    key_ok &=
+        fragment_output_key.Add(rendering_create_info->colorAttachmentCount);
+    for (uint32_t i = 0; i < rendering_create_info->colorAttachmentCount;
+         ++i) {
+      key_ok &= fragment_output_key.Add(
+          uint32_t(rendering_create_info->pColorAttachmentFormats[i]));
+    }
+    key_ok &= fragment_output_key.Add(
+        uint32_t(rendering_create_info->depthAttachmentFormat));
+    key_ok &= fragment_output_key.Add(
+        uint32_t(rendering_create_info->stencilAttachmentFormat));
+  }
+  {
+    const VkPipelineColorBlendStateCreateInfo& color_blend_state =
+        *pipeline_create_info.pColorBlendState;
+    key_ok &= fragment_output_key.Add(color_blend_state.logicOpEnable);
+    key_ok &= fragment_output_key.Add(uint32_t(color_blend_state.logicOp));
+    key_ok &= fragment_output_key.Add(color_blend_state.attachmentCount);
+    for (uint32_t i = 0; i < color_blend_state.attachmentCount; ++i) {
+      const VkPipelineColorBlendAttachmentState& attachment =
+          color_blend_state.pAttachments[i];
+      key_ok &= fragment_output_key.Add(attachment.blendEnable);
+      key_ok &= fragment_output_key.Add(uint32_t(attachment.srcColorBlendFactor));
+      key_ok &= fragment_output_key.Add(uint32_t(attachment.dstColorBlendFactor));
+      key_ok &= fragment_output_key.Add(uint32_t(attachment.colorBlendOp));
+      key_ok &= fragment_output_key.Add(uint32_t(attachment.srcAlphaBlendFactor));
+      key_ok &= fragment_output_key.Add(uint32_t(attachment.dstAlphaBlendFactor));
+      key_ok &= fragment_output_key.Add(uint32_t(attachment.alphaBlendOp));
+      key_ok &= fragment_output_key.Add(uint32_t(attachment.colorWriteMask));
+    }
+  }
+  VkGraphicsPipelineLibraryCreateInfoEXT fragment_output_library_info = {};
+  fragment_output_library_info.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
+  fragment_output_library_info.pNext = rendering_create_info;
+  fragment_output_library_info.flags =
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT;
+  VkGraphicsPipelineCreateInfo fragment_output_create_info = {};
+  fragment_output_create_info.sType =
+      VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  fragment_output_create_info.pNext = &fragment_output_library_info;
+  fragment_output_create_info.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
+  fragment_output_create_info.pMultisampleState =
+      pipeline_create_info.pMultisampleState;
+  fragment_output_create_info.pColorBlendState =
+      pipeline_create_info.pColorBlendState;
+  fragment_output_create_info.pDynamicState =
+      pipeline_create_info.pDynamicState;
+  fragment_output_create_info.renderPass = pipeline_create_info.renderPass;
+  fragment_output_create_info.subpass = pipeline_create_info.subpass;
+  fragment_output_create_info.basePipelineIndex = -1;
+
+  if (!key_ok || pre_rasterization_layout == VK_NULL_HANDLE ||
+      fragment_layout == VK_NULL_HANDLE) {
+    library_fallbacks_key_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
+  // The shader libraries first: with link_only nothing is made if one of
+  // them is not there.
+  uint64_t created_before = 0;
+  for (uint32_t i = 0; i < kLibraryPartCount; ++i) {
+    created_before += libraries_created_[i].load(std::memory_order_relaxed);
+  }
+  VkPipeline libraries[kLibraryPartCount] = {};
+  bool not_ready = false;
+  bool part_not_ready;
+  libraries[kLibraryPreRasterization] =
+      GetOrCreatePipelineLibrary(pre_rasterization_key,
+                                 pre_rasterization_create_info, link_only,
+                                 part_not_ready);
+  not_ready |= part_not_ready;
+  if (link_only && not_ready) {
+    return false;
+  }
+  libraries[kLibraryFragmentShader] = GetOrCreatePipelineLibrary(
+      fragment_key, fragment_create_info, link_only, part_not_ready);
+  not_ready |= part_not_ready;
+  if (link_only && not_ready) {
+    return false;
+  }
+  libraries[kLibraryVertexInput] = GetOrCreatePipelineLibrary(
+      vertex_input_key, vertex_input_create_info, link_only, part_not_ready);
+  not_ready |= part_not_ready;
+  libraries[kLibraryFragmentOutput] =
+      GetOrCreatePipelineLibrary(fragment_output_key,
+                                 fragment_output_create_info, link_only,
+                                 part_not_ready);
+  not_ready |= part_not_ready;
+  if (link_only && not_ready) {
+    return false;
+  }
+  for (uint32_t i = 0; i < kLibraryPartCount; ++i) {
+    if (libraries[i] == VK_NULL_HANDLE) {
+      library_fallbacks_library_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+  }
+
+  // The link: no flags, so nothing is optimised across the libraries and
+  // nothing is compiled. The layout is the pair's own, which the draws bind
+  // their descriptor sets with.
+  VkPipelineLibraryCreateInfoKHR link_library_info = {};
+  link_library_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  link_library_info.libraryCount = kLibraryPartCount;
+  link_library_info.pLibraries = libraries;
+  VkGraphicsPipelineCreateInfo link_create_info = {};
+  link_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  link_create_info.pNext = &link_library_info;
+  link_create_info.layout = pipeline_create_info.layout;
+  link_create_info.renderPass = pipeline_create_info.renderPass;
+  link_create_info.subpass = pipeline_create_info.subpass;
+  link_create_info.basePipelineIndex = -1;
+
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  const auto link_start = std::chrono::steady_clock::now();
+  VkPipeline linked_pipeline = VK_NULL_HANDLE;
+  VkResult result = dfn.vkCreateGraphicsPipelines(
+      device, vk_pipeline_cache_, 1, &link_create_info, nullptr,
+      &linked_pipeline);
+  uint64_t link_us =
+      uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now() - link_start)
+                   .count());
+  if (result != VK_SUCCESS || linked_pipeline == VK_NULL_HANDLE) {
+    library_fallbacks_link_.fetch_add(1, std::memory_order_relaxed);
+    XELOGE(
+        "pipeline libraries: failed to link a pipeline (result {}); it is "
+        "compiled whole",
+        static_cast<int>(result));
+    return false;
+  }
+  library_links_.fetch_add(1, std::memory_order_relaxed);
+  library_links_us_.fetch_add(link_us, std::memory_order_relaxed);
+  PipelineLibraryNoteSlowest(library_links_slowest_us_, link_us);
+  // Approximate when several threads link at once: another thread's library
+  // counts against this link.
+  uint64_t created_after = 0;
+  for (uint32_t i = 0; i < kLibraryPartCount; ++i) {
+    created_after += libraries_created_[i].load(std::memory_order_relaxed);
+  }
+  if (created_after == created_before) {
+    library_links_compiled_nothing_.fetch_add(1, std::memory_order_relaxed);
+  }
+  pipeline_out = linked_pipeline;
+  return true;
+}
+
+bool VulkanPipelineCache::TryLinkPipelineInline(
+    PipelineCreationArguments creation_arguments,
+    bool layout_counts_complete) {
+  // The libraries are keyed by the shaders' modules and the pair's real
+  // layout, so both shaders must be translated.
+  if (!layout_counts_complete ||
+      !creation_arguments.vertex_shader->is_translated() ||
+      (creation_arguments.pixel_shader &&
+       !creation_arguments.pixel_shader->is_translated())) {
+    ++inline_links_untranslated_;
+    return false;
+  }
+  if (inline_link_left_us_ <= 0) {
+    ++inline_links_over_budget_;
+    return false;
+  }
+  creation_arguments.link_only = true;
+  const auto link_start = std::chrono::steady_clock::now();
+  bool linked = EnsurePipelineCreated(creation_arguments);
+  uint64_t link_us =
+      uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now() - link_start)
+                   .count());
+  inline_link_left_us_ -= int64_t(link_us);
+  if (!linked) {
+    ++inline_links_not_ready_;
+    return false;
+  }
+  ++inline_links_;
+  inline_links_us_ += link_us;
+  inline_links_slowest_us_ = std::max(inline_links_slowest_us_, link_us);
+  // No creation job will come for this slot: it is finished.
+  Pipeline& slot = creation_arguments.pipeline->second;
+  slot.creation_claimed.store(true, std::memory_order_release);
+  slot.creation_finished.store(true, std::memory_order_release);
   return true;
 }
 

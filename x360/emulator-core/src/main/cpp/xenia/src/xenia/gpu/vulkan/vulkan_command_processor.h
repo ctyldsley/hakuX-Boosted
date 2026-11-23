@@ -455,6 +455,21 @@ class VulkanCommandProcessor final : public CommandProcessor {
     VkPipelineLayout GetPipelineLayout() const override {
       return pipeline_layout_;
     }
+    // hakuX-Boosted: the layouts of this layout's pipeline libraries, when
+    // they are not the layout itself (vulkan_pipeline_libraries with
+    // independent sets, boosted/notes/pipeline-libraries.md). Set once,
+    // before the layout is handed out.
+    VkPipelineLayout GetLibraryPipelineLayout(bool fragment) const override {
+      VkPipelineLayout library_layout =
+          fragment ? library_layout_fragment_ : library_layout_vertex_;
+      return library_layout != VK_NULL_HANDLE ? library_layout
+                                              : pipeline_layout_;
+    }
+    void SetLibraryPipelineLayouts(VkPipelineLayout library_layout_vertex,
+                                   VkPipelineLayout library_layout_fragment) {
+      library_layout_vertex_ = library_layout_vertex;
+      library_layout_fragment_ = library_layout_fragment;
+    }
     VkDescriptorSetLayout descriptor_set_layout_textures_vertex_ref() const {
       return descriptor_set_layout_textures_vertex_ref_;
     }
@@ -470,6 +485,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
    private:
     VkPipelineLayout pipeline_layout_;
+    // hakuX-Boosted: owned by library_pipeline_layouts_.
+    VkPipelineLayout library_layout_vertex_ = VK_NULL_HANDLE;
+    VkPipelineLayout library_layout_fragment_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptor_set_layout_textures_vertex_ref_;
     VkDescriptorSetLayout descriptor_set_layout_textures_pixel_ref_;
     uint32_t texture_count_vertex_;
@@ -880,6 +898,15 @@ class VulkanCommandProcessor final : public CommandProcessor {
   std::unordered_map<PipelineLayoutKey, PipelineLayout,
                      PipelineLayoutKey::Hasher>
       pipeline_layouts_;
+  // hakuX-Boosted: with vulkan_pipeline_libraries and independent sets, the
+  // layouts shader libraries are created with: the two sets every layout
+  // has and one stage's texture set, by that set's layout ([0] the vertex
+  // side's, [1] the fragment shader's). Under pipeline_layouts_mutex_.
+  // boosted/notes/pipeline-libraries.md.
+  std::unordered_map<VkDescriptorSetLayout, VkPipelineLayout>
+      library_pipeline_layouts_[2];
+  VkPipelineLayout GetLibraryPipelineLayoutLocked(
+      bool fragment, VkDescriptorSetLayout descriptor_set_layout_textures);
 
   // No specific reason for 32768, just the "too much" descriptor count from
   // Direct3D 12 PIX warnings.

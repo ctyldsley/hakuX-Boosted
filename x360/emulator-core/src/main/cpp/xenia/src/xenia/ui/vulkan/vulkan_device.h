@@ -227,6 +227,15 @@ class VulkanDevice {
     // the pipeline key.
     bool extendedDynamicState3PrimitiveTopologyUnrestricted = false;
 
+    // hakuX-Boosted: VK_EXT_graphics_pipeline_library (#321), with
+    // VK_KHR_pipeline_library (#291). Only true when the extensions and the
+    // feature were enabled, which only vulkan_pipeline_libraries does
+    // (boosted/notes/pipeline-libraries.md). The other two are the
+    // extension's properties, false unless the first is true.
+    bool graphicsPipelineLibrary = false;
+    bool graphicsPipelineLibraryFastLinking = false;
+    bool graphicsPipelineLibraryIndependentInterpolationDecoration = false;
+
     // VK_EXT_external_memory_host (#179). Alignment a host pointer must satisfy
     // to be imported. 0 if the extension is not enabled.
     VkDeviceSize minImportedHostPointerAlignment = 0;
