@@ -1425,6 +1425,69 @@ uint64_t A64Backend::CalculateNextHostInstruction(ThreadDebugInfo* thread_info,
 // ARM64 BRK #0 encoding (4 bytes, fixed-width instruction).
 static constexpr uint32_t kArm64Brk0 = 0xD4200000;
 
+// hakuX-Boosted: guest code rewritten after it was translated (icbi, see
+// Processor::InvalidateGuestCode). The old translation stays in the cache
+// (code is never freed, and a thread may still be inside it), but nothing
+// may enter it again:
+//  - its indirection slot goes back to the resolve thunk;
+//  - its linked-call target is forgotten, so callers placed from now on wait
+//    for the new translation;
+//  - callers that already reach it by its host address (direct calls to
+//    code that existed when they were translated, linked-call literals) all
+//    enter at its first instruction, which is the frame's `sub sp` and never
+//    a branch target. That word is replaced by a branch to a stub that puts
+//    the guest address in w16 and jumps to the resolve thunk: exactly what a
+//    call to a function with no code yet does, so x0 (the guest return
+//    address) and every other register a function is entered with pass
+//    through unchanged, and the thunk resolves to a fresh translation.
+// The patch is one aligned 4-byte store. The stub must be within a B's reach
+// (128 MB); if the cache has grown past that, the entry is left as it is,
+// counted and logged: calls through the slot and new callers still
+// retranslate, old direct callers keep the old code.
+void A64Backend::RetireGuestFunction(GuestFunction* function) {
+  if (!function || !code_cache_) {
+    return;
+  }
+  const uint32_t guest_address = function->address();
+  code_cache_->ResetIndirection(guest_address);
+  code_cache_->ForgetLinkTarget(guest_address);
+  uint8_t* entry = function->machine_code();
+  if (!entry || !resolve_function_thunk_) {
+    return;
+  }
+  struct alignas(8) Stub {
+    uint32_t insn[4];
+    uint64_t thunk;
+  } stub;
+  // movz w16, #lo16
+  stub.insn[0] = 0x52800000u | ((guest_address & 0xFFFFu) << 5) | 16u;
+  // movk w16, #hi16, lsl #16
+  stub.insn[1] = 0x72A00000u | ((guest_address >> 16) << 5) | 16u;
+  // ldr x17, #8 (the literal after the next instruction)
+  stub.insn[2] = 0x58000000u | (2u << 5) | 17u;
+  // br x17
+  stub.insn[3] = 0xD61F0000u | (17u << 5);
+  stub.thunk = reinterpret_cast<uint64_t>(resolve_function_thunk_);
+  uint8_t* stub_address = code_cache_->PlaceRawCode(&stub, sizeof(stub));
+  const int64_t distance =
+      stub_address ? int64_t(stub_address - entry) : int64_t(1) << 40;
+  if (distance < -(int64_t(1) << 27) || distance >= (int64_t(1) << 27) ||
+      (distance & 3)) {
+    compiler::translation_stats.retired_unpatched.fetch_add(
+        1, std::memory_order_relaxed);
+    XELOGW(
+        "A64: rewritten guest function {:08X}: old translation out of a "
+        "branch's reach, its direct callers keep it",
+        guest_address);
+    return;
+  }
+  const uint32_t branch =
+      0x14000000u | (static_cast<uint32_t>(distance >> 2) & 0x03FFFFFFu);
+  code_cache_->WriteCode(entry, &branch, sizeof(branch));
+  compiler::translation_stats.retired_functions.fetch_add(
+      1, std::memory_order_relaxed);
+}
+
 void A64Backend::InstallBreakpoint(Breakpoint* breakpoint) {
   breakpoint->ForEachHostAddress([breakpoint](uint64_t host_address) {
     auto ptr = reinterpret_cast<void*>(host_address);

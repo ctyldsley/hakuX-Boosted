@@ -44,6 +44,10 @@ class Module {
   virtual Symbol::Status DeclareVariable(uint32_t address, Symbol** out_symbol);
 
   Symbol::Status DefineFunction(Function* symbol);
+  // hakuX-Boosted: drops the function at this address from the symbol map if
+  // it is this one, so the next lookup declares and analyses a new one. The
+  // object itself stays alive (its old translation may still be running).
+  void ForgetFunction(uint32_t address, Function* function);
   Symbol::Status DefineVariable(Symbol* symbol);
 
   const std::vector<uint32_t> GetAddressedFunctions();

@@ -165,6 +165,12 @@ class Processor {
   Function* QueryFunction(uint32_t address);
   std::vector<Function*> FindFunctionsWithAddress(uint32_t address);
   void RemoveFunctionByAddress(uint32_t address);
+  // hakuX-Boosted: guest code in [address, address + length) may have been
+  // rewritten (icbi). Every translated function covering any of it is
+  // dropped from the entry table and its module's symbols and retired in the
+  // backend, so the next call translates the new code. Cheap when no
+  // translated code is on those pages.
+  void InvalidateGuestCode(uint32_t address, uint32_t length);
 
   Function* LookupFunction(uint32_t address);
   Module* LookupModule(uint32_t address);
@@ -318,6 +324,12 @@ class Processor {
   ExportResolver* export_resolver_ = nullptr;
 
   EntryTable entry_table_;
+  // hakuX-Boosted: one bit per 4 KB guest page that has held translated
+  // code (set in ResolveFunction, never cleared), so InvalidateGuestCode can
+  // skip pages without any.
+  static constexpr uint32_t kCodePageShift = 12;
+  std::unique_ptr<std::atomic<uint32_t>[]> code_pages_;
+  std::mutex invalidate_mutex_;
   xe::global_critical_region global_critical_region_;
   ExecutionState execution_state_ = ExecutionState::kPaused;
   std::vector<std::unique_ptr<Module>> modules_;

@@ -41,6 +41,17 @@ DEFINE_bool(writable_code_segments, false,
             "Enables a program to write to its own code segments in memory.",
             "CPU");
 
+// hakuX-Boosted: see XexModule::IsCodeAddress and Processor::
+// InvalidateGuestCode.
+DEFINE_bool(
+    xex_code_writable, true,
+    "Map a title's code sections writable, as the console does (a title can "
+    "write code into its own code section and run it; MmQueryAddressProtect "
+    "still reports them as PAGE_EXECUTE, 0x20). Read-only data stays "
+    "read-only unless writable_code_segments is set. Off: code is mapped "
+    "read-only as in upstream Xenia and such a write faults.",
+    "CPU");
+
 DEFINE_bool(
     enable_early_precompilation, false,
     "Enable pre-compiling guest functions that we know we've called/that "
@@ -1072,6 +1083,18 @@ bool XexModule::LoadContinue() {
     auto size = desc.page_count * page_size;
     switch (desc.info) {
       case XEX_SECTION_CODE:
+        // hakuX-Boosted: xex_code_writable. Remember the range for
+        // MmQueryAddressProtect.
+        if (!code_ranges_.empty() && code_ranges_.back().second == address) {
+          code_ranges_.back().second = address + size;
+        } else {
+          code_ranges_.emplace_back(address, address + size);
+        }
+        heap->Protect(address, size,
+                      writable_code_segments || cvars::xex_code_writable
+                          ? kMemoryProtectRead | kMemoryProtectWrite
+                          : kMemoryProtectRead);
+        break;
       case XEX_SECTION_READONLY_DATA:
         heap->Protect(address, size,
                       writable_code_segments
@@ -1087,6 +1110,16 @@ bool XexModule::LoadContinue() {
   }
 
   return true;
+}
+
+// hakuX-Boosted: see the declaration.
+bool XexModule::IsCodeAddress(uint32_t address) const {
+  for (const auto& range : code_ranges_) {
+    if (address >= range.first && address < range.second) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void XexModule::Precompile() {

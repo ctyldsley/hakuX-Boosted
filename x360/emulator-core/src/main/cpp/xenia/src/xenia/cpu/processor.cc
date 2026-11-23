@@ -85,6 +85,15 @@ DEFINE_bool(
     "is translating one of its functions makes this unsafe in a title.",
     "CPU");
 
+// hakuX-Boosted: see Processor::InvalidateGuestCode.
+DEFINE_bool(
+    icbi_invalidates_code, true,
+    "icbi (instruction cache block invalidate) drops every translation of "
+    "the guest code in its 128-byte line, so code a title rewrites after it "
+    "first ran (a JIT, a patcher) runs as rewritten, as on the console. Off: "
+    "icbi does nothing and the old translation keeps running.",
+    "CPU");
+
 DEFINE_bool(debug, DEFAULT_DEBUG_FLAG,
             "Allow debugging and retain debug information.", "General");
 DEFINE_path(trace_function_data_path, "", "File to write trace data to.",
@@ -347,6 +356,12 @@ bool Processor::Setup(std::unique_ptr<backend::Backend> backend) {
   backend_ = std::move(backend);
   frontend_ = std::move(frontend);
 
+  // hakuX-Boosted: see InvalidateGuestCode.
+  if (cvars::icbi_invalidates_code) {
+    code_pages_ = std::make_unique<std::atomic<uint32_t>[]>(
+        (uint64_t(1) << (32 - kCodePageShift)) / 32);
+  }
+
   // Stack walker is used when profiling, debugging, and dumping.
   // Note that creation may fail, in which case we'll have to disable those
   // features.
@@ -465,6 +480,50 @@ void Processor::RemoveFunctionByAddress(uint32_t address) {
   entry_table_.Delete(address);
 }
 
+// hakuX-Boosted: see the declaration. Called from guest code (icbi, through
+// the PPC front end's builtin), on the thread that rewrote the code.
+void Processor::InvalidateGuestCode(uint32_t address, uint32_t length) {
+  if (!length || !code_pages_) {
+    return;
+  }
+  auto& stats = compiler::translation_stats;
+  stats.icbi_lines.fetch_add(1, std::memory_order_relaxed);
+  const uint64_t high = std::min<uint64_t>(uint64_t(address) + length,
+                                           uint64_t(1) << 32);
+  bool any = false;
+  for (uint64_t page = address >> kCodePageShift;
+       page <= ((high - 1) >> kCodePageShift); ++page) {
+    if (code_pages_[page >> 5].load(std::memory_order_acquire) &
+        (1u << (page & 31))) {
+      any = true;
+      break;
+    }
+  }
+  if (!any) {
+    return;
+  }
+  stats.icbi_lines_with_code.fetch_add(1, std::memory_order_relaxed);
+  std::lock_guard<std::mutex> lock(invalidate_mutex_);
+  // Out of the entry table first, then out of the module's symbols, then
+  // the backend: a thread that calls in meanwhile through the resolve thunk
+  // finds neither and translates afresh.
+  const std::vector<Function*> functions = entry_table_.TakeOverlapping(
+      address, static_cast<uint32_t>(std::min<uint64_t>(high, 0xFFFFFFFFu)));
+  static std::atomic<uint32_t> logged{0};
+  for (Function* function : functions) {
+    if (!function->is_guest()) {
+      continue;
+    }
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+      XELOGI("Guest code rewritten at {:08X}: translation of {:08X}-{:08X} "
+             "retired",
+             address, function->address(), function->end_address());
+    }
+    function->module()->ForgetFunction(function->address(), function);
+    backend_->RetireGuestFunction(static_cast<GuestFunction*>(function));
+  }
+}
+
 Function* Processor::ResolveFunction(uint32_t address) {
   Entry* entry;
   Entry::Status status = entry_table_.GetOrCreate(address, &entry);
@@ -498,6 +557,15 @@ Function* Processor::ResolveFunction(uint32_t address) {
 
     entry->function = function;
     entry->end_address = function->end_address();
+    // hakuX-Boosted: see InvalidateGuestCode.
+    if (code_pages_) {
+      const uint32_t last = std::max(entry->end_address, address);
+      for (uint32_t page = address >> kCodePageShift;
+           page <= (last >> kCodePageShift); ++page) {
+        code_pages_[page >> 5].fetch_or(1u << (page & 31),
+                                        std::memory_order_release);
+      }
+    }
     status = entry->status = Entry::STATUS_READY;
   }
   if (status == Entry::STATUS_READY) {

@@ -198,6 +198,12 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/kernel/stall_watchdog.cc`, `.h` (new), `kernel/kernel_state.cc` | `stall_watchdog` (default on, observes only) and `stall_watchdog_seconds` (10): a 1 s host thread writes one `STALL REPORT` when frames present but no guest thread other than the swap thread has made a kernel call for that long; started in `KernelState`'s constructor, stopped first in its destructor |
 | `xenia/kernel/util/shim_utils.h`, `kernel/xthread.h` | `X::Trampoline` records every kernel call in the calling thread's 16-entry ring; `XThread::kernel_call_trace_` holds it |
 | `xenia/base/mutex.cc` | On Android `gettid()` is bionic's, which does not go through the TLS resolver (asked for by `claude/guest-waits`) |
+| `xenia/cpu/xex_module.cc`, `.h` | `xex_code_writable` (default on): a title's code sections are mapped read-write, as on the console; read-only data stays read-only unless `writable_code_segments`. `IsCodeAddress` and the code ranges it reads (`claude/code-writes`; notes in `boosted/notes/code-writes.md`, as are the next rows down to `xboxkrnl_memory.cc`) |
+| `xenia/cpu/ppc/ppc_emit_memory.cc`, `ppc_frontend.h`, `.cc` | `icbi` stores its address in `scratch` and calls the `InvalidateCode` builtin (was a no-op) while `icbi_invalidates_code` (default on, defined in `processor.cc`) is set |
+| `xenia/cpu/processor.h`, `.cc`, `entry_table.h`, `.cc`, `module.h`, `.cc` | `InvalidateGuestCode`: the page bitmap set in `ResolveFunction`, `EntryTable::TakeOverlapping`, `Module::ForgetFunction` |
+| `xenia/cpu/backend/backend.h`, `a64/a64_backend.h`, `.cc`, `a64/a64_code_cache.h`, `code_cache_base.h` | `RetireGuestFunction` (a no-op but on A64): the indirection slot reset (`ResetIndirection`), the linked-call target forgotten (`ForgetLinkTarget`), the old entry patched with a branch to a stub that re-enters the resolve thunk (`PlaceRawCode`, `WriteCode`) |
+| `xenia/cpu/compiler/translation_stats.h`, `compiler.cc` | The rewritten-code counters in the translation stats line |
+| `xenia/kernel/xboxkrnl/xboxkrnl_memory.cc` | `MmQueryAddressProtect` reports a title's code sections as `PAGE_EXECUTE_READ` (0x20), as the console does |
 
 ## Taking a newer hakuX
 

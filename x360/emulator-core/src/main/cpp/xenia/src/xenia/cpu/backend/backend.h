@@ -72,6 +72,12 @@ class Backend {
   virtual uint64_t CalculateNextHostInstruction(ThreadDebugInfo* thread_info,
                                                 uint64_t current_pc) = 0;
 
+  // hakuX-Boosted: the guest code behind a translated function was rewritten
+  // (Processor::InvalidateGuestCode). Every way into the old translation
+  // must lead to a new one from now on. Default: nothing (no backend but A64
+  // does anything yet).
+  virtual void RetireGuestFunction(GuestFunction* function) {}
+
   virtual void InstallBreakpoint(Breakpoint* breakpoint) {}
   virtual void InstallBreakpoint(Breakpoint* breakpoint, Function* fn) {}
   virtual void UninstallBreakpoint(Breakpoint* breakpoint) {}

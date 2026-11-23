@@ -137,6 +137,15 @@ Symbol::Status Module::DefineSymbol(Symbol* symbol) {
   return status;
 }
 
+// hakuX-Boosted: see the declaration.
+void Module::ForgetFunction(uint32_t address, Function* function) {
+  auto global_lock = global_critical_region_.Acquire();
+  auto it = map_.find(address);
+  if (it != map_.end() && it->second == function) {
+    map_.erase(it);
+  }
+}
+
 Symbol::Status Module::DefineFunction(Function* symbol) {
   return DefineSymbol(symbol);
 }

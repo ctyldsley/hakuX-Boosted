@@ -123,6 +123,9 @@ class A64Backend : public Backend {
 
   std::string name() const override { return "a64"; }
 
+  // hakuX-Boosted: see Backend::RetireGuestFunction and the definition.
+  void RetireGuestFunction(GuestFunction* function) override;
+
   HostToGuestThunk host_to_guest_thunk() const { return host_to_guest_thunk_; }
   GuestToHostThunk guest_to_host_thunk() const { return guest_to_host_thunk_; }
   // hakuX-Boosted: the same transition without the 28 vector registers saved

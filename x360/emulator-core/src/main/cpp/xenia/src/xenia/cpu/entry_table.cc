@@ -110,5 +110,28 @@ std::vector<Function*> EntryTable::FindWithAddress(uint32_t address) {
   }
   return fns;
 }
+
+// hakuX-Boosted: see the declaration.
+std::vector<Function*> EntryTable::TakeOverlapping(uint32_t low,
+                                                   uint32_t high) {
+  auto global_lock = global_critical_region_.Acquire();
+  std::vector<Function*> fns;
+  std::vector<uint32_t> addresses;
+  for (auto& it : map_.Values()) {
+    Entry* entry = it;
+    if (entry->status == Entry::STATUS_READY && entry->function &&
+        entry->address < high && entry->end_address >= low) {
+      fns.push_back(entry->function);
+      addresses.push_back(entry->address);
+    }
+  }
+  for (uint32_t address : addresses) {
+    uint32_t idx = map_.IndexForKey(address);
+    if (idx != map_.size() && *map_.KeyAt(idx) == address) {
+      map_.EraseAt(idx);
+    }
+  }
+  return fns;
+}
 }  // namespace cpu
 }  // namespace xe

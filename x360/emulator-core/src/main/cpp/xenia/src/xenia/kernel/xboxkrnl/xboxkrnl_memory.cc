@@ -11,6 +11,8 @@
 
 #include <atomic>
 #include "xenia/base/logging.h"
+#include "xenia/cpu/processor.h"  // hakuX-Boosted
+#include "xenia/cpu/xex_module.h"  // hakuX-Boosted
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
@@ -580,6 +582,16 @@ dword_result_t MmQueryAddressProtect_entry(dword_t base_address) {
     access = 0;
   }
   access = !access ? 0 : ToXdkProtectFlags(access);
+  // hakuX-Boosted: the console reports a title's code sections as
+  // PAGE_EXECUTE_READ (0x20), though a title can write to them
+  // (xex_code_writable; xsdk's probe_exec, docs/HARDWARE.md milestone 55).
+  if (access) {
+    auto xex = dynamic_cast<cpu::XexModule*>(
+        kernel_state()->processor()->LookupModule(base_address));
+    if (xex && xex->IsCodeAddress(base_address)) {
+      access = X_PAGE_EXECUTE_READ;
+    }
+  }
 
   return access;
 }

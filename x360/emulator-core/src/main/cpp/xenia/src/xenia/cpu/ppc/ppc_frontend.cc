@@ -91,6 +91,13 @@ void SyscallHandler(PPCContext* ppc_context, void* arg0, void* arg1) {
   }
 }
 
+// hakuX-Boosted: icbi. The line's effective address is in scratch (see
+// InstrEmit_icbi); arg0 is the processor.
+void InvalidateCodeHandler(PPCContext* ppc_context, void* arg0, void* arg1) {
+  const uint32_t line = static_cast<uint32_t>(ppc_context->scratch) & ~127u;
+  reinterpret_cast<Processor*>(arg0)->InvalidateGuestCode(line, 128);
+}
+
 bool PPCFrontend::Initialize() {
   void* arg0 = reinterpret_cast<void*>(&xe::global_critical_region::mutex());
   void* arg1 = reinterpret_cast<void*>(&builtins_.global_lock_count);
@@ -102,6 +109,8 @@ bool PPCFrontend::Initialize() {
       processor_->DefineBuiltin("LeaveGlobalLock", LeaveGlobalLock, arg0, arg1);
   builtins_.syscall_handler = processor_->DefineBuiltin(
       "SyscallHandler", SyscallHandler, nullptr, nullptr);
+  builtins_.invalidate_code = processor_->DefineBuiltin(
+      "InvalidateCode", InvalidateCodeHandler, processor_, nullptr);
   return true;
 }
 

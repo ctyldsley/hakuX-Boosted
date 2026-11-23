@@ -44,6 +44,10 @@ class EntryTable {
   void Delete(uint32_t address);
 
   std::vector<Function*> FindWithAddress(uint32_t address);
+  // hakuX-Boosted: removes and returns the ready functions whose guest code
+  // [address, end_address] overlaps [low, high). Entries are not freed
+  // (another thread may hold one, as with Delete).
+  std::vector<Function*> TakeOverlapping(uint32_t low, uint32_t high);
 
  private:
   xe::global_critical_region global_critical_region_;

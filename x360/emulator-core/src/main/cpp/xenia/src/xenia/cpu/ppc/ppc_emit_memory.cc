@@ -23,6 +23,8 @@ DEFINE_bool(
     "processors do their own automatic prefetching.",
     "CPU");
 
+DECLARE_bool(icbi_invalidates_code);  // hakuX-Boosted: processor.cc
+
 DEFINE_bool(no_reserved_ops, false,
             "For testing whether a game may have races with a broken reserved "
             "load/store impl",
@@ -1172,7 +1174,15 @@ int InstrEmit_dcbz(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_icbi(PPCHIRBuilder& f, const InstrData& i) {
-  // XEINSTRNOTIMPLEMENTED();
+  // hakuX-Boosted: icbi_invalidates_code. Drop the translations of the
+  // line's code so rewritten code runs as rewritten (Processor::
+  // InvalidateGuestCode). The address goes to the handler in scratch.
+  if (cvars::icbi_invalidates_code) {
+    Value* ea = CalculateEA_0(f, i.X.RA, i.X.RB);
+    f.StoreContext(offsetof(PPCContext, scratch), ea);
+    f.CallExtern(f.builtins()->invalidate_code);
+    return 0;
+  }
   f.Nop();
   return 0;
 }

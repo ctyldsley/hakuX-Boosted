@@ -216,6 +216,9 @@ class XexModule : public xe::cpu::Module {
   bool Unload();
 
   bool ContainsAddress(uint32_t address) override;
+  // hakuX-Boosted: whether the address is in one of the image's code
+  // sections (the page descriptors' XEX_SECTION_CODE).
+  bool IsCodeAddress(uint32_t address) const;
 
   const std::string& name() const override { return name_; }
   bool is_executable() const override {
@@ -287,6 +290,8 @@ class XexModule : public xe::cpu::Module {
 
   uint32_t base_address_ = 0;
   uint32_t low_address_ = 0;
+  // hakuX-Boosted: the image's code sections, [first, second).
+  std::vector<std::pair<uint32_t, uint32_t>> code_ranges_;
   uint32_t high_address_ = 0;
 
   XexFormat xex_format_ = kFormatUnknown;

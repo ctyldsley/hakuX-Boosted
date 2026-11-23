@@ -191,6 +191,11 @@ std::string FormatExtraStats() {
       get(t.ahead_skipped), get(t.ahead_translated), get(t.ahead_boosts),
       get(t.translated_on_demand));
   line += fmt::format(
+      "; rewritten code: icbi lines {}, {} of them over translated code, "
+      "translations retired {}, {} of those with an unpatched entry",
+      get(t.icbi_lines), get(t.icbi_lines_with_code),
+      get(t.retired_functions), get(t.retired_unpatched));
+  line += fmt::format(
       "; context loads made constants across blocks {}"
       "; dead context stores: {} of {} candidate stores removed; compares "
       "fused with their branch {}; functions emitted twice for short "

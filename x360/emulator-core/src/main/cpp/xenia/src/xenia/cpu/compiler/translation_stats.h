@@ -115,6 +115,13 @@ struct TranslationStats {
   // ... and how many of those literals have been pointed at their callee
   // (the rest still go through the resolve thunk: callee not translated).
   std::atomic<uint64_t> linked_call_sites_resolved{0};
+  // hakuX-Boosted: icbi_invalidates_code. icbi lines handled; lines that
+  // covered translated code; translations retired; of those, ones whose old
+  // entry could not be patched (out of a branch's reach).
+  std::atomic<uint64_t> icbi_lines{0};
+  std::atomic<uint64_t> icbi_lines_with_code{0};
+  std::atomic<uint64_t> retired_functions{0};
+  std::atomic<uint64_t> retired_unpatched{0};
   // pin_guest_registers_wide.
   std::atomic<uint64_t> pin_functions_pinned_no_loop{0};
   std::atomic<uint64_t> pin_flag_slots{0};

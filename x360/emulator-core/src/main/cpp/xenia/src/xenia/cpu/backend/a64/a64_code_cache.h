@@ -51,6 +51,14 @@ class A64CodeCache : public CodeCacheBase<A64CodeCache> {
                          void* code_execute_address,
                          UnwindReservation unwind_reservation) {}
 
+  // hakuX-Boosted: see A64Backend::RetireGuestFunction. Callers placed from
+  // now on wait for the guest address's next translation instead of linking
+  // to the retired one.
+  void ForgetLinkTarget(uint32_t guest_address) {
+    std::lock_guard<std::mutex> lock(link_mutex_);
+    linked_targets_.erase(guest_address);
+  }
+
  protected:
   A64CodeCache() = default;
 

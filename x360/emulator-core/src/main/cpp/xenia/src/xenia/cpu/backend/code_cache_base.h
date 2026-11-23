@@ -573,6 +573,77 @@ class CodeCacheBase : public CodeCache {
     return uint32_t(uintptr_t(data_address));
   }
 
+  // hakuX-Boosted: guest code that is rewritten (see
+  // Processor::InvalidateGuestCode). Points a guest address's indirection
+  // slot back at the default (the resolve thunk), so the next indirect call
+  // translates again.
+  void ResetIndirection(uint32_t guest_address) {
+    if (!indirection_table_base_ || guest_address < kIndirectionTableBase) {
+      return;
+    }
+    const uint64_t slot_offset =
+        ((uint64_t(guest_address) - kIndirectionTableBase) / 4) * 4;
+    if (slot_offset + 4 > kIndirectionTableSize) {
+      return;
+    }
+    reinterpret_cast<std::atomic<uint32_t>*>(indirection_table_base_ +
+                                             slot_offset)
+        ->store(indirection_default_value_, std::memory_order_release);
+  }
+
+  // hakuX-Boosted: places a few bytes of host code that belong to no guest
+  // function (no code map entry, no indirection) and returns their execute
+  // address, or nullptr if the cache is full.
+  uint8_t* PlaceRawCode(const void* code, size_t length) {
+    size_t high_mark;
+    size_t offset;
+    {
+      auto global_lock = global_critical_region_.Acquire();
+      offset = generated_code_offset_;
+      generated_code_offset_ += xe::round_up(length, 16);
+      high_mark = generated_code_offset_;
+      if (high_mark > kGeneratedCodeSize) {
+        return nullptr;
+      }
+    }
+    EnsureCommitted(high_mark);
+    WriteCode(generated_code_execute_base_ + offset, code, length);
+    return generated_code_execute_base_ + offset;
+  }
+
+  // hakuX-Boosted: copies bytes over placed code through the write view and
+  // flushes the instruction cache for them. A single aligned 4-byte word is
+  // written with one store.
+  void WriteCode(uint8_t* execute_address, const void* data, size_t length) {
+    uint8_t* write_address =
+        generated_code_write_base_ +
+        (execute_address - generated_code_execute_base_);
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+    const bool jit_write_toggle =
+        generated_code_execute_base_ == generated_code_write_base_;
+    if (jit_write_toggle) {
+      pthread_jit_write_protect_np(0);
+    }
+#endif
+    if (length == 4 && !(reinterpret_cast<uintptr_t>(write_address) & 3)) {
+      uint32_t word;
+      std::memcpy(&word, data, 4);
+      reinterpret_cast<std::atomic<uint32_t>*>(write_address)
+          ->store(word, std::memory_order_release);
+    } else {
+      std::memcpy(write_address, data, length);
+    }
+#if XE_PLATFORM_MAC && XE_ARCH_ARM64
+    if (jit_write_toggle) {
+      pthread_jit_write_protect_np(1);
+    }
+#endif
+    self().FlushCodeRange(write_address, length);
+    if (write_address != execute_address) {
+      self().FlushCodeRange(execute_address, length);
+    }
+  }
+
   GuestFunction* LookupFunction(uint64_t host_pc) override {
     if (generated_code_map_.empty()) {
       return nullptr;
