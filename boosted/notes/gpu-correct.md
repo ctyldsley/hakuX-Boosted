@@ -161,3 +161,56 @@ read further here):
 3. Cost of the readback change: Gears and Fable II, 5 minutes hands-off, fps
    per GHz (`tools/run-one.sh` `perf.txt`) against build 149. If it costs, the
    drain can be limited to resolves whose fence the CPU then waits on.
+
+## Gears of War darker overall than on the console (asked by the lead)
+
+Read, core-wide, against Xenos; nothing found clearly wrong, so nothing
+changed. Paths, with what each does on this fork:
+
+- **Gamma render targets** (`k_8_8_8_8_GAMMA`): with the fork's
+  `gamma_render_target_as_unorm16 = true` (in the phone's config) they are
+  `R16G16B16A16_UNORM` holding linear values
+  (`vulkan/vulkan_render_target_cache.cc` around 1029 and 4129), blended in
+  linear as the console's ROP does. The pixel shader then skips its own PWL
+  encode (`vulkan_command_processor.cc` around 8516,
+  `spirv_shader_translator_rb.cc` around 1272), and the encode happens when
+  the target is stored to EDRAM (`vulkan_render_target_cache.cc` around
+  8910) and in ownership transfers (5838, 6119, 6395, 8476). The direct host
+  resolve refuses gamma sources (1872, 2367), so their resolves go through
+  the EDRAM store, which encodes. No double encode or missing encode found.
+- **Gamma textures** (`TextureSign::kGamma`): decoded PWL to linear once, in
+  the vector path and the per-component path alike
+  (`spirv_shader_translator_fetch.cc` 2370 and 2468); no sRGB image formats
+  are used anywhere in the Vulkan texture cache.
+- **MSAA gamma resolves**: `gamma_decode_pwl_resolve` (default on) averages
+  in linear, as the console's resolve does (`draw_util.cc` 74, 1380).
+- **Presentation**: the guest's 256-entry table for 8_8_8_8 front buffers and
+  PWL ramp for 2_10_10_10 are applied by the upstream compute shaders
+  (`vulkan_command_processor.cc` around 2413); the swap chain is plain
+  `B8G8R8A8`/`R8G8B8A8_UNORM` (`ui/vulkan/vulkan_presenter.cc` around 1116),
+  so no extra sRGB encode or decode at the end.
+- **Display gamma the kernel reports** (`kernel_display_gamma_type = 2`,
+  BT.709, `xboxkrnl_video.cc` 40): upstream's default, which titles use to
+  build their ramp. A console on HDMI reports what its video settings say; 2
+  is a choice, not a fault. Worth one A/B with 1 (sRGB) on the phone.
+- **7e3 targets** (`2_10_10_10_FLOAT`): stored as `R16G16B16A16_SFLOAT`
+  (4135), as upstream, without clamping to 7e3's 0 to 31.875, which can only
+  brighten. One fork departure from Xenos: `value_convert_7e3_8888_reuse`
+  (`render_target_cache.cc` 207, 1577) decodes a 7e3 tile reused in place as
+  8_8_8_8 under blending, where the console reinterprets the bits. That only
+  touches pixels a title blends over without clearing; unlikely to darken a
+  whole frame, but a cheap A/B.
+- **Exposure from resolved textures**: UE3 reads its luminance on the GPU
+  through textures, which the resolve updates in shared memory; the readback
+  fault above affected only CPU reads of resolves, so it should not change
+  Gears' brightness.
+
+Linked to the shadows? Partly, possibly: UE3 multiplies the scene where its
+shadow stencil is set, so triangles wrongly counted in shadow are fully dark
+(as in the screenshot), and wrong volumes darken more than they lighten. A
+uniformly darker frame, though, would need a gamma or exposure cause, and none
+was found in the code. Needed to tell: a console screenshot of the same spot.
+
+Phone A/Bs for the darkness (each against the same Gears spot, one change at
+a time): `gamma_render_target_as_unorm16 = false`;
+`kernel_display_gamma_type = 1`; `value_convert_7e3_8888_reuse = false`.
