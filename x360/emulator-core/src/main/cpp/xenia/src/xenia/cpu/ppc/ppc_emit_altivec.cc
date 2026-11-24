@@ -563,7 +563,12 @@ int InstrEmit_vcmpbfp_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
   // if vA or vB are NaN, the 2 high-order bits are set (0xC0000000)
   Value* va_value = f.LoadVR(va);
   Value* vb_value = f.LoadVR(vb);
-  Value* gt = f.VectorCompareSGT(va_value, vb_value, FLOAT32_TYPE);
+  // hakuX-Boosted: "not (a <= b)" rather than "a > b", so that a NaN in
+  // either operand sets this bit too, as the comment above says and as the
+  // second bit already did (upstream set only 0x40000000 for a NaN). Found by
+  // the differential test (boosted/difftest, regressions.txt "vcmpbfp_*").
+  Value* gt =
+      f.Not(f.VectorCompareSGE(vb_value, va_value, FLOAT32_TYPE));
   Value* lt =
       f.Not(f.VectorCompareSGE(va_value, f.Neg(vb_value), FLOAT32_TYPE));
   Value* v =
@@ -575,8 +580,14 @@ int InstrEmit_vcmpbfp_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
   if (rc) {
     // CR0:4 = 0; CR0:5 = VT == 0; CR0:6 = CR0:7 = 0;
     // If all of the elements are within bounds, CR6[2] is set
-    // FIXME: Does not affect CR6[0], but the following function does.
-    f.UpdateCR6(f.Or(gt, lt));
+    // hakuX-Boosted: only that bit. UpdateCR6 also set CR6[0] when every
+    // element was out of bounds (its "all true" test), which this instruction
+    // leaves at 0.
+    f.StoreContext(offsetof(PPCContext, cr6.cr6_all_equal), f.LoadZeroInt8());
+    f.StoreContext(offsetof(PPCContext, cr6.cr6_1), f.LoadZeroInt8());
+    f.StoreContext(offsetof(PPCContext, cr6.cr6_none_equal),
+                   f.IsFalse(f.Or(gt, lt)));
+    f.StoreContext(offsetof(PPCContext, cr6.cr6_3), f.LoadZeroInt8());
   }
   return 0;
 }
