@@ -91,7 +91,9 @@ jobs:
         run: |
           if [ -f "$RUNNER_TEMP/dt-out/report.md" ]; then
             head -c 900000 "$RUNNER_TEMP/dt-out/report.md" >> "$GITHUB_STEP_SUMMARY"
-            head -12 "$RUNNER_TEMP/dt-out/report.md"
+            # into the log as well: the verdict, the table, and every new
+            # difference with its examples
+            sed -n '1,/^## Known differences/p' "$RUNNER_TEMP/dt-out/report.md" | head -400
           fi
 
       - uses: actions/upload-artifact@v4

@@ -75,6 +75,14 @@ _start:
   andc 3, 3, 4
   ori 3, 3, 0x2000      /* FP */
   oris 3, 3, 0x0200     /* VEC */
+  /* 64-bit mode for the C code: the machine starts this firmware in 32-bit
+   * mode, where 64-bit compiled code goes subtly wrong (record forms and
+   * CTR tests take 32 bits). Without this the first case of a run, the only
+   * one generated before a case had returned in 64-bit mode, could differ
+   * from the runner's. */
+  li 4, 1
+  sldi 4, 4, 63
+  or 3, 3, 4
   mtmsrd 3
   isync
   rldicl 3, 3, 0, 1     /* SF off: the mode the console runs titles in */

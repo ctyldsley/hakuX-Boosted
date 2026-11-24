@@ -328,7 +328,9 @@ vcmpgtsh  vmx  VD VA VB vrc
 vcmpgtsw  vmx  VD VA VB vrc
 mfvscr    vmx  VD                  !t1
 mtvscr    vmx  VBnj                !first
-# ---- VMX, float
+# ---- VMX, float (the integer-to-float conversions are single instructions
+# only: in a float sequence their input would be float bits, a NaN's among them,
+# whose sign the two sides do not agree on)
 vaddfp    vmxf VD VA VB
 vsubfp    vmxf VD VA VB
 vmaddfp   vmxf VD VA VC VB
@@ -343,8 +345,8 @@ vrfin     vmxf VD VB
 vrfiz     vmxf VD VB
 vrfip     vmxf VD VB
 vrfim     vmxf VD VB
-vcfsx     vmxf VD VB u5
-vcfux     vmxf VD VB u5
+vcfsx     vmxf VD VB u5            !t1
+vcfux     vmxf VD VB u5            !t1
 vctsxs    vmxf VD VB u5            !vint
 vctuxs    vmxf VD VB u5            !vint
 vcmpeqfp  vmxf VD VA VB vrc
@@ -391,8 +393,8 @@ vrfin128    v128f VD128 VB128              => vrfin D=0 B=1
 vrfiz128    v128f VD128 VB128              => vrfiz D=0 B=1
 vrfip128    v128f VD128 VB128              => vrfip D=0 B=1
 vrfim128    v128f VD128 VB128              => vrfim D=0 B=1
-vcsxwfp128  v128f VD128 VB128 u5           => vcfsx D=0 B=1 I=2
-vcuxwfp128  v128f VD128 VB128 u5           => vcfux D=0 B=1 I=2
+vcsxwfp128  v128f VD128 VB128 u5           => vcfsx D=0 B=1 I=2 !t1
+vcuxwfp128  v128f VD128 VB128 u5           => vcfux D=0 B=1 I=2 !t1
 vcfpsxws128 v128f VD128 VB128 u5           => vctsxs D=0 B=1 I=2 !vint
 vcfpuxws128 v128f VD128 VB128 u5           => vctuxs D=0 B=1 I=2 !vint
 vcmpeqfp128 v128f VD128 VA128 VB128 rc6    => vcmpeqfp D=0 A=1 B=2 RC=3

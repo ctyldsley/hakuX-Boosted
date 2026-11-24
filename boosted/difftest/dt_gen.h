@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define DT_VERSION 2u
+#define DT_VERSION 3u
 
 // ---- state layout
 #define W_GPR 0
@@ -538,7 +538,8 @@ static inline void dt_emit_reservation(DtGen* g, int index) {
     g->gpr_taint &= ~(1u << d);
     for (uint32_t n = dt_below(&g->r, 3); n; --n)
       dt_emit(g, dt_pick_insn(g, DT_INT_CLASSES, IF_DIV | IF_FIRST | IF_T1 | IF_KNOWN));
-    if (g->gpr_taint >> s & 1) s = d;
+    // The stored register must be whole (stdcx. stores all 64 bits).
+    while (g->gpr_taint >> s & 1) s = dt_below(&g->r, 32);
   }
   dt_emit_raw(g, dt_insns[si].opx | (s << 21) | ab, si);
 }
@@ -549,7 +550,11 @@ static inline void dt_gen_case(uint64_t seed, uint64_t index, uint32_t tier, DtC
   DtGen gen;
   DtGen* g = &gen;
   DtRng* r = &g->r;
-  r->s = seed * 0x9E3779B97F4A7C15ull + index * 0xD1B54A32D192ED03ull + tier;
+  // Seed, index and tier are mixed one after the other: added together,
+  // neighbouring seeds gave the same stream a few draws apart.
+  r->s = seed;
+  r->s = dt_next(r) ^ (index * 0xD1B54A32D192ED03ull);
+  r->s = dt_next(r) + tier;
   dt_next(r);
   g->c = c;
   g->gpr_taint = g->fpr_taint = g->vr_nosrc = g->vr_taint = 0;
@@ -700,8 +705,12 @@ static inline void dt_gen_case(uint64_t seed, uint64_t index, uint32_t tier, DtC
     // instructions favour is loaded with an immediate, so that they are
     // translated with a constant operand (the translator folds those and
     // the back end has separate code for them).
-    if (dt_chance(r, 1, 3)) {
+    // (Not in the float vector themes: a vspltis* result is a denormal or a
+    // NaN as a float, which the sequences keep out of float instructions.)
+    int fed = 0;
+    if (!float_vectors && dt_chance(r, 1, 3)) {
       uint32_t imm = (uint32_t)dt_next(r);
+      fed = 1;
       if (class_mask & (DT_CLASSMASK(CL_VMX) | DT_V128_CLASSES | DT_CLASSMASK(CL_VMEM))) {
         static const char* const names[] = {"vspltisb", "vspltish", "vspltisw"};
         uint32_t which = dt_below(r, 3);
@@ -718,7 +727,9 @@ static inline void dt_gen_case(uint64_t seed, uint64_t index, uint32_t tier, DtC
     }
     for (uint32_t n = 0; n < count && c->nx < DT_MAX_INSN; ++n) {
       uint32_t forbid = IF_TOL | IF_ELEM | IF_FIRST | IF_VMULFP | IF_T1 | IF_KNOWN;
-      if (n) forbid |= IF_DIV | IF_MTFSF;
+      // A division only as the very first instruction: its operands are
+      // then the initial state, which dt_fix_division can see.
+      if (n || fed) forbid |= IF_DIV | IF_MTFSF;
       int index;
       do {
         index = dt_pick_insn(g, class_mask, forbid);
