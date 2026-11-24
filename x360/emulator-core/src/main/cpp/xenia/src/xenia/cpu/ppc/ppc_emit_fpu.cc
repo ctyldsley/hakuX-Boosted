@@ -424,8 +424,13 @@ int InstrEmit_mtfsfx(PPCHIRBuilder& f, const InstrData& i) {
     // Store under control of mask.
     // Expand the mask from 8 bits -> 32 bits.
     uint32_t mask = 0;
+    // hakuX-Boosted: FM's lowest bit selects FPSCR's lowest four bits (field
+    // 7: the rounding mode). Upstream tested the bits in the opposite order,
+    // so mtfsf 0x01 wrote the top four bits and left the rounding mode, and
+    // any mask but 0xFF or a palindrome wrote the wrong fields. Found by the
+    // differential test (boosted/difftest, regressions.txt "mtfsf_low_field_*").
     for (int j = 0; j < 8; j++) {
-      if (i.XFL.FM & (1 << (j ^ 7))) {
+      if (i.XFL.FM & (1 << j)) {
         mask |= 0xF << (4 * j);
       }
     }
