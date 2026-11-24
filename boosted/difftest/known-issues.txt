@@ -1,0 +1,40 @@
+# hakuX-Boosted: differences between the ARM64 back end and the reference that
+# the differential test (run.sh) knows of and does not fail on. Each is
+# described in boosted/notes/jit-difftest.md; removing a line makes the test
+# fail on it again, which is how a fix is checked.
+#
+#   <instruction>  <kinds of state that differ>  # reason
+#
+# The instruction is the report's key (mnemonic as in the core's instruction
+# list, "+oe" and "+rc" for those forms; a key without them covers them too),
+# or * for any instruction. The kinds are the report's (gpr, cr0..cr7, cr.so,
+# xer.ca, fpr, fpr.nan, vr, vr.nan, mem, crash ...), or * for any. An
+# instruction named here is also left out of the generated sequences.
+
+# ---- state the translator does not keep (upstream's design)
+*  cr.so      # CR's summary overflow bits are never written: UpdateCR, the compares and stwcx. leave what was there
+*  vscr.sat   # VSCR[SAT] is not set by the saturating vector instructions, nor by mtvscr
+*  fpr.nan    # both results are NaNs; sign, payload or quieting follow the ARM host's rules
+*  vr.nan     # both results are NaNs; sign, payload or quieting follow the ARM host's rules
+
+# ---- wrong, not fixed here
+stfs  mem     # a double that is not exactly a single is rounded by the host's conversion; the console truncates the mantissa (and gives a defined pattern out of range)
+stfsu  mem    # as stfs
+stfsx  mem    # as stfs
+stfsux  mem   # as stfs
+
+fmaddsx  fpr       # computed as a double fused multiply-add and then rounded to single: rounded twice, one unit off in rare cases (exact only for add, subtract, multiply, divide); a single-precision host instruction would need operands known to be singles
+fmsubsx  fpr       # as fmadds
+fnmaddsx  fpr      # as fmadds (and as fnmadd below)
+fnmsubsx  fpr      # as fmadds (and as fnmadd below)
+
+# ---- the reference is not an authority here
+fresx  fpr         # QEMU returns -0.5 for the reciprocal estimate of -0; ours (-infinity) is what the architecture says
+vexptefp  vr       # 2^x: QEMU's own approximation differs from ours at overflow and at exactly representable results; neither is the console's
+vexptefp128  vr    # as vexptefp
+vlogefp  vr        # log2: as vexptefp
+vlogefp128  vr     # as vexptefp
+vmsum3fp128  vr    # the reference is plain arithmetic; the back end returns a NaN when a term is infinite or the sum overflows, upstream's reading of the console
+vmsum4fp128  vr    # as vmsum3fp128
+fnmaddx  fpr       # in the directed rounding modes QEMU rounds after negating; the architecture says the result is that of fmadd, negated, which is what we do
+fnmsubx  fpr       # as fnmadd

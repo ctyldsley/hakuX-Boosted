@@ -563,7 +563,12 @@ int InstrEmit_vcmpbfp_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
   // if vA or vB are NaN, the 2 high-order bits are set (0xC0000000)
   Value* va_value = f.LoadVR(va);
   Value* vb_value = f.LoadVR(vb);
-  Value* gt = f.VectorCompareSGT(va_value, vb_value, FLOAT32_TYPE);
+  // hakuX-Boosted: "not (a <= b)" rather than "a > b", so that a NaN in
+  // either operand sets this bit too, as the comment above says and as the
+  // second bit already did (upstream set only 0x40000000 for a NaN). Found by
+  // the differential test (boosted/difftest, regressions.txt "vcmpbfp_*").
+  Value* gt =
+      f.Not(f.VectorCompareSGE(vb_value, va_value, FLOAT32_TYPE));
   Value* lt =
       f.Not(f.VectorCompareSGE(va_value, f.Neg(vb_value), FLOAT32_TYPE));
   Value* v =
@@ -575,8 +580,14 @@ int InstrEmit_vcmpbfp_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
   if (rc) {
     // CR0:4 = 0; CR0:5 = VT == 0; CR0:6 = CR0:7 = 0;
     // If all of the elements are within bounds, CR6[2] is set
-    // FIXME: Does not affect CR6[0], but the following function does.
-    f.UpdateCR6(f.Or(gt, lt));
+    // hakuX-Boosted: only that bit. UpdateCR6 also set CR6[0] when every
+    // element was out of bounds (its "all true" test), which this instruction
+    // leaves at 0.
+    f.StoreContext(offsetof(PPCContext, cr6.cr6_all_equal), f.LoadZeroInt8());
+    f.StoreContext(offsetof(PPCContext, cr6.cr6_1), f.LoadZeroInt8());
+    f.StoreContext(offsetof(PPCContext, cr6.cr6_none_equal),
+                   f.IsFalse(f.Or(gt, lt)));
+    f.StoreContext(offsetof(PPCContext, cr6.cr6_3), f.LoadZeroInt8());
   }
   return 0;
 }
@@ -880,14 +891,97 @@ int InstrEmit_vmaxuw(PPCHIRBuilder& f, const InstrData& i) {
   return 0;
 }
 
+// hakuX-Boosted: the thirteen instructions below were XEINSTRNOTIMPLEMENTED
+// (the translated code trapped). They are written here element by element
+// with scalar operations: slower than a vector sequence would be, but a title
+// that runs one now gets the right answer instead of stopping. Checked
+// against the reference by the differential test (boosted/difftest; the
+// saturating ones do not set VSCR[SAT], like the rest of the front end).
+
+// vmule* and vmulo*: the even (first of each pair) or odd elements of VA and
+// VB, multiplied to elements twice as wide.
+static int InstrEmit_vmul_(PPCHIRBuilder& f, const InstrData& i, TypeName in,
+                           TypeName out, bool is_signed, bool odd) {
+  Value* a = f.LoadVR(i.VX.VA);
+  Value* b = f.LoadVR(i.VX.VB);
+  Value* v = f.LoadZeroVec128();
+  const uint8_t count = in == INT8_TYPE ? 8 : 4;
+  for (uint8_t n = 0; n < count; ++n) {
+    const uint8_t from = static_cast<uint8_t>(2 * n + (odd ? 1 : 0));
+    Value* x = f.Extract(a, from, in);
+    Value* y = f.Extract(b, from, in);
+    // Multiplied as 32-bit values (the back end has no 16-bit multiply).
+    x = is_signed ? f.SignExtend(x, INT32_TYPE) : f.ZeroExtend(x, INT32_TYPE);
+    y = is_signed ? f.SignExtend(y, INT32_TYPE) : f.ZeroExtend(y, INT32_TYPE);
+    Value* product = f.Mul(x, y);
+    if (out == INT16_TYPE) {
+      product = f.Truncate(product, INT16_TYPE);
+    }
+    v = f.Insert(v, n, product);
+  }
+  f.StoreVR(i.VX.VD, v);
+  return 0;
+}
+
+// vmhaddshs and vmhraddshs: (VA * VB [+ 0x4000]) >> 15, plus VC, saturated
+// to a signed halfword.
+static int InstrEmit_vmhaddshs_(PPCHIRBuilder& f, const InstrData& i,
+                                bool round) {
+  Value* a = f.LoadVR(i.VXA.VA);
+  Value* b = f.LoadVR(i.VXA.VB);
+  Value* c = f.LoadVR(i.VXA.VC);
+  Value* v = f.LoadZeroVec128();
+  for (uint8_t n = 0; n < 8; ++n) {
+    Value* t = f.Mul(f.SignExtend(f.Extract(a, n, INT16_TYPE), INT32_TYPE),
+                     f.SignExtend(f.Extract(b, n, INT16_TYPE), INT32_TYPE));
+    if (round) {
+      t = f.Add(t, f.LoadConstantInt32(0x4000));
+    }
+    t = f.Sha(t, f.LoadConstantInt8(15));
+    t = f.Add(t, f.SignExtend(f.Extract(c, n, INT16_TYPE), INT32_TYPE));
+    t = f.Select(f.CompareSGT(t, f.LoadConstantInt32(0x7FFF)),
+                 f.LoadConstantInt32(0x7FFF), t);
+    t = f.Select(f.CompareSLT(t, f.LoadConstantInt32(-0x8000)),
+                 f.LoadConstantInt32(-0x8000), t);
+    v = f.Insert(v, n, f.Truncate(t, INT16_TYPE));
+  }
+  f.StoreVR(i.VXA.VD, v);
+  return 0;
+}
+
+// vupkhpx and vupklpx: four 1:5:5:5 pixels (the first or the last four
+// halfwords of VB) to four words: the top bit to a byte of 0x00 or 0xFF, each
+// five-bit channel to a byte.
+static int InstrEmit_vupkpx_(PPCHIRBuilder& f, const InstrData& i,
+                             uint8_t first) {
+  Value* b = f.LoadVR(i.VX.VB);
+  Value* v = f.LoadZeroVec128();
+  for (uint8_t n = 0; n < 4; ++n) {
+    Value* p = f.ZeroExtend(
+        f.Extract(b, static_cast<uint8_t>(first + n), INT16_TYPE), INT32_TYPE);
+    Value* top = f.And(f.Sha(f.Shl(p, f.LoadConstantInt8(16)),
+                             f.LoadConstantInt8(31)),
+                       f.LoadConstantUint32(0xFF000000u));
+    Value* red = f.Shl(f.And(f.Shr(p, f.LoadConstantInt8(10)),
+                             f.LoadConstantUint32(0x1F)),
+                       f.LoadConstantInt8(16));
+    Value* green = f.Shl(f.And(f.Shr(p, f.LoadConstantInt8(5)),
+                               f.LoadConstantUint32(0x1F)),
+                         f.LoadConstantInt8(8));
+    Value* blue = f.And(p, f.LoadConstantUint32(0x1F));
+    v = f.Insert(v, n, f.Or(f.Or(top, red), f.Or(green, blue)));
+  }
+  f.StoreVR(i.VX.VD, v);
+  return 0;
+}
+
+
 int InstrEmit_vmhaddshs(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmhaddshs_(f, i, false);
 }
 
 int InstrEmit_vmhraddshs(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmhaddshs_(f, i, true);
 }
 
 int InstrEmit_vminfp_(PPCHIRBuilder& f, uint32_t vd, uint32_t va, uint32_t vb) {
@@ -949,8 +1043,19 @@ int InstrEmit_vminuw(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_vmladduhm(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // (VD) <- ((VA) * (VB) + (VC)) mod 2^16, eight halfwords
+  Value* a = f.LoadVR(i.VXA.VA);
+  Value* b = f.LoadVR(i.VXA.VB);
+  Value* c = f.LoadVR(i.VXA.VC);
+  Value* v = f.LoadZeroVec128();
+  for (uint8_t n = 0; n < 8; ++n) {
+    Value* t = f.Add(f.Mul(f.ZeroExtend(f.Extract(a, n, INT16_TYPE), INT32_TYPE),
+                           f.ZeroExtend(f.Extract(b, n, INT16_TYPE), INT32_TYPE)),
+                     f.ZeroExtend(f.Extract(c, n, INT16_TYPE), INT32_TYPE));
+    v = f.Insert(v, n, f.Truncate(t, INT16_TYPE));
+  }
+  f.StoreVR(i.VXA.VD, v);
+  return 0;
 }
 
 int InstrEmit_vmrghb(PPCHIRBuilder& f, const InstrData& i) {
@@ -1161,43 +1266,35 @@ int InstrEmit_vmsum4fp128(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_vmulesb(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmul_(f, i, INT8_TYPE, INT16_TYPE, true, false);
 }
 
 int InstrEmit_vmulesh(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmul_(f, i, INT16_TYPE, INT32_TYPE, true, false);
 }
 
 int InstrEmit_vmuleub(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmul_(f, i, INT8_TYPE, INT16_TYPE, false, false);
 }
 
 int InstrEmit_vmuleuh(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmul_(f, i, INT16_TYPE, INT32_TYPE, false, false);
 }
 
 int InstrEmit_vmulosb(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmul_(f, i, INT8_TYPE, INT16_TYPE, true, true);
 }
 
 int InstrEmit_vmulosh(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmul_(f, i, INT16_TYPE, INT32_TYPE, true, true);
 }
 
 int InstrEmit_vmuloub(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmul_(f, i, INT8_TYPE, INT16_TYPE, false, true);
 }
 
 int InstrEmit_vmulouh(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vmul_(f, i, INT16_TYPE, INT32_TYPE, false, true);
 }
 
 int InstrEmit_vmulfp128(PPCHIRBuilder& f, const InstrData& i) {
@@ -2125,13 +2222,11 @@ int InstrEmit_vpkuwus128(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_vupkhpx(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vupkpx_(f, i, 0);
 }
 
 int InstrEmit_vupklpx(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  return InstrEmit_vupkpx_(f, i, 4);
 }
 
 int InstrEmit_vupkhsh_(PPCHIRBuilder& f, uint32_t vd, uint32_t vb) {

@@ -20,12 +20,14 @@
 // inputs
 // hakuX-Boosted: see InstrEmit_mcrf.
 DEFINE_bool(
-    ppc_mcrf_copies_field, false,
+    ppc_mcrf_copies_field, true,
     "Translate mcrf as PowerPC defines it: the four bits of the source "
     "condition register field copied to the destination field. Off, mcrf is "
     "translated as upstream does, which is only right when the source is cr0 "
-    "holding 'less than'. Takes effect for functions translated after it is "
-    "set.",
+    "holding 'less than'. On by default since the differential test "
+    "(boosted/difftest) showed the reference CPU agreeing with it on every "
+    "case and with upstream's form on almost none. Takes effect for "
+    "functions translated after it is set.",
     "CPU");
 
 DEFINE_bool(ignore_trap_instructions, true,
@@ -535,7 +537,8 @@ int InstrEmit_mcrf(PPCHIRBuilder& f, const InstrData& i) {
   // stores zeros; UpdateCR then replaces them with a compare of the source
   // field against zero. The upstream tests only copy from cr0 with the LT
   // bit set, where that happens to give the right answer. The exact form is
-  // behind a setting because it changes what translated code does.
+  // behind a setting because it changes what translated code does; the
+  // setting is on by default (see its description).
   if (cvars::ppc_mcrf_copies_field) {
     uint32_t crfs = i.XL.BI >> 2;
     Value* bits[4];

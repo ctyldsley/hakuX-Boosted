@@ -83,15 +83,15 @@ set(_third_party
   ${XE_TP}/boost_context/context/src/asm/ontop_arm64_aapcs_elf_gas.S
 )
 
-add_executable(xenia-cpu-ppc-tests
-  ${XE_SRC}/cpu/ppc/testing/ppc_testing_main.cc
-  ${XE_SRC}/base/console_app_main_posix.cc
+# Everything but the runner's own source, compiled once for both programs.
+add_library(xenia-cpu-core OBJECT
   ${CMAKE_CURRENT_SOURCE_DIR}/stubs.cc
   ${XE_SRC}/memory.cc
+  ${XE_ROOT}/../aarch64_disasm.cpp
   ${_base} ${_cpu} ${_cpu_backend} ${_cpu_compiler} ${_cpu_passes} ${_cpu_hir}
   ${_cpu_ppc} ${_cpu_a64} ${_third_party}
 )
-target_include_directories(xenia-cpu-ppc-tests PRIVATE ${XE_TP}/capstone)
+target_include_directories(xenia-cpu-core PRIVATE ${XE_TP}/capstone)
 # The code cache's unwind tables exist in one form only, the fork's own
 # (XE_PLATFORM_xendroid, a define platform.h otherwise makes on Android):
 # these two files are compiled as the phone's build compiles them.
@@ -99,6 +99,27 @@ set_source_files_properties(
   ${XE_SRC}/cpu/backend/a64/a64_code_cache.cc
   ${XE_SRC}/cpu/backend/a64/a64_code_cache_posix.cc
   PROPERTIES COMPILE_DEFINITIONS "XE_PLATFORM_xendroid=1")
-target_sources(xenia-cpu-ppc-tests PRIVATE ${XE_ROOT}/../aarch64_disasm.cpp)
+target_compile_definitions(xenia-cpu-core PRIVATE XE_SOURCE_ROOT="${XE_ROOT}")
+
+add_executable(xenia-cpu-ppc-tests
+  ${XE_SRC}/cpu/ppc/testing/ppc_testing_main.cc
+  ${XE_SRC}/base/console_app_main_posix.cc
+  $<TARGET_OBJECTS:xenia-cpu-core>
+)
 target_compile_definitions(xenia-cpu-ppc-tests PRIVATE XE_SOURCE_ROOT="${XE_ROOT}")
 target_link_libraries(xenia-cpu-ppc-tests PRIVATE pthread dl rt m)
+
+# The differential tester's runner (boosted/difftest): the same translator
+# driven by generated cases instead of the assembled tests. DT_GEN is the
+# directory dt_table.py wrote dt_table.inc to.
+if(DT_GEN)
+  set(DT_DIR "${XE_ROOT}/../../../../../../boosted/difftest")
+  add_executable(xenia-jit-difftest
+    ${DT_DIR}/dt_jit.cc
+    ${XE_SRC}/base/console_app_main_posix.cc
+    $<TARGET_OBJECTS:xenia-cpu-core>
+  )
+  target_include_directories(xenia-jit-difftest PRIVATE ${DT_DIR} ${DT_GEN})
+  target_compile_options(xenia-jit-difftest PRIVATE -O1)
+  target_link_libraries(xenia-jit-difftest PRIVATE pthread dl rt m)
+endif()

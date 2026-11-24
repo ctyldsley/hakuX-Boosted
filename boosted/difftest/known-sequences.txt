@@ -1,0 +1,7 @@
+# hakuX-Boosted: single generated sequences that differ for a reason that is
+# written down and not yet fixed (boosted/notes/jit-difftest.md, section 4).
+# A sequence cannot be put in known-issues.txt (that file is about single
+# instructions); a line here names one case exactly, so the run stays red for
+# every other sequence. Remove the line when the bug is fixed.
+#
+#   <seed> <tier> <case>  # reason
