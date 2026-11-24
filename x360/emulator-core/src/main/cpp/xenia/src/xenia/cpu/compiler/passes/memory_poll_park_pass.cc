@@ -762,6 +762,16 @@ bool MemoryPollParkPass::TryInstrumentLoop(HIRBuilder* builder, Block* block) {
   bool saw_load = false;
   size_t delay_count = 0;
   std::unordered_set<const Value*> load_tainted;
+  // hakuX-Boosted: which of the thread's registers each value was computed
+  // from, to tell a scan from a wait (see below the loop).
+  std::unordered_map<const Value*, std::vector<uint64_t>> from_registers;
+  std::vector<uint64_t> advancing_registers;
+  std::vector<uint64_t> load_address_registers;
+  auto registers_of = [&from_registers](
+                          const Value* value) -> const std::vector<uint64_t>* {
+    auto it = value ? from_registers.find(value) : from_registers.end();
+    return it == from_registers.end() ? nullptr : &it->second;
+  };
   for (Instr* instr = block->instr_head; instr != loop_branch;
        instr = instr->next) {
     if (instr->IsFake()) {
@@ -772,13 +782,38 @@ bool MemoryPollParkPass::TryInstrumentLoop(HIRBuilder* builder, Block* block) {
       ++delay_count;
       continue;
     }
+    if (op == &OPCODE_LOAD_CONTEXT_info) {
+      from_registers[instr->dest] = {instr->src1.offset};
+      continue;
+    }
+    if (op == &OPCODE_STORE_CONTEXT_info) {
+      // A register written with a value worked out from its own last value
+      // (not simply stored back) moves on every pass.
+      const Value* stored = instr->src2.value;
+      const uint64_t at = instr->src1.offset;
+      const bool stored_back = stored->def &&
+                               stored->def->opcode == &OPCODE_LOAD_CONTEXT_info &&
+                               stored->def->src1.offset == at;
+      if (const auto* regs = registers_of(stored); regs && !stored_back) {
+        if (std::find(regs->begin(), regs->end(), at) != regs->end()) {
+          advancing_registers.push_back(at);
+        }
+      }
+      continue;
+    }
     if (op == &OPCODE_CHECK_PREEMPT_info ||
-        op == &OPCODE_MEMORY_BARRIER_info ||
-        op == &OPCODE_LOAD_CONTEXT_info ||
-        op == &OPCODE_STORE_CONTEXT_info) {
+        op == &OPCODE_MEMORY_BARRIER_info) {
       continue;
     }
     if (op == &OPCODE_LOAD_info || op == &OPCODE_LOAD_OFFSET_info) {
+      for (const Value* part :
+           {instr->src1.value,
+            op == &OPCODE_LOAD_OFFSET_info ? instr->src2.value : nullptr}) {
+        if (const auto* regs = registers_of(part)) {
+          load_address_registers.insert(load_address_registers.end(),
+                                        regs->begin(), regs->end());
+        }
+      }
       saw_load = true;
       load_tainted.insert(instr->dest);
       continue;
@@ -803,6 +838,15 @@ bool MemoryPollParkPass::TryInstrumentLoop(HIRBuilder* builder, Block* block) {
             break;
           }
         }
+        std::vector<uint64_t> regs;
+        for (Value* src : srcs) {
+          if (const auto* src_regs = registers_of(src)) {
+            regs.insert(regs.end(), src_regs->begin(), src_regs->end());
+          }
+        }
+        if (!regs.empty()) {
+          from_registers[instr->dest] = std::move(regs);
+        }
       }
       continue;
     }
@@ -820,6 +864,23 @@ bool MemoryPollParkPass::TryInstrumentLoop(HIRBuilder* builder, Block* block) {
       !load_tainted.count(loop_branch->src1.value)) {
     return reject("branch condition not derived from the polled load",
                   nullptr);
+  }
+
+  // hakuX-Boosted: a loop that loads from an address it moves on every
+  // pass is walking memory (a string length, a search, a compare of two
+  // buffers), not waiting for a word to change: it ends by its own
+  // progress, and the site below would cost it a load and a test of the
+  // preemption flag on every byte. Left as the title wrote it. (A wait
+  // loads from the same place each pass; one that counts its tries moves
+  // a register no address is made from, and is still taken.)
+  if (!is_delay_loop) {
+    for (uint64_t reg : load_address_registers) {
+      if (std::find(advancing_registers.begin(), advancing_registers.end(),
+                    reg) != advancing_registers.end()) {
+        return reject("a load address moves on every pass: a scan, not a wait",
+                      nullptr);
+      }
+    }
   }
 
   // Inject the adaptive backoff ahead of the loop-back branch, feeding the
