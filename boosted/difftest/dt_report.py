@@ -74,7 +74,10 @@ def explain(known, tier, key, kinds):
 
 
 def regression_line(name, j):
-    parts = [name, 'code=' + ','.join(j['code']), 'in:']
+    parts = [name, 'code=' + ','.join(j['code'])]
+    if j['skip'].get('floatvec'):
+        parts.append('floatvec=1')
+    parts.append('in:')
     parts += ['%s=%s' % kv for kv in j['in'].items()]
     parts.append('out:')
     parts += ['%s=%s' % kv for kv in j['refout'].items()]
@@ -90,6 +93,8 @@ def regression_line(name, j):
         skip.append('vscrmask=' + sk['vscrmask'])
     if sk['tol']:
         skip.append('tol=1')
+    if sk.get('nanequal'):
+        skip.append('nanequal=1')
     skip += ['v%d' % v for v in sk['vr']]
     if skip:
         parts += ['skip:'] + skip

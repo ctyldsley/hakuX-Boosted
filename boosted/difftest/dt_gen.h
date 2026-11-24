@@ -16,7 +16,7 @@
 
 #include <stdint.h>
 
-#define DT_VERSION 1u
+#define DT_VERSION 2u
 
 // ---- state layout
 #define W_GPR 0
@@ -180,7 +180,20 @@ static inline uint64_t dt_gpr_value(DtRng* r) {
   }
 }
 
-static inline uint64_t dt_double_bits(DtRng* r) {
+static inline uint64_t dt_double_bits_any(DtRng* r);
+// nan: whether NaNs may be among the values. Sequences start without them:
+// the two sides agree on which results are NaNs, not always on a NaN's sign
+// and payload (known-issues.txt), and in a sequence that difference would
+// travel into everything computed from it.
+static inline uint64_t dt_double_bits(DtRng* r, int nan) {
+  uint64_t v = dt_double_bits_any(r);
+  if (!nan && (v & 0x7FF0000000000000ull) == 0x7FF0000000000000ull &&
+      (v & 0x000FFFFFFFFFFFFFull)) {
+    v &= 0xBFFFFFFFFFFFFFFFull;
+  }
+  return v;
+}
+static inline uint64_t dt_double_bits_any(DtRng* r) {
   static const uint64_t edge[] = {
       0x0000000000000000ull, 0x8000000000000000ull, 0x7FF0000000000000ull,
       0xFFF0000000000000ull, 0x7FF8000000000000ull, 0xFFF8000000000001ull,
@@ -219,7 +232,13 @@ static inline uint64_t dt_double_bits(DtRng* r) {
 
 // A single for a vector lane. No denormals: the reference CPU model does not
 // treat denormal vector inputs as the console does (see the notes).
-static inline uint32_t dt_float_bits(DtRng* r) {
+static inline uint32_t dt_float_bits_any(DtRng* r);
+static inline uint32_t dt_float_bits(DtRng* r, int nan) {
+  uint32_t v = dt_float_bits_any(r);
+  if (!nan && (v & 0x7F800000u) == 0x7F800000u && (v & 0x007FFFFFu)) v &= 0xBFFFFFFFu;
+  return v;
+}
+static inline uint32_t dt_float_bits_any(DtRng* r) {
   static const uint32_t edge[] = {
       0x00000000u, 0x80000000u, 0x7F800000u, 0xFF800000u, 0x7FC00000u,
       0xFFC00001u, 0x7FA00000u, 0x3F800000u, 0xBF800000u, 0x7F7FFFFFu,
@@ -236,6 +255,15 @@ static inline uint32_t dt_float_bits(DtRng* r) {
   }
   if ((out & 0x7F800000u) == 0) out &= 0x80000000u;  // denormal to zero
   return out;
+}
+
+// Two lanes. (One call a statement throughout this file: C leaves the order
+// of two calls in one expression to the compiler, and the two sides are
+// built by two compilers.)
+static inline uint64_t dt_float_pair(DtRng* r, int nan) {
+  uint64_t hi = dt_float_bits(r, nan);
+  uint64_t lo = dt_float_bits(r, nan);
+  return (hi << 32) | lo;
 }
 
 // ---- field placement
@@ -362,7 +390,8 @@ static inline int dt_emit(DtGen* g, int index) {
       case T_FRC:
         // Record forms copy FPSCR status into CR1; the translator does not
         // keep that status, so CR1 is left out of the comparison.
-        v = dt_chance(&g->r, 1, 8);
+        // (Not in sequences: a later instruction could read CR1.)
+        v = c->tier == 1 && dt_chance(&g->r, 1, 8);
         if (v) c->cr_mask &= 0xF0FFFFFFu;
         break;
       case T_SPR:  // XER or CTR
@@ -372,8 +401,19 @@ static inline int dt_emit(DtGen* g, int index) {
       case T_FS: v = dt_pick_fpr(g, 1); break;
       case T_FM: v = dt_chance(&g->r, 1, 2) ? 0x01 : 0xFF; break;
       case T_RN: v = dt_below(&g->r, 4); wx |= 7u << 23; wr |= 7u << 23; break;
-      case T_VD: v = vd = dt_pick_vr(g, 0, DT_VSLOTS); is_slot = 1; break;
-      case T_VS: v = dt_pick_vr(g, 1, 31); is_slot = 1; break;
+      // A plain VMX instruction's fields have five bits: in a case that
+      // spreads the slots over the 128 registers it takes one of the slots
+      // that kept their own number (see vmap below).
+      case T_VD:
+        v = vd = dt_pick_vr(g, 0, g->uses_v128 && op->px < 0x400 ? 16 : DT_VSLOTS);
+        is_slot = 1;
+        break;
+      case T_VS:  // not 29: its VSCR image is a denormal as a float
+        do {
+          v = dt_pick_vr(g, 1, g->uses_v128 && op->px < 0x400 ? 16 : 31);
+        } while (v == 29);
+        is_slot = 1;
+        break;
       case T_VDS: v = vd = dt_pick_vr(g, 1, DT_VSLOTS); is_slot = 1; break;
       case T_VS8: v = dt_pick_vr(g, 1, 8); is_slot = 1; break;
       case T_VSSH: v = 30; is_slot = 1; break;
@@ -458,6 +498,16 @@ static inline int dt_pick_insn(DtGen* g, uint32_t class_mask, uint32_t forbid) {
     if (in->flags & forbid) continue;
     return index;
   }
+}
+
+static inline int dt_find_insn(const char* name) {
+  for (int i = 0; i < DT_NINSN; ++i) {
+    const char* a = dt_insns[i].name;
+    const char* b = name;
+    while (*a && *a == *b) ++a, ++b;
+    if (!*a && !*b) return i;
+  }
+  return 0;
 }
 
 #define DT_CLASSMASK(c) (1u << (c))
@@ -550,22 +600,25 @@ static inline void dt_gen_case(uint64_t seed, uint64_t index, uint32_t tier, DtC
   for (int i = 0; i < 32; ++i) in[W_GPR + i] = dt_gpr_value(r);
   in[W_CTR] = dt_chance(r, 1, 2) ? dt_below(r, 4) : dt_gpr_value(r);
   in[W_CR] = (uint32_t)dt_next(r);
-  in[W_XER] = (dt_chance(r, 1, 2) ? 0x20000000u : 0) |
-              (tier == 1 && dt_chance(r, 1, 4) ? (uint32_t)dt_next(r) & 0xC0000000u : 0);
+  in[W_XER] = dt_chance(r, 1, 2) ? 0x20000000u : 0;
+  if (tier == 1 && dt_chance(r, 1, 4)) in[W_XER] |= (uint32_t)dt_next(r) & 0xC0000000u;
   in[W_FPSCR] = dt_below(r, 4);
   in[W_VSCR] = DT_VSCR_NJ | (dt_chance(r, 1, 4) ? DT_VSCR_SAT : 0);
   in[37] = in[38] = in[39] = 0;
-  for (int i = 0; i < 32; ++i) in[W_FPR + i] = dt_double_bits(r);
+  int nan = tier == 1;
+  for (int i = 0; i < 32; ++i) in[W_FPR + i] = dt_double_bits(r, nan);
   in[W_FPR + 31] = dt_next(r) & 0xFFFFFFFFFFFFFF03ull;
   int vstyle = float_vectors ? 1 : (int)dt_below(r, 3);
   for (int i = 0; i < 32; ++i) {
     uint64_t hi, lo;
     if (vstyle == 1) {
-      hi = ((uint64_t)dt_float_bits(r) << 32) | dt_float_bits(r);
-      lo = ((uint64_t)dt_float_bits(r) << 32) | dt_float_bits(r);
+      hi = dt_float_pair(r, nan);
+      lo = dt_float_pair(r, nan);
     } else if (vstyle == 2) {  // lanes near the saturation limits
-      hi = dt_gpr_value(r) ^ (dt_gpr_value(r) << 32);
-      lo = dt_gpr_value(r) ^ (dt_gpr_value(r) << 32);
+      hi = dt_gpr_value(r);
+      hi ^= dt_gpr_value(r) << 32;
+      lo = dt_gpr_value(r);
+      lo ^= dt_gpr_value(r) << 32;
     } else {
       hi = dt_next(r);
       lo = dt_next(r);
@@ -577,10 +630,14 @@ static inline void dt_gen_case(uint64_t seed, uint64_t index, uint32_t tier, DtC
   in[W_VR + 2 * 29 + 1] = DT_VSCR_NJ | (dt_chance(r, 1, 2) ? DT_VSCR_SAT : 0);
   in[W_VR + 2 * 30] = in[W_VR + 2 * 30 + 1] = (dt_next(r) & 0xFF) * 0x0101010101010101ull;
   dt_fill_window(dt_next(r), &in[W_MEM]);
-  if (dt_chance(r, 1, 2)) {  // floats in memory, for the float loads
+  // Floats in memory, for the float loads: half the single instructions,
+  // and every sequence that has float instructions (random bytes are a NaN
+  // one time in 256, or a denormal for a float vector instruction).
+  int float_case = (class_mask & (DT_CLASSMASK(CL_FPU) | DT_CLASSMASK(CL_VMXF) | DT_CLASSMASK(CL_V128F))) != 0;
+  if (tier == 1 ? dt_chance(r, 1, 2) : float_case) {
     for (uint32_t i = 0; i < DT_MEM_BYTES / 8; ++i) {
-      if (dt_chance(r, 1, 2)) in[W_MEM + i] = dt_double_bits(r);
-      else in[W_MEM + i] = ((uint64_t)dt_float_bits(r) << 32) | dt_float_bits(r);
+      if (dt_chance(r, 1, 2) && !float_vectors) in[W_MEM + i] = dt_double_bits(r, nan);
+      else in[W_MEM + i] = dt_float_pair(r, nan);
     }
   }
 
@@ -595,7 +652,8 @@ static inline void dt_gen_case(uint64_t seed, uint64_t index, uint32_t tier, DtC
     g->ptr[i] = (uint8_t)reg;
     g->reserved_gpr |= 1u << reg;
     static const uint32_t align[] = {~15u, ~15u, ~7u, ~3u, ~1u, ~0u};
-    in[W_GPR + reg] = (DT_MEM_MID + (uint32_t)dt_range(r, -64, 64)) & align[dt_below(r, 6)];
+    uint32_t address = DT_MEM_MID + (uint32_t)dt_range(r, -64, 64);
+    in[W_GPR + reg] = address & align[dt_below(r, 6)];
   }
   for (int i = 0; i < 2; ++i) {
     uint32_t reg;
@@ -611,15 +669,17 @@ static inline void dt_gen_case(uint64_t seed, uint64_t index, uint32_t tier, DtC
     g->fpool[i] = (uint8_t)dt_below(r, DT_FREGS);
     g->vpool[i] = (uint8_t)dt_below(r, DT_VSLOTS);
   }
-  // Slot to console register. VMX128 cases spread the slots over all 128
-  // (slots 0 to 7 stay: vperm128's third operand has three bits).
+  // Slot to console register. VMX128 cases spread slots 16 to 28 over the
+  // registers only VMX128 reaches; slots 0 to 15 and the three with a fixed
+  // role keep their number, for the plain VMX instructions of the case and
+  // for vperm128's third operand (three bits).
   for (int i = 0; i < 32; ++i) c->vmap[i] = (uint8_t)i;
   if (g->uses_v128) {
     uint8_t used[128];
-    for (int i = 0; i < 128; ++i) used[i] = i < 8;
-    for (int i = 8; i < 32; ++i) {
+    for (int i = 0; i < 128; ++i) used[i] = 0;
+    for (int i = 16; i < DT_VSLOTS; ++i) {
       uint32_t reg;
-      do { reg = 8 + dt_below(r, 120); } while (used[reg]);
+      do { reg = 32 + dt_below(r, 96); } while (used[reg]);
       used[reg] = 1;
       c->vmap[i] = (uint8_t)reg;
     }
@@ -636,6 +696,26 @@ static inline void dt_gen_case(uint64_t seed, uint64_t index, uint32_t tier, DtC
     }
   } else {
     uint32_t count = 2 + dt_below(r, 5);
+    // A constant first, one time in three: a register of the pool the later
+    // instructions favour is loaded with an immediate, so that they are
+    // translated with a constant operand (the translator folds those and
+    // the back end has separate code for them).
+    if (dt_chance(r, 1, 3)) {
+      uint32_t imm = (uint32_t)dt_next(r);
+      if (class_mask & (DT_CLASSMASK(CL_VMX) | DT_V128_CLASSES | DT_CLASSMASK(CL_VMEM))) {
+        static const char* const names[] = {"vspltisb", "vspltish", "vspltisw"};
+        uint32_t which = dt_below(r, 3);
+        uint32_t slot = g->vpool[0] % 16;
+        g->vpool[0] = g->vpool[1] = (uint8_t)slot;
+        int index = dt_find_insn(names[which]);
+        dt_emit_raw(g, dt_insns[index].opx | (slot << 21) | ((imm & 31) << 16), (uint16_t)index);
+      } else if (class_mask & DT_INT_CLASSES) {
+        int index = dt_find_insn(dt_chance(r, 1, 4) ? "addis" : "addi");
+        g->gpool[1] = g->gpool[0];
+        dt_emit_raw(g, dt_insns[index].opx | ((uint32_t)g->gpool[0] << 21) | (imm & 0xFFFF),
+                    (uint16_t)index);
+      }
+    }
     for (uint32_t n = 0; n < count && c->nx < DT_MAX_INSN; ++n) {
       uint32_t forbid = IF_TOL | IF_ELEM | IF_FIRST | IF_VMULFP | IF_T1 | IF_KNOWN;
       if (n) forbid |= IF_DIV | IF_MTFSF;

@@ -77,6 +77,7 @@ struct Skip {
   uint32_t cr_mask = 0xFFFFFFFFu;
   uint32_t vscr_mask = DT_VSCR_NJ | DT_VSCR_SAT;
   bool tol = false;
+  bool nan_equal = false;  // two NaNs are equal whatever their bits (sequences)
 };
 struct Diff {
   std::string name;  // r3, cr0, xer.ca, f1, v77, m0x1f8 ...
@@ -156,6 +157,7 @@ void Compare(const XState& ours, const XState& ref, const Skip& skip, bool float
     if (skip.fpr_hi >> i & 1) a &= 0xFFFFFFFFull, b &= 0xFFFFFFFFull;
     if (a == b) continue;
     if (skip.tol && Close64(a, b)) continue;
+    if (skip.nan_equal && IsNaN64(a) && IsNaN64(b)) continue;
     out->push_back({"f" + std::to_string(i), IsNaN64(a) && IsNaN64(b) ? "fpr.nan" : "fpr", Hex(a), Hex(b)});
   }
   for (int i = 0; i < 128; ++i) {
@@ -169,7 +171,7 @@ void Compare(const XState& ours, const XState& ref, const Skip& skip, bool float
       if (!Close32(a, b)) all_close = false;
       if (!(IsNaN32(a) && IsNaN32(b))) all_nan = false;
     }
-    if (all_close) continue;
+    if (all_close || (all_nan && skip.nan_equal)) continue;
     out->push_back({"v" + std::to_string(i), all_nan ? "vr.nan" : "vr",
                     Hex(ours.vr[i][0]) + Hex(ours.vr[i][1]), Hex(ref.vr[i][0]) + Hex(ref.vr[i][1])});
   }
@@ -471,7 +473,8 @@ int Fuzz() {
     fprintf(stderr, "difftest: cannot read the reference stream (or it is of another build)\n");
     return 2;
   }
-  Runner runner;
+  // Never destroyed: see Main.
+  Runner& runner = *new Runner();
   if (!runner.Setup()) {
     fprintf(stderr, "difftest: setup failed\n");
     return 2;
@@ -506,6 +509,7 @@ int Fuzz() {
     skip.cr_mask = c.cr_mask;
     skip.vscr_mask = c.vscr_mask;
     skip.tol = (c.flags & CF_TOL) != 0;
+    skip.nan_equal = c.tier != 1;
     bool float_vectors = false;
     for (uint32_t i = 0; i < c.ninsn; ++i) {
       if (c.insn[i] == DT_INSN_BC) continue;
@@ -579,7 +583,8 @@ int Fuzz() {
       put(name, Hex(b));
     }
     j += "},\"skip\":{\"gprhi\":\"" + Hex(skip.gpr_hi, 8) + "\",\"fprhi\":\"" + Hex(skip.fpr_hi, 8) +
-         "\",\"crmask\":\"" + Hex(skip.cr_mask, 8) + "\",\"vscrmask\":\"" + Hex(skip.vscr_mask, 8) + "\",\"tol\":" + (skip.tol ? "1" : "0") + ",\"vr\":[";
+         "\",\"crmask\":\"" + Hex(skip.cr_mask, 8) + "\",\"vscrmask\":\"" + Hex(skip.vscr_mask, 8) + "\",\"tol\":" + (skip.tol ? "1" : "0") +
+         ",\"nanequal\":" + (skip.nan_equal ? "1" : "0") + ",\"floatvec\":" + (float_vectors ? "1" : "0") + ",\"vr\":[";
     first = true;
     for (int i = 0; i < 128; ++i) {
       if (!skip.vr[i]) continue;
@@ -652,7 +657,8 @@ int Regress() {
     fprintf(stderr, "difftest: cannot open %s\n", cvars::dt_regress.c_str());
     return 2;
   }
-  Runner runner;
+  // Never destroyed: see Main.
+  Runner& runner = *new Runner();
   if (!runner.Setup()) return 2;
   static char line[3 * DT_MEM_BYTES + 8192];
   int failed = 0, ran = 0;
@@ -690,6 +696,7 @@ int Regress() {
         else if (key == "crmask") skip.cr_mask = (uint32_t)ParseHex(value);
         else if (key == "vscrmask") skip.vscr_mask = (uint32_t)ParseHex(value);
         else if (key == "tol") skip.tol = true;
+        else if (key == "nanequal") skip.nan_equal = true;
         else if (key[0] == 'v') skip.vr[atoi(key.c_str() + 1) & 127] = true;
         else ok = false;
       }

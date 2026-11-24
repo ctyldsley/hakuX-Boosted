@@ -1,1 +1,56 @@
-# hakuX-Boosted: see boosted/notes/jit-difftest.md
+# hakuX-Boosted: differences between the ARM64 back end and the reference that
+# the differential test (run.sh) knows of and does not fail on. Each is
+# described in boosted/notes/jit-difftest.md; removing a line makes the test
+# fail on it again, which is how a fix is checked.
+#
+#   <instruction>  <kinds of state that differ>  # reason
+#
+# The instruction is the report's key (mnemonic as in the core's instruction
+# list, "+oe" and "+rc" for those forms; a key without them covers them too),
+# or * for any instruction. The kinds are the report's (gpr, cr0..cr7, cr.so,
+# xer.ca, fpr, fpr.nan, vr, vr.nan, mem, crash ...), or * for any. An
+# instruction named here is also left out of the generated sequences.
+
+# ---- state the translator does not keep (upstream's design)
+*  cr.so      # CR's summary overflow bits are never written: UpdateCR, the compares and stwcx. leave what was there
+*  xer.so     # XER[SO] is not kept: the OE forms do not set it, mtspr XER drops it
+*  xer.ov     # XER[OV] is not kept: the OE forms do not set or clear it, mtspr XER drops it
+*  vscr.sat   # VSCR[SAT] is not set by the saturating vector instructions, nor by mtvscr
+*  fpr.nan    # both results are NaNs; sign, payload or quieting follow the ARM host's rules
+*  vr.nan     # both results are NaNs; sign, payload or quieting follow the ARM host's rules
+mfspr  gpr    # mfspr XER returns the carry only (LoadXER), not SO and OV
+
+# ---- wrong, not fixed here
+mcrf  *       # upstream's translation is only right from cr0 holding "less than"; exact with ppc_mcrf_copies_field=true (default off, in PLAN's audit of unmeasured settings)
+stfs  mem     # a double that is not exactly a single is rounded by the host's conversion; the console truncates the mantissa (and gives a defined pattern out of range)
+stfsu  mem    # as stfs
+stfsx  mem    # as stfs
+stfsux  mem   # as stfs
+
+# ---- not implemented in the front end: the translated code traps
+vmhaddshs  crash   # InstrEmit_vmhaddshs is XEINSTRNOTIMPLEMENTED
+vmhraddshs  crash  # not implemented
+vmladduhm  crash   # not implemented
+vmulesb  crash     # not implemented
+vmulesh  crash     # not implemented
+vmuleub  crash     # not implemented
+vmuleuh  crash     # not implemented
+vmulosb  crash     # not implemented
+vmulosh  crash     # not implemented
+vmuloub  crash     # not implemented
+vmulouh  crash     # not implemented
+vupkhpx  crash     # not implemented
+vupklpx  crash     # not implemented
+
+# ---- the reference is not an authority here
+fresx  fpr         # QEMU returns -0.5 for the reciprocal estimate of -0; ours (-infinity) is what the architecture says
+vexptefp  vr       # 2^x: QEMU's own approximation differs from ours at overflow and at exactly representable results; neither is the console's
+vexptefp128  vr    # as vexptefp
+vlogefp  vr        # log2: as vexptefp
+vlogefp128  vr     # as vexptefp
+vmsum3fp128  vr    # the reference is plain arithmetic; the back end returns a NaN when a term is infinite or the sum overflows, upstream's reading of the console
+vmsum4fp128  vr    # as vmsum3fp128
+fnmaddx  fpr       # in the directed rounding modes QEMU rounds after negating; the architecture says the result is that of fmadd, negated, which is what we do
+fnmaddsx  fpr      # as fnmadd
+fnmsubx  fpr       # as fnmadd
+fnmsubsx  fpr      # as fnmadd
