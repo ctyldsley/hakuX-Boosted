@@ -19,8 +19,10 @@
 #include "xenia/cpu/compiler/translation_stats.h"
 
 // hakuX-Boosted: see RegisterAllocationPass::PlanPinHomes.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    pin_guest_registers_coalesce, false,
+    pin_guest_registers_coalesce, true,
     "With pin_guest_registers: a value loaded from a pinned guest register "
     "is used from the pin's host register directly, and a value that is "
     "about to be stored to a pinned guest register is computed straight "

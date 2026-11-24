@@ -110,8 +110,10 @@ DEFINE_bool(
     "a64");
 
 // hakuX-Boosted: see A64Emitter::SetExtendedGprPool.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    a64_extended_gpr_pool, false,
+    a64_extended_gpr_pool, true,
     "Fourteen host registers for integer values and pinned guest registers "
     "instead of seven: x9-x15 join x22-x28. Sequences then use only x0-x8, "
     "x16 and x17 as scratch, and the guest-to-host thunk saves x9-x15 round "

@@ -21,8 +21,10 @@
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    pin_guest_registers, false,
+    pin_guest_registers, true,
     "Keep the guest registers a function uses most inside its loops in host "
     "registers for the whole function, instead of loading each from the "
     "guest context at its first use in every block and storing it back at "
@@ -33,8 +35,10 @@ DEFINE_bool(
     "backend only. Takes effect for functions translated after it is set.",
     "CPU");
 
+// hakuX-Boosted (jit-speed): 10 by default, was 2
+// (boosted/notes/jit-speed.md).
 DEFINE_int32(
-    pin_guest_registers_max_int, 2,
+    pin_guest_registers_max_int, 10,
     "With pin_guest_registers: the most integer guest registers one function "
     "may pin. Each takes one of the host registers the allocator has for "
     "integer values, so more pins mean more spills in busy blocks. Clamped "
@@ -42,16 +46,20 @@ DEFINE_int32(
     "pin_guest_registers_wide).",
     "CPU");
 
+// hakuX-Boosted (jit-speed): 16 by default, was 8
+// (boosted/notes/jit-speed.md).
 DEFINE_int32(
-    pin_guest_registers_max_vec, 8,
+    pin_guest_registers_max_vec, 16,
     "With pin_guest_registers: the most float and vector guest registers "
     "(taken together) one function may pin, out of the 28 host vector "
     "registers. Clamped to 0..12.",
     "CPU");
 
 // hakuX-Boosted: see GuestRegisterPinningPass::RunWide.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    pin_guest_registers_wide, false,
+    pin_guest_registers_wide, true,
     "With pin_guest_registers: pin in every function where it removes "
     "loads and stores, not only in functions with a loop whose registers "
     "are not used round calls. Where each pinned register is written back "
@@ -63,8 +71,10 @@ DEFINE_bool(
     "set.",
     "CPU");
 
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    pin_guest_registers_flags, false,
+    pin_guest_registers_flags, true,
     "With pin_guest_registers_wide: the condition register bits, the carry "
     "bit and the link register may be pinned as well as the general, count, "
     "float and vector registers. A pinned bit takes one of the integer host "
