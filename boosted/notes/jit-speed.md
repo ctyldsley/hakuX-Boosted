@@ -133,7 +133,7 @@ On the four defaults commits: the settings are the work of the `translator-wide`
 (their notes say what each does and why it is exact). They were off because nothing had measured them. This
 branch's rule for a setting that can change behaviour was "default on only when the benchmark and the existing
 translator tests both pass", and they do: the whole corpus (141,978 tests) passes with the new defaults and leaves
-every test in the state the old defaults left it in. `matrix.txt` has a new line, "before jit-speed's defaults",
+every test in the state the old defaults left it in. `matrix.txt` has a new line, "before jit-speed defaults",
 that runs everything with each of them put back, so the old code stays tested.
 
 Left off on purpose, each measured on the benchmark with everything above on:
@@ -313,16 +313,16 @@ For `boosted/docs/ARCHITECTURE.md` (copied in with this branch):
 | `cpu/backend/a64/a64_backend.cc`, `.h`, `a64_emitter.cc` | `EmitPreemptYieldThunk`: the slow path of every preemption check in one thunk |
 | `cpu/backend/a64/a64_emitter.cc`, `.h` | `CallIndirect`: one copy a function of a return that misses the caller's address (`return_miss_label_`) |
 | `cpu/backend/a64/a64_emitter.cc`, `a64_backend.cc`, `a64_code_cache.cc`, `cpu/ppc/ppc_emit_alu.cc`, `cpu/compiler/passes/register_allocation_pass.cc`, `guest_register_pinning_pass.cc`, `dead_context_store_pass.cc` | defaults of eighteen existing settings (section 3) |
-| `cpu/ppc/testing/seq_float_nan_moves.s`, `cpu/ppc/testing/ci/matrix.txt` | tests for the NaN moves; the "before jit-speed's defaults" line |
+| `cpu/ppc/testing/seq_float_nan_moves.s`, `cpu/ppc/testing/ci/matrix.txt` | tests for the NaN moves; the "before jit-speed defaults" line |
 
 ## Build state
 
-- jit-bench: run 2 green at `c34e02f` (section 4). Run 1, at the first commit, failed on the benchmark's own two
-  faults (section 1).
-- Translator tests, locally (cross-compiled, under qemu-user, 4 KiB pages): the whole corpus, 141,978 tests, passes
-  at the head with the new defaults, and every test ends in the state it ended in with the base's code generation
-  and the old defaults (141,957 states compared, 0 differ; the rest are the tests `nondeterministic.txt` names).
-  The matrix (every line, both page sizes) is the "Translator tests" job of `boosted.yml`; its state at the head is
-  in `boosted/HANDOFF.md`'s entry for this branch.
-- The APK (`boosted.yml`): see the same entry.
-- Not run: a phone.
+At `eb4014a`, the last commit that changes code (the commit after it changes documents and a test label):
+
+- jit-bench run 6 (id 45298413350): code 26.6% smaller at 4 KiB pages and 22.9% at 16 KiB, translation 33.0% slower, run time 26.5% lower, host instructions 37.5% fewer.
+- `boosted.yml` run 172 (id 45298413158): Xbox core, APK and "Translator tests" green. APK `app-debug.apk` 46,372,424 bytes, signed with the fork's key; artifact `hakuX-Boosted-debug-apk`, 36,194,278 bytes.
+- Translator tests: 84 configurations, every one passed (the reference 141,978 of 141,978; the new line with the old defaults 141,978 passed and 141,957 states compared with the reference, 0 differ), 2 h 59 min against 2 h 56 min on `claude/merge-1123`.
+- `boosted-bench.yml` run 51 shows cancelled though each step it ran passed; not looked into.
+- Not installed or run on a device.
+- Translator tests locally (cross-compiled, qemu-user, 4 KiB pages) gave the same: the whole corpus passes at the head and every test ends in the state the base's code and the old defaults leave it in.
+- jit-bench run 1, at the first commit, failed on the benchmark's own two faults (section 1); run 2 at `c34e02f` is the table of section 4.
