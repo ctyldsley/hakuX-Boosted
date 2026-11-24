@@ -867,7 +867,11 @@ struct VECTOR_DENORMFLUSH
     : Sequence<VECTOR_DENORMFLUSH,
                I<OPCODE_VECTOR_DENORMFLUSH, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    int s = SrcVReg(e, i.src1, 0);
+    // hakuX-Boosted: a constant operand goes to v3; in v0 it was overwritten
+    // by the first step below and read again by the third (the pattern of
+    // VECTOR_ROTATE_LEFT; found by reading, not by a failing case: on CPUs
+    // whose FZ flushes inputs the early return hides it).
+    int s = SrcVReg(e, i.src1, 3);
     int d = i.dest.reg().getIdx();
     // Consumers are VMX-mode float ops, which run under FPCR.FZ and so
     // flush denormals in hardware.
