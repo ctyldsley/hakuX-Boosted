@@ -1420,7 +1420,17 @@ A64Emitter::FlagsKey A64Emitter::MakeFlagsKey(const hir::Instr* compare) {
     return key;
   }
   const hir::TypeName type = compare->src1.value->type;
-  if (type != hir::INT32_TYPE && type != hir::INT64_TYPE) {
+  // hakuX-Boosted: float compares too, between two registers (a constant
+  // operand goes through a scratch register in the sequences, and is left
+  // out). The key only ever lets a second compare of the same operands skip
+  // its fcmp; FlagsHoldCompare, which names integer conditions, declines it.
+  if (type == hir::FLOAT32_TYPE || type == hir::FLOAT64_TYPE) {
+    if (compare->src1.value->IsConstant() ||
+        compare->src2.value->IsConstant() ||
+        compare->src2.value->type != type) {
+      return key;
+    }
+  } else if (type != hir::INT32_TYPE && type != hir::INT64_TYPE) {
     return key;
   }
   key.type = type;
@@ -1443,6 +1453,10 @@ bool A64Emitter::FlagsHoldCompare(const hir::Value* result,
   if (!flags_key_.valid || !result || result->IsConstant() || !result->def ||
       !(MakeFlagsKey(result->def) == flags_key_)) {
     return false;
+  }
+  if (flags_key_.type != hir::INT32_TYPE &&
+      flags_key_.type != hir::INT64_TYPE) {
+    return false;  // a float compare: the conditions below are integer ones
   }
   switch (result->def->GetOpcodeNum()) {
     case hir::OPCODE_COMPARE_EQ:

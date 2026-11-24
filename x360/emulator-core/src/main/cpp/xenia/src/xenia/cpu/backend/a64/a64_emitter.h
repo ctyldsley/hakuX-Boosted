@@ -353,6 +353,19 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
     }
     Xbyak_aarch64::CodeGenerator::cmp(std::forward<Args>(args)...);
   }
+  // hakuX-Boosted: the same for the float compares of one fcmpu or fcmpo
+  // (less, greater, equal on the same two registers): one fcmp serves all
+  // three. MakeFlagsKey makes a key for a float compare only when both
+  // operands are registers, which is the one path that gets here with
+  // skip_next_cmp_ set.
+  template <typename... Args>
+  void fcmp(Args&&... args) {
+    if (skip_next_cmp_) {
+      skip_next_cmp_ = false;
+      return;
+    }
+    Xbyak_aarch64::CodeGenerator::fcmp(std::forward<Args>(args)...);
+  }
 
   // a64_pin_verify: stores to pinned registers also go to the context, and
   // loads compare the two.

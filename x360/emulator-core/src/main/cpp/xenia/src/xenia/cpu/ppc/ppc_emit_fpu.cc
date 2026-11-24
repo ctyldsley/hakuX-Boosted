@@ -349,6 +349,20 @@ int InstrEmit_fcmpx_(PPCHIRBuilder& f, const InstrData& i, bool ordered) {
 
   Value* nan = f.Or(f.IsNan(ra), f.IsNan(rb));
   f.StoreContext(offsetof(PPCContext, cr0) + (4 * crf) + 3, nan);
+#if XE_ARCH_ARM64
+  // hakuX-Boosted: the ARM64 back end's float compares for less, greater
+  // and equal are the ordered conditions of one fcmp (MI, GT, EQ in
+  // a64_sequences.cc): each is already false when either operand is a NaN,
+  // so the three need no masking with "not a NaN", and written one after
+  // another they share the fcmp (A64Emitter::fcmp). Same bits as below.
+  f.StoreContext(offsetof(PPCContext, cr0) + (4 * crf) + 0,
+                 f.CompareSLT(ra, rb));
+  f.StoreContext(offsetof(PPCContext, cr0) + (4 * crf) + 1,
+                 f.CompareSGT(ra, rb));
+  f.StoreContext(offsetof(PPCContext, cr0) + (4 * crf) + 2,
+                 f.CompareEQ(ra, rb));
+  return 0;
+#endif
   Value* not_nan = f.Xor(nan, f.LoadConstantInt8(0x01));
 
   Value* lt = f.And(not_nan, f.CompareSLT(ra, rb));
