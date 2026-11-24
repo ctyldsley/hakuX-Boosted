@@ -610,6 +610,17 @@ struct ADD_I64 : Sequence<ADD_I64, I<OPCODE_ADD, I64Op, I64Op, I64Op>> {
 // inputs are handled entirely in software.
 enum class FpBinOp { Add, Sub, Mul, Div };
 
+// hakuX-Boosted: the NaN an invalid operation makes when no operand is one
+// (inf - inf, 0 * inf, 0 / 0). PowerPC's has the sign bit clear. The helpers
+// below wrote 0xFFF8000000000000 and 0xFFC00000, which is what an x86 host
+// makes; the reference CPU, the architecture and the expectations of
+// upstream's own console-derived tests (instr__gen_fadd.s and the like,
+// all 40 such cases of which upstream's skip.txt skips) say positive. Found
+// by the differential test (boosted/difftest, regressions.txt
+// "default_nan_*").
+constexpr uint64_t kDefaultNaN64 = 0x7FF8000000000000ull;
+constexpr uint64_t kDefaultNaN32 = 0x7FC00000u;
+
 // hakuX-Boosted: a64_tight_sequences. The same results as the four helpers
 // below, with the usual path cut from seven instructions to three.
 //
@@ -660,10 +671,10 @@ static void EmitFpOpWithPpcNanTight(A64Emitter& e, REG dest, const REG* srcs,
       e.L(not_nan);
     }
     if (is64) {
-      e.mov(e.x0, static_cast<uint64_t>(0xFFF8000000000000ull));
+      e.mov(e.x0, kDefaultNaN64);
       e.fmov(DReg(dest_idx), e.x0);
     } else {
-      e.mov(e.w0, static_cast<uint64_t>(0xFFC00000u));
+      e.mov(e.w0, kDefaultNaN32);
       e.fmov(SReg(dest_idx), e.w0);
     }
     e.CodeGenerator::b(done);
@@ -744,7 +755,7 @@ static void EmitFpBinOpWithPpcNan_F32(A64Emitter& e, SReg dest, SReg s1,
   }
   e.fcmp(dest, dest);
   e.b(VC, done);
-  e.mov(e.w0, static_cast<uint64_t>(0xFFC00000u));
+  e.mov(e.w0, kDefaultNaN32);
   e.fmov(dest, e.w0);
   e.b(done);
 
@@ -798,7 +809,7 @@ static void EmitFpBinOpWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1,
   }
   e.fcmp(dest, dest);
   e.b(VC, done);
-  e.mov(e.x0, static_cast<uint64_t>(0xFFF8000000000000ull));
+  e.mov(e.x0, kDefaultNaN64);
   e.fmov(dest, e.x0);
   e.b(done);
 
@@ -850,7 +861,7 @@ static void EmitFmaWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1, DReg s2,
   // If result is NaN (0*inf or inf-inf), canonicalize to PPC default.
   e.fcmp(dest, dest);
   e.b(VC, done);
-  e.mov(e.x0, static_cast<uint64_t>(0xFFF8000000000000ull));
+  e.mov(e.x0, kDefaultNaN64);
   e.fmov(dest, e.x0);
   e.b(done);
 
@@ -904,7 +915,7 @@ static void EmitFmaWithPpcNan_F32(A64Emitter& e, SReg dest, SReg s1, SReg s2,
   }
   e.fcmp(dest, dest);
   e.b(VC, done);
-  e.mov(e.w0, static_cast<uint64_t>(0xFFC00000u));
+  e.mov(e.w0, kDefaultNaN32);
   e.fmov(dest, e.w0);
   e.b(done);
 
