@@ -222,6 +222,7 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/cpu/ppc/ppc_emit_altivec.cc` | `vmuleub`, `vmuleuh`, `vmulesb`, `vmulesh`, `vmuloub`, `vmulouh`, `vmulosb`, `vmulosh`, `vmhaddshs`, `vmhraddshs`, `vmladduhm`, `vupkhpx`, `vupklpx` implemented, element by element with scalar operations (they were `XEINSTRNOTIMPLEMENTED` and trapped) |
 | `xenia/cpu/backend/a64/a64_sequences.cc` | `SHL_V128` and `SHR_V128` load a constant first operand into v3, not v0, which they overwrite before reading the operand again (`vsl`/`vsr` of a folded constant were wrong); the default NaN of the scalar float helpers is positive (`kDefaultNaN64`, `kDefaultNaN32`; it was the x86 pattern with the sign set) |
 | `xenia/cpu/compiler/passes/constant_propagation_pass.cc`, `cpu/hir/value.cc` | Folding of vector constants: an insert takes its element size from the part (it was always one byte); an extract takes the element the back ends take (bytes and halfwords are swapped within a word of `vec128_t`; it also read past the vector); a float vector equality compares floats, not bit patterns |
+| `xenia/cpu/ppc/testing/ci/CMakeLists.txt` (the fork's), `.github/workflows/jit-difftest.yml` (new), `boosted/difftest/**` (new) | The differential test: the CPU sources are an object library shared by the instruction tests' runner and `xenia-jit-difftest` (built with `-DDT_GEN`); the workflow runs it for 30 minutes on every push to `claude/**` |
 
 ## Taking a newer hakuX
 

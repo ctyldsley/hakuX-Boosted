@@ -317,10 +317,10 @@ the thirteen unimplemented instructions, and the bugs of section 3 among the
 rest.
 
 With everything of section 3 in, in the cloud session's container (the
-runner under `qemu-aarch64`): seeds 1 to 7, 280,000 cases, nothing differs
-that `known-issues.txt` does not list, and of the 140,000 sequences none
-differs at all. The CI run's own numbers are in `boosted/HANDOFF.md`'s log
-line for this branch and in the run's report.
+runner under `qemu-aarch64`): seeds 1 to 9, 20 to 28 and 40 to 48, 1,080,000
+cases, nothing differs that `known-issues.txt` does not list, and of the
+540,000 sequences none differs at all. The CI run's own numbers are in the
+run's report (the Actions page of the branch's head).
 
 Three mistakes of the rig itself were found on the way and are worth
 knowing if it is changed: the reference harness's C code ran in 32-bit mode
