@@ -190,8 +190,10 @@ DEFINE_bool(
     "a64");
 
 // hakuX-Boosted: see A64Emitter::lean_calls_.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    a64_lean_calls, false,
+    a64_lean_calls, true,
     "Fewer instructions round every guest call and return, with the same "
     "effect: the return address goes from the call site to the callee in a "
     "register without a round trip through the caller's stack frame; a "
@@ -204,8 +206,10 @@ DEFINE_bool(
     "a64");
 
 // hakuX-Boosted: see A64Emitter::PushStackpoint.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    a64_compact_stackpoint_push, false,
+    a64_compact_stackpoint_push, true,
     "The guest function prologue's stackpoint push indexes its 16-byte "
     "entries with a shifted add instead of materialising the entry size and "
     "multiplying: two instructions fewer in every translated function's "

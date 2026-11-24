@@ -31,8 +31,10 @@
 #endif
 
 // hakuX-Boosted: see A64CodeCache::LinkCallSites.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    a64_linked_calls, false,
+    a64_linked_calls, true,
     "A call to a guest function that had no translated code yet when its "
     "caller was translated loads the callee's address from a literal beside "
     "the caller's code, which is filled in when the callee is translated, "
