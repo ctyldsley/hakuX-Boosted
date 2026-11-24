@@ -26,3 +26,8 @@ vcmpbfp_nan code=132843c6 in: v25=8cd8298942300000c3dd4199cef9b81d v8=bfa8a876c0
 vcmpbfp128_nan code=1a0485af in: v112=d6eea03ac4f00000a1bf8a5dea769cf9 v100=ffc000013ff00000bf8ce2037554cec0 cr=6d35a4f2 xer=20000000 ctr=00000000ac795207 fpscr=00000000 vscr=00010000 out: v112=c0000000c00000004000000080000000
 vcmpbfp_record_all_out code=118577c6 in: v12=c1500000c2599fc6bd9c52af41208474 v5=946eecb0c49373c052f327b0ba27ddfd v14=905f7a79fdfb654fbef1abc4ff800000 cr=d79bcabe xer=00000000 ctr=0000000000000001 fpscr=00000002 vscr=00010000 out: v12=40000000c000000080000000c0000000 cr=d79bca0e
 vcmpbfp128_record_nan code=193ddde8 in: v73=40000000bf885e539da4b2ee47df0981 v125=ffc000013f8000009d67ff15c4b00000 v27=3ed890f441d582903eccc6a640300000 cr=374645be xer=60000000 ctr=0000000000000002 fpscr=00000003 vscr=00010000 out: v73=c0000000000000000000000040000000 cr=3746450e
+
+# sraw by 32 or more of a word that is exactly 0x80000000 cleared the carry (the shifted-out bits were judged from a shift by 31). ppc_emit_alu.cc. Written by hand from two sequences the test found (seed 1, tier 2).
+sraw_32_or_more_min_int code=7d092e30 in: r8=ffffffff80000000 r5=0000000000000020 out: r9=ffffffffffffffff xer=20000000
+sraw_63_min_int_record code=7d092e31 in: r8=8000000080000000 r5=000000007558d4ff cr=00000000 out: r9=ffffffffffffffff xer=20000000 cr=80000000
+sraw_31_min_int code=7d092e30 in: r8=0000000080000000 r5=000000000000001f xer=20000000 out: r9=ffffffffffffffff xer=00000000

@@ -1333,8 +1333,15 @@ int InstrEmit_srawx(PPCHIRBuilder& f, const InstrData& i) {
 
   // CA is set if any bits are shifted out of the right and if the result
   // is negative.
-  Value* ca =
-      f.And(f.IsTrue(f.Shr(rt, 31)), f.CompareNE(f.Shl(v, clamp_sh), rt));
+  // hakuX-Boosted: a shift by 32 or more shifts the sign bit out as well, so
+  // for a negative word the carry is always set, as the comment above says.
+  // The test below is of a shift by 31 in that case and saw nothing lost
+  // when the word was exactly 0x80000000. Found by the differential test
+  // (boosted/difftest, regressions.txt "sraw_*").
+  Value* ca = f.And(
+      f.IsTrue(f.Shr(rt, 31)),
+      f.Or(f.CompareNE(f.Shl(v, clamp_sh), rt),
+           f.CompareUGT(sh, f.LoadConstantInt8(0x1F))));
   f.StoreCA(ca);
 
   v = f.SignExtend(v, INT64_TYPE);
