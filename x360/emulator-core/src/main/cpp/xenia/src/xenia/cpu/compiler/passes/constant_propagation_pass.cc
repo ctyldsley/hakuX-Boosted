@@ -785,7 +785,11 @@ bool ConstantPropagationPass::Run(HIRBuilder* builder, bool& result) {
           if (i->src1.value->IsConstant() && i->src2.value->IsConstant() &&
               i->src3.value->IsConstant()) {
             v->set_from(i->src1.value);
-            v->Insert(i->src2.value, i->src3.value, (TypeName)i->flags);
+            // hakuX-Boosted: the size of the element is the type of the
+            // part. The instruction's flags, which upstream passed, are
+            // always 0 for an insert (HIRBuilder::Insert), which reads as
+            // INT8: a constant 16- or 32-bit insert wrote one byte.
+            v->Insert(i->src2.value, i->src3.value, i->src3.value->type);
             i->UnlinkAndNOP();
             result = true;
           }

@@ -830,14 +830,21 @@ void Value::RotateLeft(Value* other) {
 void Value::Extract(Value* vec, Value* index) {
   assert_true(vec->type == VEC128_TYPE);
   switch (type) {
+    // hakuX-Boosted: the element as the back ends and Insert below number
+    // it (bytes and halfwords are swapped within their word in a vec128_t),
+    // and the index as the 8-bit value it is. Upstream read u8[index & 0x1F]
+    // (the wrong byte of the word, and up to 15 bytes past the vector) and
+    // u16[index & 7], and took the index from union members wider than it
+    // was set as. Found by the differential test (boosted/difftest,
+    // regressions.txt "constant_fold_*").
     case INT8_TYPE:
-      constant.u8 = vec->constant.v128.u8[index->constant.u8 & 0x1F];
+      constant.u8 = vec->constant.v128.u8[(index->constant.u8 & 0xF) ^ 3];
       break;
     case INT16_TYPE:
-      constant.u16 = vec->constant.v128.u16[index->constant.u16 & 0x7];
+      constant.u16 = vec->constant.v128.u16[(index->constant.u8 & 0x7) ^ 1];
       break;
     case INT32_TYPE:
-      constant.u32 = vec->constant.v128.u32[index->constant.u32 & 0x3];
+      constant.u32 = vec->constant.v128.u32[index->constant.u8 & 0x3];
       break;
     case INT64_TYPE:
       constant.u64 = vec->constant.v128.u64[index->constant.u64 & 0x1];

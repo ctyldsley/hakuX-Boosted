@@ -221,6 +221,7 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/cpu/backend/a64/a64_seq_vector.cc` | `VECTOR_ROTATE_LEFT` uses v2 and v3 only as temporaries: it overwrote v0, where a constant first operand is put, before reading it again (`vrlb`/`vrlh`/`vrlw` of a folded constant were wrong) |
 | `xenia/cpu/ppc/ppc_emit_altivec.cc` | `vmuleub`, `vmuleuh`, `vmulesb`, `vmulesh`, `vmuloub`, `vmulouh`, `vmulosb`, `vmulosh`, `vmhaddshs`, `vmhraddshs`, `vmladduhm`, `vupkhpx`, `vupklpx` implemented, element by element with scalar operations (they were `XEINSTRNOTIMPLEMENTED` and trapped) |
 | `xenia/cpu/backend/a64/a64_sequences.cc` | `SHL_V128` and `SHR_V128` load a constant first operand into v3, not v0, which they overwrite before reading the operand again (`vsl`/`vsr` of a folded constant were wrong) |
+| `xenia/cpu/compiler/passes/constant_propagation_pass.cc`, `cpu/hir/value.cc` | Folding of vector constants: an insert takes its element size from the part (it was always one byte); an extract takes the element the back ends take (bytes and halfwords are swapped within a word of `vec128_t`; it also read past the vector) |
 
 ## Taking a newer hakuX
 

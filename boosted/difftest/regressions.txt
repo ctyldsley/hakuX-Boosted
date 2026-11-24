@@ -60,3 +60,8 @@ srad_63_min_int code=7d092e34 in: r8=8000000000000000 r5=000000000000003f xer=20
 # vsl and vsr of a constant (a vspltis* result) by a register: the back end put the constant in v0 and overwrote it with the carry before the second read. a64_sequences.cc. By hand, after a sequence the test found (seed 1, tier 2, case 343).
 vsl_constant code=1083030c,1064f1c4 in: v30=47474747474747474747474747474747 out: v4=03030303030303030303030303030303 v3=81818181818181818181818181818180
 vsr_constant code=1083030c,1064f2c4 in: v30=47474747474747474747474747474747 out: v4=03030303030303030303030303030303 v3=00060606060606060606060606060606
+
+# The constant pass folded a vector insert as a byte whatever its size, and took a vector extract from the wrong byte or halfword of its word. constant_propagation_pass.cc, hir/value.cc. By hand, after a sequence the test found (seed 3, tier 2, case 14729).
+constant_fold_insert_word code=108f034c,13042608 in: out: v4=000f000f000f000f000f000f000f000f v24=000f002d000f002d000f002d000f002d
+constant_fold_extract_byte code=1085038c,10a42008 in: out: v4=00000005000000050000000500000005 v5=00000019000000190000001900000019
+constant_fold_extract_halfword code=1085038c,10a42048 in: out: v4=00000005000000050000000500000005 v5=00000019000000190000001900000019
