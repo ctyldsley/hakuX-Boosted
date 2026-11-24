@@ -75,3 +75,7 @@ default_nan_fdiv_zero_zero code=feb6b024 in: f22=0000000000000000 out: f21=7ff80
 default_nan_fsubs_inf_inf code=eeb6b028 in: f22=7ff0000000000000 out: f21=7ff8000000000000
 default_nan_fmadd_inf_zero code=feb620fa in: f22=7ff0000000000000 f3=0000000000000000 f4=3ff0000000000000 out: f21=7ff8000000000000
 default_nan_fmadds_inf_zero code=eeb620fa in: f22=7ff0000000000000 f3=0000000000000000 f4=3ff0000000000000 out: f21=7ff8000000000000
+
+# The constant pass folded a float vector equality as a comparison of bit patterns: a constant NaN was equal to itself, +0 was not equal to -0. hir/value.cc. By hand, after a sequence the test found (seed 5, tier 2, case 3943).
+constant_fold_vcmpeqfp_nan code=107f030c,10e31cc6 in: v7=11111111111111111111111111111111 cr=00000000 out: v3=ffffffffffffffffffffffffffffffff v7=00000000000000000000000000000000 cr=00000020
+constant_fold_vcmpeqfp_zeros code=1060038c,109f038c,10842184,10e324c6 in: cr=00000000 out: v3=00000000000000000000000000000000 v4=80000000800000008000000080000000 v7=ffffffffffffffffffffffffffffffff cr=00000080

@@ -1002,10 +1002,20 @@ void Value::VectorCompareEQ(Value* other, TypeName type) {
       }
       break;
     case INT32_TYPE:
-    case FLOAT32_TYPE:
       for (int i = 0; i < 4; i++) {
         constant.v128.u32[i] =
             constant.v128.u32[i] == other->constant.v128.u32[i] ? -1 : 0;
+      }
+      break;
+    // hakuX-Boosted: floats compare as floats, like the two cases below this
+    // function's siblings already do. Compared as bit patterns (upstream), a
+    // constant NaN was equal to itself and +0 was not equal to -0. Found by
+    // the differential test (boosted/difftest, regressions.txt
+    // "constant_fold_vcmpeqfp_*").
+    case FLOAT32_TYPE:
+      for (int i = 0; i < 4; i++) {
+        constant.v128.u32[i] =
+            constant.v128.f32[i] == other->constant.v128.f32[i] ? -1 : 0;
       }
       break;
     case INT64_TYPE:
