@@ -40,7 +40,40 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
   // (bcctr lowers to CallIndirect) re-enter at the entry block.
   std::unordered_set<Block*> seen;
   std::unordered_set<Block*> check_blocks;
-  check_blocks.insert(builder->first_block());
+  // hakuX-Boosted: the check at a function's entry is there for cycles made
+  // of calls (recursion, and indirect branches, which are calls here). A
+  // function that calls nothing cannot be on such a cycle except through
+  // its caller, and the caller is not a leaf: its own entry or the loop it
+  // calls from has the check. So a function without a call of any kind has
+  // no check at its entry (it keeps the ones at its loop heads, the entry
+  // block's too if a branch comes back to it). Small leaf functions are
+  // where the two instructions, and the tail behind them, weigh most.
+  bool calls_something = false;
+  for (auto block = builder->first_block(); block && !calls_something;
+       block = block->next) {
+    for (auto instr = block->instr_head; instr; instr = instr->next) {
+      const OpcodeInfo* op = instr->opcode;
+      // A return is an indirect call flagged CALL_POSSIBLE_RETURN (blr goes
+      // to the address in the link register): not a call for this purpose.
+      const bool is_return =
+          (op == &OPCODE_CALL_INDIRECT_info ||
+           op == &OPCODE_CALL_INDIRECT_TRUE_info) &&
+          (instr->flags & CALL_POSSIBLE_RETURN);
+      if (is_return) {
+        continue;
+      }
+      if (op == &OPCODE_CALL_info || op == &OPCODE_CALL_TRUE_info ||
+          op == &OPCODE_CALL_INDIRECT_info ||
+          op == &OPCODE_CALL_INDIRECT_TRUE_info ||
+          op == &OPCODE_CALL_EXTERN_info) {
+        calls_something = true;
+        break;
+      }
+    }
+  }
+  if (calls_something) {
+    check_blocks.insert(builder->first_block());
+  }
   for (auto block = builder->first_block(); block != nullptr;
        block = block->next) {
     seen.insert(block);
