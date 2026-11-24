@@ -27,21 +27,6 @@ stfsu  mem    # as stfs
 stfsx  mem    # as stfs
 stfsux  mem   # as stfs
 
-# ---- not implemented in the front end: the translated code traps
-vmhaddshs  crash   # InstrEmit_vmhaddshs is XEINSTRNOTIMPLEMENTED
-vmhraddshs  crash  # not implemented
-vmladduhm  crash   # not implemented
-vmulesb  crash     # not implemented
-vmulesh  crash     # not implemented
-vmuleub  crash     # not implemented
-vmuleuh  crash     # not implemented
-vmulosb  crash     # not implemented
-vmulosh  crash     # not implemented
-vmuloub  crash     # not implemented
-vmulouh  crash     # not implemented
-vupkhpx  crash     # not implemented
-vupklpx  crash     # not implemented
-
 # ---- the reference is not an authority here
 fresx  fpr         # QEMU returns -0.5 for the reciprocal estimate of -0; ours (-infinity) is what the architecture says
 vexptefp  vr       # 2^x: QEMU's own approximation differs from ours at overflow and at exactly representable results; neither is the console's
