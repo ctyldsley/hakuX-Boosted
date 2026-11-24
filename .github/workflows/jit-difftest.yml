@@ -98,7 +98,6 @@ jobs:
             cat "$RUNNER_TEMP/dt-out/summary.json"; echo
             python3 -c "import json,sys; s=json.load(open(sys.argv[1])); print('batches', len(s['batches']), 'seeds', min(b[0] for b in s['batches']), 'to', max(b[0] for b in s['batches']))" "$RUNNER_TEMP/dt-out/state.json" || true
             sed -n '/^## New differences/,/^## Known differences/p' "$RUNNER_TEMP/dt-out/report.md" | grep '^### ' | head -40
-            cat "$RUNNER_TEMP/dt-out/failures.txt" 2> /dev/null | head -10 || true
           fi
 
       - uses: actions/upload-artifact@v4
@@ -113,3 +112,10 @@ jobs:
             ${{ runner.temp }}/dt-out/regressions.log
             ${{ runner.temp }}/dt-out/failures.txt
           if-no-files-found: warn
+
+      # Last, so that it is easy to find at the end of the job's log.
+      - name: Digest
+        if: always()
+        run: |
+          cat "$RUNNER_TEMP/dt-out/summary.json" 2> /dev/null; echo
+          head -c 2500 "$RUNNER_TEMP/dt-out/failures.txt" 2> /dev/null || true

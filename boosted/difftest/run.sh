@@ -39,10 +39,29 @@ run_batch() {  # seed tier
 import struct,sys
 open(sys.argv[1],'wb').write(struct.pack('>5Q',0x4454504152414D53,$1,0,$batch,$2))" "$out/params.bin"
   rm -f "$out/ref.out" "$out/batch.jsonl"
-  if ! timeout 300 "$qemu" -M pseries -cpu 970_v2.2 -m 512M -nographic -nodefaults \
+  timeout 150 "$qemu" -M pseries -cpu 970_v2.2 -m 512M -nographic -nodefaults \
       -monitor none -serial "file:$out/ref.out" -bios "$build/dt_ref.bin" \
-      -device "loader,file=$out/params.bin,addr=0x800000,force-raw=on" 2> /dev/null; then
-    echo "seed $1 tier $2: the reference did not finish" >> "$out/failures.txt"
+      -device "loader,file=$out/params.bin,addr=0x800000,force-raw=on" 2> "$out/ref.err"
+  status=$?
+  if [ $status -ne 0 ]; then
+    # Which case it stopped in: the stream holds every case before it.
+    done_cases=$(python3 - "$out/ref.out" <<'PY'
+import struct, sys
+try:
+    d = open(sys.argv[1], 'rb').read()
+except OSError:
+    d = b''
+o, n = 16, 0
+while o + 4 <= len(d) and d[o:o + 4] != b'DTND':
+    k = struct.unpack('>H', d[o + 2:o + 4])[0]
+    if o + 4 + 10 * k > len(d):
+        break
+    o += 4 + 10 * k
+    n += 1
+print(n)
+PY
+)
+    echo "seed $1 tier $2: the reference ended with status $status after $done_cases complete cases (124: timed out): $(tail -c 300 "$out/ref.err" | tr '\n' ' ')" >> "$out/failures.txt"
     return
   fi
   timeout 600 $wrapper "$build/xenia-jit-difftest" --dt_seed="$1" --dt_tier="$2" --dt_start=0 \
