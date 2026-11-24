@@ -220,6 +220,7 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/cpu/ppc/ppc_emit_altivec.cc` | `vcmpbfp` and `vcmpbfp128`: a NaN operand sets both out-of-bounds bits (only the lower was set); the record form no longer sets `CR6[0]` when every element is out of bounds |
 | `xenia/cpu/backend/a64/a64_seq_vector.cc` | `VECTOR_ROTATE_LEFT` uses v2 and v3 only as temporaries: it overwrote v0, where a constant first operand is put, before reading it again (`vrlb`/`vrlh`/`vrlw` of a folded constant were wrong) |
 | `xenia/cpu/ppc/ppc_emit_altivec.cc` | `vmuleub`, `vmuleuh`, `vmulesb`, `vmulesh`, `vmuloub`, `vmulouh`, `vmulosb`, `vmulosh`, `vmhaddshs`, `vmhraddshs`, `vmladduhm`, `vupkhpx`, `vupklpx` implemented, element by element with scalar operations (they were `XEINSTRNOTIMPLEMENTED` and trapped) |
+| `xenia/cpu/backend/a64/a64_sequences.cc` | `SHL_V128` and `SHR_V128` load a constant first operand into v3, not v0, which they overwrite before reading the operand again (`vsl`/`vsr` of a folded constant were wrong) |
 
 ## Taking a newer hakuX
 

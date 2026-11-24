@@ -56,3 +56,7 @@ vupklpx_implemented code=11c0abce in: v14=b934e5a196daf9dc7840420f80000000 v21=7
 # srad by 64 or more of exactly 0x8000000000000000 cleared the carry, as sraw did for its word. ppc_emit_alu.cc. By hand, after two sequences the test found (seed 3, tier 2, cases 4141 and 5075).
 srad_64_or_more_min_int code=7d092e34 in: r8=8000000000000000 r5=0000000000000040 out: r9=ffffffffffffffff xer=20000000
 srad_63_min_int code=7d092e34 in: r8=8000000000000000 r5=000000000000003f xer=20000000 out: r9=ffffffffffffffff xer=00000000
+
+# vsl and vsr of a constant (a vspltis* result) by a register: the back end put the constant in v0 and overwrote it with the carry before the second read. a64_sequences.cc. By hand, after a sequence the test found (seed 1, tier 2, case 343).
+vsl_constant code=1083030c,1064f1c4 in: v30=47474747474747474747474747474747 out: v4=03030303030303030303030303030303 v3=81818181818181818181818181818180
+vsr_constant code=1083030c,1064f2c4 in: v30=47474747474747474747474747474747 out: v4=03030303030303030303030303030303 v3=00060606060606060606060606060606

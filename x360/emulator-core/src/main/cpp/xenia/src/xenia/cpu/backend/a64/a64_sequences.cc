@@ -2250,7 +2250,12 @@ struct SHL_V128 : Sequence<SHL_V128, I<OPCODE_SHL, V128Op, V128Op, I8Op>> {
     // PPC 128-bit SHL by N bits (0-7). The value is stored as 4 word-swapped
     // 32-bit lanes. Carries flow from higher NEON lanes to lower:
     //   lane[i] = (lane[i] << N) | (lane[i+1] >> (32-N))
-    int s = SrcVReg(e, i.src1, 0);
+    // hakuX-Boosted: a constant first operand goes to v3. It went to v0,
+    // which the sequence below overwrites with the carry before reading the
+    // operand a second time: vsl and vsr of a constant the translator had
+    // folded were wrong (boosted/difftest, regressions.txt "vsl_constant",
+    // "vsr_constant").
+    int s = SrcVReg(e, i.src1, 3);
     int d = i.dest.reg().getIdx();
     if (i.src2.is_constant) {
       uint8_t sh = i.src2.constant() & 0x7;
@@ -2381,7 +2386,12 @@ struct SHR_V128 : Sequence<SHR_V128, I<OPCODE_SHR, V128Op, V128Op, I8Op>> {
     // PPC 128-bit SHR by N bits (0-7). Carries flow from lower NEON lanes
     // to higher:
     //   lane[i] = (lane[i] >> N) | (lane[i-1] << (32-N))
-    int s = SrcVReg(e, i.src1, 0);
+    // hakuX-Boosted: a constant first operand goes to v3. It went to v0,
+    // which the sequence below overwrites with the carry before reading the
+    // operand a second time: vsl and vsr of a constant the translator had
+    // folded were wrong (boosted/difftest, regressions.txt "vsl_constant",
+    // "vsr_constant").
+    int s = SrcVReg(e, i.src1, 3);
     int d = i.dest.reg().getIdx();
     if (i.src2.is_constant) {
       uint8_t sh = i.src2.constant() & 0x7;
