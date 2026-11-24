@@ -569,15 +569,24 @@ bool SimplificationPass::TransformANDROLORSHLSeq(
     return true;
   } else if ((rotation_shiftmask_right & mask) ==
              mask) {  // only uses bits from right
+    // hakuX-Boosted: both operands are written. Upstream replaced src1
+    // alone, taking the rotate to be there and the mask in src2; the caller
+    // accepts them either way round, and with the mask first (and rA,rS,rB
+    // where rS holds a constant from an earlier li and rB a rlwinm result)
+    // the mask was replaced and the rotate kept: (x >> n) & rotl(x) instead
+    // of (x >> n) & mask. Found by the differential test (boosted/difftest,
+    // regressions.txt "and_constant_first_*").
     Value* rotation_fix = builder->Shr(input, right_shift_for_rotate);
     rotation_fix->def->MoveBefore(i);
     i->set_src1(rotation_fix);
+    i->set_src2(builder->LoadConstantUint64(mask));
     return true;
 
   } else if ((rotation_shiftmask_left & mask) == mask) {
     Value* rotation_fix = builder->Shl(input, left_shift_for_rotate);
     rotation_fix->def->MoveBefore(i);
     i->set_src1(rotation_fix);
+    i->set_src2(builder->LoadConstantUint64(mask));
     return true;
   }
   return false;

@@ -5,4 +5,3 @@
 # every other sequence. Remove the line when the bug is fixed.
 #
 #   <seed> <tier> <case>  # reason
-65 2 5873   # li r29,0xEC0 / rlwinm r15,r6,31,23,22 / ... / and. r30,r29,r15: the AND with the constant is lost (r30 is r15 unmasked); a constant rule of the passes, not found yet
