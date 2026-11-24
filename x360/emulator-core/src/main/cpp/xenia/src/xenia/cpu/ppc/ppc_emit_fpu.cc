@@ -453,8 +453,13 @@ int InstrEmit_mtfsfix(PPCHIRBuilder& f, const InstrData& i) {
   // FPSCR[crfD] <- IMM
 
   // Create a mask.
+  // hakuX-Boosted: the immediate is the four bits above the lowest of the
+  // RB field (that lowest bit is reserved). Upstream shifted the whole field
+  // in, which wrote twice the value: mtfsfi 7,1 (round toward zero) set the
+  // rounding mode to 2 (toward +infinity). Found by the differential test
+  // (boosted/difftest, regressions.txt "mtfsfi_immediate_*").
   uint32_t mask = 0xF << (0x1C - (i.X.RT & 0x1C));
-  uint32_t value = i.X.RB << (0x1C - (i.X.RT & 0x1C));
+  uint32_t value = (i.X.RB >> 1) << (0x1C - (i.X.RT & 0x1C));
 
   Value* fpscr = f.LoadFPSCR();
   fpscr = f.And(fpscr, f.LoadConstantInt32(~mask));
