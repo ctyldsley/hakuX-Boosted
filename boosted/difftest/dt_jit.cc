@@ -726,6 +726,7 @@ int Main(const std::vector<std::string>& args) {
   int status = cvars::dt_regress.empty() ? Fuzz() : Regress();
   // Leave without taking the processor down: nothing is left to save, and
   // its teardown has been seen to spin after a case that ended in a signal.
+  if (!cvars::log_file.empty()) xe::ShutdownLogging();
   fflush(nullptr);
   _exit(status);
 }

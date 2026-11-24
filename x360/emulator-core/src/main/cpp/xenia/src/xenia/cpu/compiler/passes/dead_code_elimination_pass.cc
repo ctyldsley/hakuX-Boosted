@@ -154,6 +154,16 @@ void DeadCodeEliminationPass::MakeNopRecursive(Instr* i) {
   }
   i->dest = NULL;
 
+  // hakuX-Boosted: the walk above spares an instruction with an effect of
+  // its own (OPCODE_FLAG_VOLATILE) whose result nobody reads, but this
+  // recursion did not ask: when the last reader of such a result died, the
+  // instruction that made it was deleted too. A lwarx or ldarx whose loaded
+  // value is overwritten before use (reserved_load, then a byte swap nobody
+  // reads) lost its reservation that way, and the stwcx. after it failed
+  // every time: a loop that retries until the store succeeds never ended.
+  // Found by the differential test (boosted/difftest, regressions.txt
+  // "resv_*_value_unread").
+  bool keep_value = false;
 #define MAKE_NOP_SRC(n)                                  \
   if (i->src##n##_use) {                                 \
     Value::Use* use = i->src##n##_use;                   \
@@ -163,10 +173,20 @@ void DeadCodeEliminationPass::MakeNopRecursive(Instr* i) {
     value->RemoveUse(use);                               \
     if (!value->use_head) {                              \
       /* Value is now unused, so recursively kill it. */ \
+      /* hakuX-Boosted: unless what made it has an */     \
+      /* effect of its own (see below). */                \
       if (value->def && value->def != i) {               \
-        MakeNopRecursive(value->def);                    \
+        if (value->def->opcode->flags &                  \
+            hir::OPCODE_FLAG_VOLATILE) {                 \
+          keep_value = true;                             \
+        } else {                                         \
+          MakeNopRecursive(value->def);                  \
+        }                                                \
       }                                                  \
-      HIRBuilder::GetCurrent()->DeallocateValue(value);  \
+      if (!keep_value) {                                 \
+        HIRBuilder::GetCurrent()->DeallocateValue(value); \
+      }                                                  \
+      keep_value = false;                                \
     }                                                    \
     HIRBuilder::GetCurrent()->DeallocateUse(use);        \
   }
