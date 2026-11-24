@@ -181,7 +181,7 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/gpu/vulkan/vulkan_pipeline_cache.h`, `.cc`, `vulkan_command_processor.h`, `.cc` (further) | The pixel interpreter (`vulkan_placeholder_ps_mode = 3`), its textures, samplers and float constants; `vulkan_placeholder_depth_only_async`; the vertex texture switch and the vertex budget; the `first run split:` line; the creation threads' adaptive policy; the driver cache check, the progress counters, import and export of the shader record |
 | `.github/workflows/boosted.yml` | The job "Translator tests" (`claude/translator-wide` at `0665311`, merged 2026-11-14 into `claude/integration-1115`, as are the rows down to `entry_table.cc`; the full table is in `boosted/notes/translator-wide.md`) |
 | `xenia/cpu/ppc/testing/ppc_testing_main.cc`, `testing/ci/**`, `testing/seq_*.s` | The test runner's state dump, self-check counters and `seq_*.s` files; new: the small ARM64 build, its scripts and matrix, seven test files |
-| `xenia/cpu/ppc/ppc_emit_control.cc` | `ppc_mcrf_copies_field` |
+| `xenia/cpu/ppc/ppc_emit_control.cc` | `ppc_mcrf_copies_field` (default on since `claude/jit-difftest`) |
 | `xenia/cpu/hir/opcodes.h`, `hir_builder.h`, `.cc`, `cpu/ppc/ppc_hir_builder.cc` | `CONTEXT_BARRIER_FOR_BRANCH`; `ContextBarrier` takes flags; the per-instruction sync masks; the barriers of branch instructions marked |
 | `xenia/cpu/compiler/passes/guest_register_pinning_pass.h`, `.cc` | `RunWide` and `pin_guest_registers_wide`, `_flags`, `_max_int`, `_max_vec` |
 | `xenia/cpu/compiler/passes/dead_context_store_pass.*`, `context_constant_pass.*` | New files: `eliminate_dead_context_stores`, `propagate_context_constants` |

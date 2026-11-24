@@ -18,7 +18,6 @@
 *  vr.nan     # both results are NaNs; sign, payload or quieting follow the ARM host's rules
 
 # ---- wrong, not fixed here
-mcrf  *       # upstream's translation is only right from cr0 holding "less than"; exact with ppc_mcrf_copies_field=true (default off, in PLAN's audit of unmeasured settings)
 stfs  mem     # a double that is not exactly a single is rounded by the host's conversion; the console truncates the mantissa (and gives a defined pattern out of range)
 stfsu  mem    # as stfs
 stfsx  mem    # as stfs

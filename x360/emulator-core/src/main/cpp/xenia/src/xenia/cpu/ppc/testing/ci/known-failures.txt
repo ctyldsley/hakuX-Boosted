@@ -10,20 +10,23 @@
 # does not compare addresses and stores. Titles pair the two on one address.
 stwcx_address_mismatch
 
-# mcrf between fields other than from cr0: wrong as upstream translates it,
-# right with the fork's setting (see InstrEmit_mcrf in ppc_emit_control.cc).
-mcrf_fields_cr7_to_cr3 unless --ppc_mcrf_copies_field=true
-mcrf_fields_gt unless --ppc_mcrf_copies_field=true
-mcrf_fields_zero_source unless --ppc_mcrf_copies_field=true
+# mcrf between fields other than from cr0 is wrong as upstream translates
+# it; ppc_mcrf_copies_field, on by default since claude/jit-difftest (the
+# differential test's reference agrees with it on every case), translates
+# it exactly. These fail only in a run that turns the setting off.
+mcrf_fields_cr7_to_cr3 if --ppc_mcrf_copies_field=false
+mcrf_fields_gt if --ppc_mcrf_copies_field=false
+mcrf_fields_zero_source if --ppc_mcrf_copies_field=false
 
 # Upstream's own mcrf tests that copy from a field other than cr0 expect what
 # upstream's translation gives (a compare of the source field against zero),
 # not a copy of the field: mcrf_3 expects "greater" in cr0 after copying a
-# field that holds "equal". They fail with the exact translation.
-mcrf_3 if --ppc_mcrf_copies_field=true
-mcrf_3_constant if --ppc_mcrf_copies_field=true
-mcrf_5 if --ppc_mcrf_copies_field=true
-mcrf_5_constant if --ppc_mcrf_copies_field=true
+# field that holds "equal". They fail with the exact translation, which is
+# now the default, and are skipped in every run.
+mcrf_3
+mcrf_3_constant
+mcrf_5
+mcrf_5_constant
 
 # Hand-written flag conventions the ABI does not have (a callee returning
 # its answer in cr0, a callee taking a flag as an argument): level 3 of
