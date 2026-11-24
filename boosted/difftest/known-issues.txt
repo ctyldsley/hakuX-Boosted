@@ -13,12 +13,9 @@
 
 # ---- state the translator does not keep (upstream's design)
 *  cr.so      # CR's summary overflow bits are never written: UpdateCR, the compares and stwcx. leave what was there
-*  xer.so     # XER[SO] is not kept: the OE forms do not set it, mtspr XER drops it
-*  xer.ov     # XER[OV] is not kept: the OE forms do not set or clear it, mtspr XER drops it
 *  vscr.sat   # VSCR[SAT] is not set by the saturating vector instructions, nor by mtvscr
 *  fpr.nan    # both results are NaNs; sign, payload or quieting follow the ARM host's rules
 *  vr.nan     # both results are NaNs; sign, payload or quieting follow the ARM host's rules
-mfspr  gpr    # mfspr XER returns the carry only (LoadXER), not SO and OV
 
 # ---- wrong, not fixed here
 mcrf  *       # upstream's translation is only right from cr0 holding "less than"; exact with ppc_mcrf_copies_field=true (default off, in PLAN's audit of unmeasured settings)

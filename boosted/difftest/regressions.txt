@@ -83,3 +83,14 @@ constant_fold_vcmpeqfp_zeros code=1060038c,109f038c,10842184,10e324c6 in: cr=000
 # and rA,rS,rB with a constant in rS (from an earlier li) and a rlwinm result in rB: a rule of the simplification pass replaced the constant instead of the rotate, giving (x >> n) & rotl(x). simplification_pass.cc. The second is the sequence the test found on the ARM64 runner (seed 65, tier 2, case 5873).
 and_constant_first_right code=3ba00ec0,54cffdec,7fbe7839 in: r6=2f1d27857b622d9b out: r15=bdb116cdbdb116cd r29=0000000000000ec0 r30=00000000000006c0 cr=40000000
 and_constant_first_found code=3ba00ec0,54cffdec,6fb700ff,7d656050,7fbe7839,7fcff120,7d9de810 in: r29=00000000000000de r0=ff5b059bb68d54bc r15=8000000080000000 r6=2f1d27857b622d9b r23=0000000000000071 r11=000000000000009a r5=0000000035c94c7c r12=29014a740986e028 r30=ffffffff9e42a006 cr=221a6a54 xer=00000000 ctr=b2919d1a0567d9b6 fpscr=00000003 vscr=00010000 out: r11=29014a73d3bd93ac r12=0000000000000000 r15=bdb116cdbdb116cd r23=0000000000ff0ec0 r29=0000000000000ec0 r30=00000000000006c0 cr=000006c0 xer=20000000 skip: crmask=eeeeeeee vscrmask=00010000 nanequal=1
+
+# XER[OV] and XER[SO]: the OE forms set, clear and accumulate them; mfxer and mtxer carry all three bits. ppc_emit_alu.cc, ppc_hir_builder.cc. By hand; 480,000 generated cases agree with the reference with the entries gone from known-issues.txt.
+oe_overflow_addo_sets code=7ca32614 in: r3=000000007fffffff r4=0000000000000001 out: r5=0000000080000000 xer=c0000000
+oe_overflow_addo_clears_ov_keeps_so code=7ca32614 in: r3=0000000000000005 r4=0000000000000001 xer=c0000000 out: r5=0000000000000006 xer=80000000
+oe_overflow_subfo_sets code=7ca32450 in: r3=0000000000000001 r4=ffffffff80000000 out: r5=ffffffff7fffffff xer=c0000000
+oe_overflow_nego_min_int code=7ca304d0 in: r3=0000000080000000 out: r5=ffffffff80000000 xer=c0000000
+oe_overflow_mullwo_sets code=7ca325d6 in: r3=0000000000010000 r4=0000000000010000 out: r5=0000000100000000 xer=c0000000
+oe_overflow_mulldo_fits code=7ca325d2 in: r3=0000000000010000 r4=0000000000010000 xer=40000000 out: r5=0000000100000000 xer=00000000
+oe_overflow_divwo_clears code=7ca327d6 in: r3=0000000000000064 r4=0000000000000007 xer=40000000 out: r5=000000000000000e xer=00000000 skip: gprhi=00000020
+xer_mfxer_all_three code=7ca102a6 in: xer=e0000000 out: r5=00000000e0000000
+xer_mtxer_all_three code=7ca103a6 in: r5=00000000c0000000 xer=20000000 out: xer=c0000000
