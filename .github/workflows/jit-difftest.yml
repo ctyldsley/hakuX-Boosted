@@ -1,0 +1,108 @@
+# hakuX-Boosted: the differential test of the PowerPC to ARM64 translator
+# (boosted/difftest). Builds the CPU core headless for ARM64 Linux, as the
+# instruction tests do, and runs generated instruction cases through it and
+# through a reference (QEMU's PowerPC 970, in the 32-bit mode the console
+# runs titles in) for a set time, comparing every register, CR, XER, FPSCR
+# and the data they touch. No phone, no game data.
+#
+# Green means: nothing differs that boosted/difftest/known-issues.txt does
+# not list, and every fixed case of regressions.txt still passes. The report
+# (artifact "jit-difftest-report", and the run's summary page) lists each
+# difference with its instruction, input state, our result and the
+# reference's. How to read and reproduce it: boosted/notes/jit-difftest.md.
+name: hakuX-Boosted JIT difftest
+
+on:
+  push:
+    branches:
+      - 'claude/**'
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Minutes of fuzzing
+        required: false
+        default: '30'
+      seed:
+        description: First seed (the default run starts at 1)
+        required: false
+        default: '1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jit-difftest-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XE: x360/emulator-core/src/main/cpp/xenia
+  CCACHE_COMPILERCHECK: content
+  CCACHE_NOHASHDIR: 'true'
+
+jobs:
+  difftest:
+    name: Translator against the reference
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: The submodules the CPU sources need
+        run: |
+          tp=$XE/third_party
+          git submodule update --init --depth 1 -- $tp/xbyak_aarch64 $tp/fmt \
+            $tp/capstone $tp/cxxopts $tp/date $tp/tomlplusplus $tp/utfcpp \
+            $tp/xxhash $tp/disruptorplus $tp/boost_context/context
+
+      - name: Tools
+        run: |
+          boosted/tools/ci-apt.sh ninja-build ccache clang lld llvm qemu-system-ppc
+          clang --version | head -1
+          qemu-system-ppc64 --version | head -1
+
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: jit-difftest-aarch64
+          max-size: 1G
+
+      - name: Build the reference harness (bare-metal PowerPC)
+        run: boosted/difftest/build-ref.sh $XE/tools/ppc-instructions.xml "$RUNNER_TEMP/dt"
+
+      - name: Build the runner (the CPU core, ARM64)
+        run: |
+          cmake -S $XE/src/xenia/cpu/ppc/testing/ci -B "$RUNNER_TEMP/dt" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DDT_GEN="$RUNNER_TEMP/dt"
+          ninja -C "$RUNNER_TEMP/dt" xenia-jit-difftest
+
+      - name: Run
+        id: run
+        env:
+          MINUTES: ${{ inputs.minutes || '30' }}
+          SEED: ${{ inputs.seed || '1' }}
+        run: |
+          boosted/difftest/run.sh "$RUNNER_TEMP/dt" "$RUNNER_TEMP/dt-out" "$MINUTES" "$SEED"
+
+      - name: Report
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/dt-out/report.md" ]; then
+            head -c 900000 "$RUNNER_TEMP/dt-out/report.md" >> "$GITHUB_STEP_SUMMARY"
+            head -12 "$RUNNER_TEMP/dt-out/report.md"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jit-difftest-report
+          path: |
+            ${{ runner.temp }}/dt-out/report.md
+            ${{ runner.temp }}/dt-out/regression-candidates.txt
+            ${{ runner.temp }}/dt-out/summary.json
+            ${{ runner.temp }}/dt-out/state.json
+            ${{ runner.temp }}/dt-out/regressions.log
+            ${{ runner.temp }}/dt-out/failures.txt
+          if-no-files-found: warn
