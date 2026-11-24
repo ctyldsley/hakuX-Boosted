@@ -216,6 +216,7 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/gpu/shaders/ucode_program.glsli`, `ucode_program_vertex.glsli`, `ucode_interpreter.vs.glsl`, `ucode_interpreter_stand_in.vs.glsl` | The placeholder vertex interpreters' position `invariant` and their arithmetic `precise`, as the translator's Invariant and NoContraction, so placeholder and real draws of one mesh give the same depth (`boosted/notes/gpu-correct.md`) |
 | `xenia/cpu/compiler/passes/dead_code_elimination_pass.cc` | `MakeNopRecursive` does not delete an instruction with an effect of its own (`OPCODE_FLAG_VOLATILE`) when its last reader dies: a `lwarx`/`ldarx` whose value is never read kept no reservation, and the `stwcx.` after it always failed (`claude/jit-difftest`, found by the differential test, `boosted/notes/jit-difftest.md`; as are the rows below) |
 | `xenia/cpu/ppc/ppc_emit_fpu.cc` | `mtfsfi` takes its immediate from the right four bits (it wrote twice the value); `mtfsf` applies its field mask the right way round (it was mirrored: FM 0x01 wrote the top four bits, not the rounding mode) |
+| `xenia/cpu/ppc/ppc_emit_alu.cc` | The OE forms that carry (`addco`, `addmeo`, `addzeo`, `subfco`, `subfeo`, `subfmeo`, `subfzeo`) write `XER[CA]` (they took the "not implemented" path and left it) |
 
 ## Taking a newer hakuX
 

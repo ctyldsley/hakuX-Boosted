@@ -11,3 +11,12 @@ mtfsfi_immediate_2 code=ff80310c in: cr=dd78fdef xer=00000000 ctr=00000000000000
 # mtfsf applied its field mask mirrored: FM 0x01 (the rounding mode and non-IEEE field) wrote the top four bits instead. ppc_emit_fpu.cc.
 mtfsf_low_field_1 code=fc02fd8e in: f31=b5bbe30822d9ff02 cr=9cccdbbf xer=20000000 ctr=0000000000000000 fpscr=00000003 vscr=00010000 out: fpscr=00000002
 mtfsf_low_field_2 code=fc02fd8e in: f31=bed6de685e75af02 cr=872dbe31 xer=20000000 ctr=0000000000000001 fpscr=00000001 vscr=00010000 out: fpscr=00000002
+
+# The OE forms that carry (addco, addmeo, addzeo, subfco, subfeo, subfmeo, subfzeo) did not write XER[CA]. ppc_emit_alu.cc.
+oe_carry_addco code=7fde0414 in: r30=0000000000000052 r0=43409116e8006e73 cr=c0b90189 xer=20000000 ctr=0000000000000002 fpscr=00000000 vscr=00010001 out: r30=43409116e8006ec5 xer=00000000
+oe_carry_addmeo code=7d9605d4 in: r12=ffffffffc2d26e98 r22=751e3f6877844e71 cr=a1c4bbcf xer=80000000 ctr=0000000000000000 fpscr=00000001 vscr=00010000 out: r12=751e3f6877844e70 xer=a0000000
+oe_carry_addzeo code=7f2f0594 in: r25=29510487171f4422 r15=ffffffffffffff81 cr=df489301 xer=20000000 ctr=0000000000000003 fpscr=00000002 vscr=00010001 out: r25=ffffffffffffff82 xer=00000000
+oe_carry_subfco code=7c25ac10 in: r1=5555555555555555 r5=00000000100103e0 r21=124261a77982ceb3 cr=f4a6a5fd xer=00000000 ctr=0000000000000001 fpscr=00000003 vscr=00010000 out: r1=124261a76981cad3 xer=20000000
+oe_carry_subfeo code=7df9dd10 in: r15=ffffffffcf3d0ea6 r25=0000000010010420 r27=5555555555555555 cr=ca6176c9 xer=00000000 ctr=0000000000000003 fpscr=00000002 vscr=00010000 out: r15=5555555545545134 xer=20000000
+oe_carry_subfmeo code=7f7b05d0 in: r27=00016844a182be04 cr=f241c9b0 xer=80000000 ctr=0000000000000099 fpscr=00000003 vscr=00010000 out: r27=fffe97bb5e7d41fa xer=a0000000
+oe_carry_subfzeo code=7e8f0590 in: r20=000000009dabfd8f r15=0000000000000002 cr=a26b8dac xer=20000000 ctr=0000000000000040 fpscr=00000003 vscr=00010000 out: r20=fffffffffffffffe xer=00000000

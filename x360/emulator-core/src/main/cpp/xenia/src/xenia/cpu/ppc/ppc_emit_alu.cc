@@ -48,6 +48,15 @@ Value* SubDidCarry(PPCHIRBuilder& f, Value* v1, Value* v2) {
               f.IsFalse(trunc_v2));
 }
 
+// hakuX-Boosted: an OE form (addo, subfco, ...) also sets XER[OV] and
+// XER[SO] on signed overflow. The translator keeps neither, as upstream; what
+// was wrong beyond that is that the forms which also carry (addco, addmeo,
+// addzeo, subfco, subfeo, subfmeo, subfzeo) took the "not implemented" path
+// instead of writing the carry, so XER[CA] kept its old value and the next
+// adde or subfe added the wrong carry. Found by the differential test
+// (boosted/difftest, regressions.txt "oe_carry_*").
+static void OverflowNotKept() {}
+
 // https://github.com/sebastianbiallas/pearpc/blob/0b3c823f61456faa677f6209545a7b906e797421/src/cpu/cpu_generic/ppc_tools.h#L26
 Value* AddWithCarryDidCarry(PPCHIRBuilder& f, Value* v1, Value* v2, Value* v3) {
   v1 = f.Truncate(v1, INT32_TYPE);
@@ -79,11 +88,11 @@ int InstrEmit_addcx(PPCHIRBuilder& f, const InstrData& i) {
   Value* rb = f.LoadGPR(i.XO.RB);
   Value* v = f.Add(ra, rb);
   f.StoreGPR(i.XO.RT, v);
+  // hakuX-Boosted: the carry is written whether or not OE is set (it was
+  // skipped with OE; see OverflowNotKept).
+  f.StoreCA(AddDidCarry(f, ra, rb));
   if (i.XO.OE) {
-    XEINSTRNOTIMPLEMENTED();
-    // e.update_xer_with_overflow(EFLAGS OF?);
-  } else {
-    f.StoreCA(AddDidCarry(f, ra, rb));
+    OverflowNotKept();
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -166,13 +175,11 @@ int InstrEmit_addmex(PPCHIRBuilder& f, const InstrData& i) {
   Value* ra = f.LoadGPR(i.XO.RA);
   Value* v = f.AddWithCarry(ra, f.LoadConstantInt64(-1), f.LoadCA());
   f.StoreGPR(i.XO.RT, v);
+  // hakuX-Boosted: the carry is written whether or not OE is set (it was
+  // skipped with OE; see OverflowNotKept).
+  f.StoreCA(AddWithCarryDidCarry(f, ra, f.LoadConstantInt64(-1), f.LoadCA()));
   if (i.XO.OE) {
-    // With XER[SO] update too.
-    // e.update_xer_with_overflow_and_carry(b.CreateExtractValue(v, 1));
-    XEINSTRNOTIMPLEMENTED();
-  } else {
-    // Just CA update.
-    f.StoreCA(AddWithCarryDidCarry(f, ra, f.LoadConstantInt64(-1), f.LoadCA()));
+    OverflowNotKept();
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -186,13 +193,11 @@ int InstrEmit_addzex(PPCHIRBuilder& f, const InstrData& i) {
   Value* ra = f.LoadGPR(i.XO.RA);
   Value* v = f.AddWithCarry(ra, f.LoadZeroInt64(), f.LoadCA());
   f.StoreGPR(i.XO.RT, v);
+  // hakuX-Boosted: the carry is written whether or not OE is set (it was
+  // skipped with OE; see OverflowNotKept).
+  f.StoreCA(AddWithCarryDidCarry(f, ra, f.LoadZeroInt64(), f.LoadCA()));
   if (i.XO.OE) {
-    // With XER[SO] update too.
-    // e.update_xer_with_overflow_and_carry(b.CreateExtractValue(v, 1));
-    XEINSTRNOTIMPLEMENTED();
-  } else {
-    // Just CA update.
-    f.StoreCA(AddWithCarryDidCarry(f, ra, f.LoadZeroInt64(), f.LoadCA()));
+    OverflowNotKept();
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -455,11 +460,11 @@ int InstrEmit_subfcx(PPCHIRBuilder& f, const InstrData& i) {
   Value* rb = f.LoadGPR(i.XO.RB);
   Value* v = f.Sub(rb, ra);
   f.StoreGPR(i.XO.RT, v);
+  // hakuX-Boosted: the carry is written whether or not OE is set (it was
+  // skipped with OE; see OverflowNotKept).
+  f.StoreCA(SubDidCarry(f, rb, ra));
   if (i.XO.OE) {
-    XEINSTRNOTIMPLEMENTED();
-    // e.update_xer_with_overflow(EFLAGS??);
-  } else {
-    f.StoreCA(SubDidCarry(f, rb, ra));
+    OverflowNotKept();
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -482,11 +487,11 @@ int InstrEmit_subfex(PPCHIRBuilder& f, const InstrData& i) {
   Value* rb = f.LoadGPR(i.XO.RB);
   Value* v = f.AddWithCarry(not_ra, rb, f.LoadCA());
   f.StoreGPR(i.XO.RT, v);
+  // hakuX-Boosted: the carry is written whether or not OE is set (it was
+  // skipped with OE; see OverflowNotKept).
+  f.StoreCA(AddWithCarryDidCarry(f, not_ra, rb, f.LoadCA()));
   if (i.XO.OE) {
-    XEINSTRNOTIMPLEMENTED();
-    // e.update_xer_with_overflow_and_carry(b.CreateExtractValue(v, 1));
-  } else {
-    f.StoreCA(AddWithCarryDidCarry(f, not_ra, rb, f.LoadCA()));
+    OverflowNotKept();
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -499,12 +504,12 @@ int InstrEmit_subfmex(PPCHIRBuilder& f, const InstrData& i) {
   Value* not_ra = f.Not(f.LoadGPR(i.XO.RA));
   Value* v = f.AddWithCarry(not_ra, f.LoadConstantInt64(-1), f.LoadCA());
   f.StoreGPR(i.XO.RT, v);
+  // hakuX-Boosted: the carry is written whether or not OE is set (it was
+  // skipped with OE; see OverflowNotKept).
+  f.StoreCA(
+      AddWithCarryDidCarry(f, not_ra, f.LoadConstantInt64(-1), f.LoadCA()));
   if (i.XO.OE) {
-    XEINSTRNOTIMPLEMENTED();
-    // e.update_xer_with_overflow_and_carry(b.CreateExtractValue(v, 1));
-  } else {
-    f.StoreCA(
-        AddWithCarryDidCarry(f, not_ra, f.LoadConstantInt64(-1), f.LoadCA()));
+    OverflowNotKept();
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
@@ -517,11 +522,11 @@ int InstrEmit_subfzex(PPCHIRBuilder& f, const InstrData& i) {
   Value* not_ra = f.Not(f.LoadGPR(i.XO.RA));
   Value* v = f.AddWithCarry(not_ra, f.LoadZeroInt64(), f.LoadCA());
   f.StoreGPR(i.XO.RT, v);
+  // hakuX-Boosted: the carry is written whether or not OE is set (it was
+  // skipped with OE; see OverflowNotKept).
+  f.StoreCA(AddWithCarryDidCarry(f, not_ra, f.LoadZeroInt64(), f.LoadCA()));
   if (i.XO.OE) {
-    XEINSTRNOTIMPLEMENTED();
-    // e.update_xer_with_overflow_and_carry(b.CreateExtractValue(v, 1));
-  } else {
-    f.StoreCA(AddWithCarryDidCarry(f, not_ra, f.LoadZeroInt64(), f.LoadCA()));
+    OverflowNotKept();
   }
   if (i.XO.Rc) {
     f.UpdateCR(0, v);
