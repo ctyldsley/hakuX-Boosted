@@ -208,7 +208,9 @@ bool ConstantPropagationPass::Run(HIRBuilder* builder, bool& result) {
           }
           break;
         case OPCODE_CONVERT:
-          if (i->src1.value->IsConstant()) {
+          // hakuX-Boosted: CONVERT_KEEP_NAN is left to the back end, whose
+          // sequence keeps a NaN's signalling bit; Value::Convert would not.
+          if (i->src1.value->IsConstant() && !(i->flags & CONVERT_KEEP_NAN)) {
             TypeName target_type = v->type;
             v->set_from(i->src1.value);
             v->Convert(target_type, RoundMode(i->flags));

@@ -931,7 +931,17 @@ int InstrEmit_lfdx(PPCHIRBuilder& f, const InstrData& i) {
 // force-set on NaN inputs.
 
 // double -> single, returning the 32-bit single bit pattern.
+//
+// hakuX-Boosted: on ARM64 both are one conversion flagged CONVERT_KEEP_NAN,
+// whose sequence (a64_sequences.cc) does the host conversion, tests for a
+// NaN and restores the bit out of line: four instructions on the usual path
+// where the expansions below are sixteen and twenty, on every float load
+// and store of single precision. The results are the same bit for bit.
 Value* PackSingleKeepNaN(HIRBuilder& f, Value* value) {
+#if XE_ARCH_ARM64
+  return f.Cast(f.Convert(value, FLOAT32_TYPE, RoundMode(CONVERT_KEEP_NAN)),
+                INT32_TYPE);
+#endif
   Value* dbits = f.Cast(value, INT64_TYPE);
   Value* sbits = f.Cast(f.Convert(value, FLOAT32_TYPE), INT32_TYPE);
   // NaN if abs(double) > +inf bits.
@@ -948,6 +958,10 @@ Value* PackSingleKeepNaN(HIRBuilder& f, Value* value) {
 
 // single (raw 32-bit pattern) -> double value.
 Value* UnpackSingleKeepNaN(HIRBuilder& f, Value* sbits) {
+#if XE_ARCH_ARM64
+  return f.Convert(f.Cast(sbits, FLOAT32_TYPE), FLOAT64_TYPE,
+                   RoundMode(CONVERT_KEEP_NAN));
+#endif
   Value* dbits =
       f.Cast(f.Convert(f.Cast(sbits, FLOAT32_TYPE), FLOAT64_TYPE), INT64_TYPE);
   // NaN if abs(single) > +inf bits.

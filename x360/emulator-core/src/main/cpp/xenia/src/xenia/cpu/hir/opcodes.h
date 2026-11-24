@@ -43,6 +43,15 @@ enum RoundMode {
   ROUND_DYNAMIC,  // Round based on the host's rounding mode.
 };
 
+// hakuX-Boosted: a flag of OPCODE_CONVERT between FLOAT32 and FLOAT64, beside
+// its RoundMode. The conversion is a data movement (PowerPC's lfs and stfs):
+// a NaN keeps its signalling bit instead of being made quiet as the host's
+// conversion makes it. Only the ARM64 back end implements it, and only the
+// PowerPC front end's ARM64 build emits it (ppc_emit_memory.cc).
+enum ConvertFlags {
+  CONVERT_KEEP_NAN = 1 << 7,
+};
+
 enum LoadStoreFlags {
   LOAD_STORE_BYTE_SWAP = 1 << 0,
 };

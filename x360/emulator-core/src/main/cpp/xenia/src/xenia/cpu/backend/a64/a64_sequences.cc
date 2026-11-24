@@ -3734,10 +3734,56 @@ struct CONVERT_F64_I64
     }
   }
 };
+// hakuX-Boosted: CONVERT_KEEP_NAN (hir/opcodes.h), PowerPC's lfs and stfs.
+// The host's conversion carries a NaN's payload across and sets its quiet
+// bit; PowerPC leaves that bit as it was. So: convert, test the source for
+// a NaN (unordered with itself), and only then, out of line, give the
+// result the source's quiet bit (bit 51 of a double, bit 22 of a single).
+// The source register may be the destination's: it is copied to v0 first
+// in that case, so the tail still has it.
+static void EmitConvertKeepNaN(A64Emitter& e, int dest, int src,
+                               bool to_double) {
+  using namespace Xbyak_aarch64;
+  if (dest == src) {
+    e.mov(VReg(0).b16, VReg(src).b16);
+    src = 0;
+  }
+  if (to_double) {
+    e.fcvt(DReg(dest), SReg(src));
+    e.fcmp(SReg(src), SReg(src));
+  } else {
+    e.fcvt(SReg(dest), DReg(src));
+    e.fcmp(DReg(src), DReg(src));
+  }
+  Xbyak_aarch64::Label& after = e.NewCachedLabel();
+  Xbyak_aarch64::Label& fix = e.AddToTail([&after, dest, src, to_double](A64Emitter& e,
+                                                          Xbyak_aarch64::Label&) {
+    if (to_double) {
+      e.fmov(e.w17, SReg(src));
+      e.fmov(e.x16, DReg(dest));
+      e.and_(e.x16, e.x16, ~(1ull << 51));
+      e.ubfx(e.x17, e.x17, 22, 1);
+      e.orr(e.x16, e.x16, e.x17, LSL, 51);
+      e.fmov(DReg(dest), e.x16);
+    } else {
+      e.fmov(e.x17, DReg(src));
+      e.fmov(e.w16, SReg(dest));
+      e.and_(e.w16, e.w16, ~(1u << 22));
+      e.ubfx(e.x17, e.x17, 51, 1);
+      e.orr(e.w16, e.w16, e.w17, LSL, 22);
+      e.fmov(SReg(dest), e.w16);
+    }
+    e.b(after);
+  });
+  e.b(VS, fix);
+  e.L(after);
+}
+
 struct CONVERT_F32_F64
     : Sequence<CONVERT_F32_F64, I<OPCODE_CONVERT, F32Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     e.ChangeFpcrMode(FPCRMode::Fpu);
+    const bool keep_nan = i.instr->flags & CONVERT_KEEP_NAN;
     if (i.src1.is_constant) {
       union {
         double d;
@@ -3746,7 +3792,14 @@ struct CONVERT_F32_F64
       c.d = i.src1.constant();
       e.mov(e.x0, c.u);
       e.fmov(e.d0, e.x0);
-      e.fcvt(i.dest, e.d0);
+      if (keep_nan) {
+        EmitConvertKeepNaN(e, i.dest.reg().getIdx(), 0, false);
+      } else {
+        e.fcvt(i.dest, e.d0);
+      }
+    } else if (keep_nan) {
+      EmitConvertKeepNaN(e, i.dest.reg().getIdx(), i.src1.reg().getIdx(),
+                         false);
     } else {
       e.fcvt(i.dest, i.src1);
     }
@@ -3756,6 +3809,7 @@ struct CONVERT_F64_F32
     : Sequence<CONVERT_F64_F32, I<OPCODE_CONVERT, F64Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     e.ChangeFpcrMode(FPCRMode::Fpu);
+    const bool keep_nan = i.instr->flags & CONVERT_KEEP_NAN;
     if (i.src1.is_constant) {
       union {
         float f;
@@ -3764,7 +3818,14 @@ struct CONVERT_F64_F32
       c.f = i.src1.constant();
       e.mov(e.w0, static_cast<uint64_t>(c.u));
       e.fmov(e.s0, e.w0);
-      e.fcvt(i.dest, e.s0);
+      if (keep_nan) {
+        EmitConvertKeepNaN(e, i.dest.reg().getIdx(), 0, true);
+      } else {
+        e.fcvt(i.dest, e.s0);
+      }
+    } else if (keep_nan) {
+      EmitConvertKeepNaN(e, i.dest.reg().getIdx(), i.src1.reg().getIdx(),
+                         true);
     } else {
       e.fcvt(i.dest, i.src1);
     }
