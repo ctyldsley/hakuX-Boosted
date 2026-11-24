@@ -45,8 +45,10 @@ DECLARE_int32(eliminate_dead_context_stores);
 DECLARE_bool(dead_context_store_verify);
 
 // hakuX-Boosted: see A64Emitter::IsNearBoundLabel.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    a64_short_backward_branches, false,
+    a64_short_backward_branches, true,
     "A conditional branch (b.cond, cbz, cbnz, tbz, tbnz) to a block label "
     "already placed earlier in the same function is emitted as the one "
     "instruction it is when the distance is known to be in range, instead of "
@@ -57,8 +59,10 @@ DEFINE_bool(
     "a64");
 
 // hakuX-Boosted: see A64Emitter::UseShortBranch.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    a64_short_forward_branches, false,
+    a64_short_forward_branches, true,
     "A conditional branch to a block of the same function that comes later "
     "is emitted as one instruction too (a64_short_backward_branches does "
     "this for earlier blocks). The distance is not known when the branch is "
@@ -147,8 +151,10 @@ DEFINE_bool(
     "a64");
 
 // hakuX-Boosted: see A64Emitter::EmitCompareResult.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    a64_fuse_compare_branch, false,
+    a64_fuse_compare_branch, true,
     "An integer compare whose result is used only by the conditional branch "
     "directly after it is emitted as cmp and b.cond, without first turning "
     "the answer into 0 or 1 in a register and testing that. Most useful "
@@ -159,8 +165,10 @@ DEFINE_bool(
 
 // hakuX-Boosted: instruction selection that gives the same results in fewer
 // instructions; each use is marked with the setting's name.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    a64_tight_sequences, false,
+    a64_tight_sequences, true,
     "Shorter forms of some sequences, with the same results: AND, OR and "
     "XOR of a 64-bit value with a constant use ARM64's immediate form when "
     "the constant has one (a mask of consecutive bits, for one) instead of "

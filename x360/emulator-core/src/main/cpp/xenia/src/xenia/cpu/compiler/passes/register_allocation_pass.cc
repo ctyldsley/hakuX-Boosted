@@ -40,8 +40,10 @@ DEFINE_bool(
     "contents had changed; it is counted and logged (TranslatorVerify:). "
     "Slower code. Takes effect for functions translated after it is set.",
     "CPU");
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    register_allocation_elide_copies, false,
+    register_allocation_elide_copies, true,
     "The register allocator gives the result of a copy the register of what "
     "it copies, where that register stays untouched for as long as the "
     "result is used, so that the copy needs no instruction: assignments, "

@@ -15,8 +15,10 @@
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 
 // hakuX-Boosted: see NarrowRotate32 below.
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    ppc_rlw_narrow_rotate, false,
+    ppc_rlw_narrow_rotate, true,
     "rlwinm, rlwimi and rlwnm whose mask does not wrap round (MB <= ME, the "
     "usual case: the result fits in 32 bits) rotate the low word as a "
     "32-bit value, one host instruction, instead of building the doubled "
