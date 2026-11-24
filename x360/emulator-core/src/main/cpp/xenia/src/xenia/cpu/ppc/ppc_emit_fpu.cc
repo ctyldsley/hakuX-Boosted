@@ -210,10 +210,18 @@ int InstrEmit_fmsubsx(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_fmsub(f, i, true);
 }
 
+// hakuX-Boosted: PowerPC's fnmadd/fnmsub negate the fused result except
+// when it is a NaN: a propagated QNaN keeps its sign and the default NaN of
+// an invalid operation stays positive. Negating unconditionally flipped the
+// NaN sign (translator tests fnmadd*/fnmsub*).
+static Value* NegateFusedResult(PPCHIRBuilder& f, Value* v) {
+  return f.Select(f.IsNan(v), v, f.Neg(v));
+}
+
 int InstrEmit_fnmaddx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- -([frA x frC] + frB)
-  Value* v = f.Neg(
-      f.MulAdd(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
+  Value* v = NegateFusedResult(
+      f, f.MulAdd(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
   f.StoreFPR(i.A.FRT, v);
   f.UpdateFPSCR(v, i.A.Rc);
   return 0;
@@ -221,8 +229,8 @@ int InstrEmit_fnmaddx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_fnmaddsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- -([frA x frC] + frB)
-  Value* v = f.Neg(
-      f.MulAdd(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
+  Value* v = NegateFusedResult(
+      f, f.MulAdd(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
   v = f.ToSingle(v);
   f.StoreFPR(i.A.FRT, v);
   f.UpdateFPSCR(v, i.A.Rc);
@@ -231,8 +239,8 @@ int InstrEmit_fnmaddsx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_fnmsubx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- -([frA x frC] - frB)
-  Value* v = f.Neg(
-      f.MulSub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
+  Value* v = NegateFusedResult(
+      f, f.MulSub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
   f.StoreFPR(i.A.FRT, v);
   f.UpdateFPSCR(v, i.A.Rc);
   return 0;
@@ -240,8 +248,8 @@ int InstrEmit_fnmsubx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_fnmsubsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- -([frA x frC] - frB)
-  Value* v = f.Neg(
-      f.MulSub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
+  Value* v = NegateFusedResult(
+      f, f.MulSub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
   v = f.ToSingle(v);
   f.StoreFPR(i.A.FRT, v);
   f.UpdateFPSCR(v, i.A.Rc);
