@@ -580,6 +580,10 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   };
   static FlagsKey MakeFlagsKey(const hir::Instr* compare);
   FlagsKey flags_key_;
+  // hakuX-Boosted: the function's one copy of a return that does not go
+  // back to its caller (CallIndirect).
+  Xbyak_aarch64::Label* return_miss_label_ = nullptr;
+  bool emitting_return_miss_ = false;
   bool skip_next_cmp_ = false;
 
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;

@@ -1316,6 +1316,8 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
 }
 
 void A64Emitter::ResetPerFunctionState() {
+  return_miss_label_ = nullptr;  // hakuX-Boosted
+  emitting_return_miss_ = false;
   reset();
   tail_code_.clear();
 
@@ -1810,12 +1812,36 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
   auto target_w = WReg(reg_index);
 
   // Check if this is a possible return (e.g., PPC blr).
-  if (instr->flags & hir::CALL_POSSIBLE_RETURN) {
+  if ((instr->flags & hir::CALL_POSSIBLE_RETURN) && !emitting_return_miss_) {
     // Compare target guest address with our function's return address.
     ldr(w0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
     x0_const_valid_ = false;  // hakuX-Boosted
     cmp(target_w, w0);
     b(EQ, epilog_label());
+    // hakuX-Boosted: a return to somewhere other than the caller (a
+    // longjmp's landing, a hand-made return address) is rare, and what it
+    // takes (the indirection table, the stackpoint, the frame) is about
+    // twenty instructions that every blr of the function used to carry
+    // inline behind the branch above. One copy for the function, in its
+    // tail, reached with the target in w16.
+    if ((instr->flags & hir::CALL_TAIL) && !emitting_return_miss_) {
+      if (target_w.getIdx() != w16.getIdx()) {
+        mov(w16, target_w);
+      }
+      if (!return_miss_label_) {
+        hir::Instr miss = *instr;
+        // (A label of its own: the tail list's labels move as it grows.)
+        return_miss_label_ = &NewCachedLabel();
+        AddToTail([miss](A64Emitter& e, Label&) {
+          e.L(*e.return_miss_label_);
+          e.emitting_return_miss_ = true;
+          e.CallIndirect(&miss, 16);
+          e.emitting_return_miss_ = false;
+        });
+      }
+      CodeGenerator::b(*return_miss_label_);
+      return;
+    }
   }
 
   // Load host code address from indirection table.
