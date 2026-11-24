@@ -214,6 +214,14 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/kernel/xboxkrnl/xboxkrnl_misc.cc`, `kernel/xthread.h` | `KeSaveFloatingPointState`, `KeRestoreFloatingPointState`, `KeSaveVectorUnitState`, `KeRestoreVectorUnitState` (were not implemented): FPRs and FPSCR, v0 to v127 and VSCR into a per-thread area made on first use (`XThread::fpu_vmx_save_area`), after rexglue |
 | `xenia/gpu/vulkan/vulkan_command_processor.cc` (`IssueCopy`) | `readback_resolve = uma`: a later resolve of a destination the CPU reads is drained and read at once (its own pixels, not the previous resolve's), as upstream's fast mode with `readback_resolve_sync`; destinations the CPU never reads are not copied; `readback_resolve_sync = false` keeps the old one-behind read (`boosted/notes/gpu-correct.md`) |
 | `xenia/gpu/shaders/ucode_program.glsli`, `ucode_program_vertex.glsli`, `ucode_interpreter.vs.glsl`, `ucode_interpreter_stand_in.vs.glsl` | The placeholder vertex interpreters' position `invariant` and their arithmetic `precise`, as the translator's Invariant and NoContraction, so placeholder and real draws of one mesh give the same depth (`boosted/notes/gpu-correct.md`) |
+| `xenia/cpu/hir/opcodes.h`, `xenia/cpu/ppc/ppc_emit_memory.cc`, `xenia/cpu/backend/a64/a64_sequences.cc`, `xenia/cpu/compiler/passes/constant_propagation_pass.cc` | `CONVERT_KEEP_NAN`: `lfs`/`stfs` as one flagged conversion on ARM64, the NaN case out of line; not folded as a constant |
+| `xenia/cpu/ppc/ppc_emit_fpu.cc`, `xenia/cpu/backend/a64/a64_emitter.cc`, `.h` | `fcmpu`/`fcmpo` store the three ordered compares unmasked on ARM64; the flags cache knows float compares (`MakeFlagsKey`, `A64Emitter::fcmp`) |
+| `xenia/cpu/compiler/passes/memory_poll_park_pass.cc` | `TryInstrumentLoop` leaves a loop whose load address moves on every pass (a scan) without a backoff site |
+| `xenia/cpu/compiler/passes/preempt_check_injection_pass.cc` | no check at the entry of a function without a call |
+| `xenia/cpu/backend/a64/a64_backend.cc`, `.h`, `a64_emitter.cc` | `EmitPreemptYieldThunk`: the slow path of every preemption check in one thunk |
+| `xenia/cpu/backend/a64/a64_emitter.cc`, `.h` | `CallIndirect`: one copy a function of a return that misses the caller's address (`return_miss_label_`) |
+| `xenia/cpu/backend/a64/a64_emitter.cc`, `a64_backend.cc`, `a64_code_cache.cc`, `xenia/cpu/ppc/ppc_emit_alu.cc`, `xenia/cpu/compiler/passes/register_allocation_pass.cc`, `guest_register_pinning_pass.cc`, `dead_context_store_pass.cc` | `claude/jit-speed`: eighteen existing translator settings on by default (`boosted/notes/jit-speed.md` section 3) |
+| `xenia/cpu/ppc/testing/seq_float_nan_moves.s`, `xenia/cpu/ppc/testing/ci/matrix.txt` | tests for the NaN moves; the "before jit-speed's defaults" line |
 
 ## Taking a newer hakuX
 

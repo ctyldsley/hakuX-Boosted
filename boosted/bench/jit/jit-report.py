@@ -34,6 +34,8 @@ def load(path):
 def fmt(value, digits=3):
     if value is None:
         return "-"
+    if float(value).is_integer() and digits >= 6:
+        return f"{int(value):,}"
     if value >= 1000:
         return f"{value:,.0f}"
     return f"{value:.{digits}g}" if value < 100 else f"{value:.1f}"
