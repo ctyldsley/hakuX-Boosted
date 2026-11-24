@@ -18,7 +18,7 @@ Done:
 - The rig (`boosted/difftest/`), the workflow
   (`.github/workflows/jit-difftest.yml`, 25 minutes on every push to
   `claude/**`, on GitHub's ARM64 runner, no phone).
-- Thirteen commits to the translator, one per bug, 54 fixed cases in
+- Seventeen commits to the translator, one per bug, 65 fixed cases in
   `boosted/difftest/regressions.txt` (section 3). Nine are in the front
   end or the passes (so upstream's x64 back end has them too), three in the
   ARM64 back end, one implements thirteen instructions that trapped.
@@ -26,14 +26,11 @@ Done:
   `boosted/difftest/known-issues.txt` and in section 4.
 
 Next, in order:
-0. The dropped AND of section 4's first entry (seed 65, sequence 5873): a
-   wrong result in plain integer code, found by the last run and not fixed.
 1. Put the fixes on the phone. They are small and independent. The first
    is the one that can end a hang (section 3); the thirteen instructions
    are the one that can let a title run that stopped.
-2. Read through the ARM64 back end's vector sequences for the pattern three
-   of the bugs share (section 3, "the pattern"): the test finds them one
-   sequence at a time, a reading finds them all.
+2. What section 4 leaves: each costs instructions on a common path and wants
+   measuring on the phone before it is worth having.
 3. The things the rig does not generate yet (section 6): branches backwards
    and calls, `vpkd3d128`/`vupkd3d128`, the string instructions.
 4. A second column: the same cases with the fork's translator settings on
@@ -203,6 +200,10 @@ operand or a value carried from another instruction.
 | `10168e7` | The constant pass folded a vector insert as one byte whatever its size, and a vector extract from the wrong byte or halfword of its word (and up to 15 bytes past the vector) | `cpu/compiler/passes/constant_propagation_pass.cc`, `cpu/hir/value.cc` | sequence |
 | `29b8a88` | The constant pass folded a float vector equality as a comparison of bit patterns: a NaN equal to itself, +0 not equal to -0 | `cpu/hir/value.cc` | sequence |
 | `ae5d763` | An invalid scalar float operation (inf - inf, 0 * inf, 0 / 0) made x86's NaN, sign set, where PowerPC's has it clear. Upstream's own tests taken from a console expect the positive one in all 40 such cases and are all in its `skip.txt` | `cpu/backend/a64/a64_sequences.cc` | sequence |
+| `1a93742` | **`and` of a register holding a constant with a `rlwinm` result gave `(x >> n) & rotl(x)`**: a rule of the simplification pass replaced the constant instead of the rotate when the constant was the first operand. Plain integer code (`li`/`lis` a mask, `rlwinm`, `and`) | `cpu/compiler/passes/simplification_pass.cc` | sequence, on the ARM64 runner |
+| `9f44a12` | XER[OV] and XER[SO] were not kept: the OE forms now set, clear and accumulate them, `mfxer`/`mtxer` carry all three bits | `cpu/ppc/ppc_emit_alu.cc`, `ppc_hir_builder.cc` | single |
+| `71bda2f` | `mcrf` was only right from cr0 holding "less than": the fork's exact form (`ppc_mcrf_copies_field`) is now the default | `cpu/ppc/ppc_emit_control.cc` | single |
+| `d36de13` | `VECTOR_DENORMFLUSH` overwrote a constant operand (the pattern below) | `cpu/backend/a64/a64_seq_vector.cc` | reading |
 
 ### The pattern
 
@@ -215,10 +216,13 @@ operands are never constants, pass. A vector constant comes from `vspltis*`,
 
 The test finds such a bug only when a sequence happens to feed a constant to
 the instruction (a third of the sequences start with one for this reason).
-Reading every `Emit` in `a64_seq_vector.cc` and `a64_sequences.cc` that
-calls `SrcVReg(..., 0)` or `(..., 1)` and writes `VReg(0)` or `VReg(1)`
-before its last read of the operand would find the rest at once. Not done
-here.
+Every `Emit` in `a64_seq_vector.cc`, `a64_sequences.cc` and
+`a64_seq_memory.cc` that calls `SrcVReg` was then checked with a script for
+a write to the scratch register before a later read of the operand. It
+listed twelve places; eleven were different branches of a `switch` (`PACK`,
+`UNPACK`) or harmless (`SELECT`), one was real (`VECTOR_DENORMFLUSH`,
+`d36de13`). Sequences that take their constants another way (scalar float,
+integer) were not read.
 
 The constant pass is the same story one level up: its folding code
 (`hir/value.cc`) is only run when every operand is a constant, and three of
@@ -256,11 +260,7 @@ is known to read them):
 - **CR's summary overflow bits.** `UpdateCR`, the compares and `stwcx.` write
   three of a field's four bits and leave the fourth as it was; the console
   copies XER[SO] into it. Not fixed because the fix is a load and a store
-  more in every compare.
-- **XER[SO] and XER[OV].** The OE forms (`addo`, `mullwo`, `divwo` ...)
-  neither set nor clear them; `mtspr XER` drops them; `mfspr XER` returns
-  the carry alone. Could be done for the OE forms alone at no cost to
-  anything else (they are rare); not done here.
+  more in every compare. (XER[SO] itself is kept since `9f44a12`.)
 - **VSCR[SAT].** No saturating vector instruction sets it and `mtvscr` does
   not carry it; `mfvscr` therefore never shows it.
 - **A NaN's sign and payload.** Both sides agree which results are NaNs. They
@@ -274,28 +274,7 @@ is known to read them):
   same and is fixed (`ae5d763`), on the evidence of upstream's console
   tests; there are no such tests for the vector one, so it is left.
 
-Wrong, found last, **not fixed: the first thing to do next.** Seed 65,
-sequence 5873 (`known-sequences.txt`): `li r29,0xEC0`, `rlwinm r15,r6,31,23,22`
-(a wrap-around mask, which keeps every bit), three unrelated instructions,
-`and. r30,r29,r15`. The reference gives r30 = r15 & 0xEC0 = 0x6C0; we give
-r15 itself (0x3DB116CD), and CR0 and what follows from it are wrong with it.
-An AND with a constant is being dropped, so the suspect is a rule in the
-simplification or constant passes that decides the AND cannot change its
-other operand (the bits it takes the rotate's result to have). Found by run 6
-on the ARM64 runner, reproduced in the container (`run.sh <build> <out> 0 65`);
-the case's line is in that run's `regression-candidates.txt`. Unlike the
-constant-operand bugs of section 3 this one is in integer code every title
-runs, so it matters more than its one case suggests.
-
 Wrong, small, not fixed here:
-- **`mcrf`** is only right from cr0 holding "less than" as upstream
-  translates it. The fork already has the exact form behind
-  `ppc_mcrf_copies_field` (default off, in PLAN's list of settings to
-  measure). Run with that setting, this test agrees with the reference (seed
-  77, 20,000 single instructions: 47 `mcrf` cases differ with it off, none
-  with it on, which is evidence for that audit); the
-  default was not changed here because the instruction tests' matrix
-  compares runs with and without it and its lists would need redoing.
 - **`stfs`, `stfsu`, `stfsx`, `stfsux`** of a double that is not exactly a
   single: the host conversion rounds (and saturates), the console takes the
   bits (truncates the mantissa). Compiled code rounds with `frsp` first, so
@@ -351,6 +330,10 @@ to 70, both tiers), no batch failed, and one sequence differed: the one of
 section 4's first entry. The workflow's time box is 25 minutes from here on,
 so that a push repeats seeds already seen rather than a few new ones at the
 end; other seeds are for the workflow's "first seed" input.
+
+After the four further fixes (the AND, XER, `mcrf`, the denormal flush): seeds
+1 to 3, 20 to 22, 40 to 42 and 60 to 62 in the container, 480,000 cases,
+nothing differs that is not listed; `known-sequences.txt` is empty again.
 
 Three mistakes of the rig itself were found on the way and are worth
 knowing if it is changed: the reference harness's C code ran in 32-bit mode
