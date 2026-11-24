@@ -218,6 +218,7 @@ XenDroid (`x360/`): search for `hakuX-Boosted:`. At the time of writing:
 | `xenia/cpu/ppc/ppc_emit_fpu.cc` | `mtfsfi` takes its immediate from the right four bits (it wrote twice the value); `mtfsf` applies its field mask the right way round (it was mirrored: FM 0x01 wrote the top four bits, not the rounding mode) |
 | `xenia/cpu/ppc/ppc_emit_alu.cc` | The OE forms that carry (`addco`, `addmeo`, `addzeo`, `subfco`, `subfeo`, `subfmeo`, `subfzeo`) write `XER[CA]` (they took the "not implemented" path and left it); `sraw` by 32 or more sets the carry for every negative word (not for 0x80000000 before) |
 | `xenia/cpu/ppc/ppc_emit_altivec.cc` | `vcmpbfp` and `vcmpbfp128`: a NaN operand sets both out-of-bounds bits (only the lower was set); the record form no longer sets `CR6[0]` when every element is out of bounds |
+| `xenia/cpu/backend/a64/a64_seq_vector.cc` | `VECTOR_ROTATE_LEFT` uses v2 and v3 only as temporaries: it overwrote v0, where a constant first operand is put, before reading it again (`vrlb`/`vrlh`/`vrlw` of a folded constant were wrong) |
 
 ## Taking a newer hakuX
 

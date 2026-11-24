@@ -31,3 +31,9 @@ vcmpbfp128_record_nan code=193ddde8 in: v73=40000000bf885e539da4b2ee47df0981 v12
 sraw_32_or_more_min_int code=7d092e30 in: r8=ffffffff80000000 r5=0000000000000020 out: r9=ffffffffffffffff xer=20000000
 sraw_63_min_int_record code=7d092e31 in: r8=8000000080000000 r5=000000007558d4ff cr=00000000 out: r9=ffffffffffffffff xer=20000000 cr=80000000
 sraw_31_min_int code=7d092e30 in: r8=0000000080000000 r5=000000000000001f xer=20000000 out: r9=ffffffffffffffff xer=00000000
+
+# vrlb, vrlh and vrlw of a constant (here a vspltis* result) by a register: the back end overwrote the constant with the shift counts before its second use. a64_seq_vector.cc. The first is the sequence the test found (seed 1, tier 2, case 5593); the others are by hand.
+vrlh_constant_first_found code=10c63244,10d4030c,123cc94c,12e66044 in: v6=2595eab4800000000000007000000020 v17=f00427c9e8bab4b92f28e3a1344e0354 v28=04824000166d1ee74533b98700008914 v25=000422ce000000640000006d0000001f v23=2eac41363550fac46cb90bcf098b1bf8 v12=0000001f000000306b4fe4f9ffffffc2 cr=eb50cd51 xer=20000000 ctr=0000000000000002 fpscr=00000003 vscr=00010000 out: v6=f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4 v17=45330000b987006d000000008914001f v23=f4f47a7af4f4f4f47a7ae9e97a7ad3d3 skip: crmask=eeeeeeee vscrmask=00010000 nanequal=1
+vrlb_constant_first code=10d4030c,12e66004 in: v12=0000001f000000306b4fe4f9ffffffc2 out: v6=f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4 v23=f4f4f47af4f4f4f4a77a4fe97a7a7ad3
+vrlh_constant_first code=10d4030c,12e66044 in: v12=0000001f000000306b4fe4f9ffffffc2 out: v6=f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4 v23=f4f47a7af4f4f4f47a7ae9e97a7ad3d3
+vrlw_constant_first code=10d4038c,12e66084 in: v12=0000001f000000306b4fe4f9ffffffc2 out: v6=fffffff4fffffff4fffffff4fffffff4 v23=7ffffffafff4ffffe9ffffffffffffd3

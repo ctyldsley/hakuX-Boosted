@@ -767,40 +767,45 @@ struct VECTOR_ROTATE_LEFT_V128
     int s2 = SrcVReg(e, i.src2, 1);
     int d = i.dest.reg().getIdx();
     // rotate = (src << amt) | (src >> (width - amt))
+    //
+    // hakuX-Boosted: only v2 and v3 as temporaries. The sequence used v0 as
+    // well, which is where SrcVReg puts a constant first operand: the value
+    // to rotate was overwritten with the shift counts before its second use,
+    // so vrlb, vrlh and vrlw of a constant (a vspltis* result the constant
+    // pass had folded, rotated by a register) gave a wrong right-hand part.
+    // The right shift count is now made as amt - width directly (a negative
+    // count shifts right; by the full width, for amt 0, it gives 0), which is
+    // also one instruction shorter. Found by the differential test
+    // (boosted/difftest, regressions.txt "vrl*_constant_first").
     switch (i.instr->flags) {
       case INT8_TYPE: {
         e.movi(VReg(2).b16, 0x07);
         e.and_(VReg(2).b16, VReg(s2).b16, VReg(2).b16);
-        // Left shift.
-        e.ushl(VReg(3).b16, VReg(s1).b16, VReg(2).b16);
-        // Right shift = negate amount.
-        e.movi(VReg(0).b16, 8);
-        e.sub(VReg(0).b16, VReg(0).b16, VReg(2).b16);
-        e.neg(VReg(0).b16, VReg(0).b16);
-        e.ushl(VReg(0).b16, VReg(s1).b16, VReg(0).b16);
-        e.orr(VReg(d).b16, VReg(3).b16, VReg(0).b16);
+        e.movi(VReg(3).b16, 8);
+        e.sub(VReg(3).b16, VReg(2).b16, VReg(3).b16);
+        e.ushl(VReg(2).b16, VReg(s1).b16, VReg(2).b16);
+        e.ushl(VReg(3).b16, VReg(s1).b16, VReg(3).b16);
+        e.orr(VReg(d).b16, VReg(2).b16, VReg(3).b16);
         break;
       }
       case INT16_TYPE: {
         e.movi(VReg(2).h8, 0x0F);
         e.and_(VReg(2).b16, VReg(s2).b16, VReg(2).b16);
-        e.ushl(VReg(3).h8, VReg(s1).h8, VReg(2).h8);
-        e.movi(VReg(0).h8, 16);
-        e.sub(VReg(0).h8, VReg(0).h8, VReg(2).h8);
-        e.neg(VReg(0).h8, VReg(0).h8);
-        e.ushl(VReg(0).h8, VReg(s1).h8, VReg(0).h8);
-        e.orr(VReg(d).b16, VReg(3).b16, VReg(0).b16);
+        e.movi(VReg(3).h8, 16);
+        e.sub(VReg(3).h8, VReg(2).h8, VReg(3).h8);
+        e.ushl(VReg(2).h8, VReg(s1).h8, VReg(2).h8);
+        e.ushl(VReg(3).h8, VReg(s1).h8, VReg(3).h8);
+        e.orr(VReg(d).b16, VReg(2).b16, VReg(3).b16);
         break;
       }
       case INT32_TYPE: {
         e.movi(VReg(2).s4, 0x1F);
         e.and_(VReg(2).b16, VReg(s2).b16, VReg(2).b16);
-        e.ushl(VReg(3).s4, VReg(s1).s4, VReg(2).s4);
-        e.movi(VReg(0).s4, 32);
-        e.sub(VReg(0).s4, VReg(0).s4, VReg(2).s4);
-        e.neg(VReg(0).s4, VReg(0).s4);
-        e.ushl(VReg(0).s4, VReg(s1).s4, VReg(0).s4);
-        e.orr(VReg(d).b16, VReg(3).b16, VReg(0).b16);
+        e.movi(VReg(3).s4, 32);
+        e.sub(VReg(3).s4, VReg(2).s4, VReg(3).s4);
+        e.ushl(VReg(2).s4, VReg(s1).s4, VReg(2).s4);
+        e.ushl(VReg(3).s4, VReg(s1).s4, VReg(3).s4);
+        e.orr(VReg(d).b16, VReg(2).b16, VReg(3).b16);
         break;
       }
       default:
