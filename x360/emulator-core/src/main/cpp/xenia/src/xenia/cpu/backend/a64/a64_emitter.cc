@@ -2512,6 +2512,22 @@ void A64Emitter::EmitPreemptCheck(uint32_t guest_address) {
   Label& do_yield =
       AddToTail([&after, flag_offset, sync_pins, flush_mask,
                  reload_mask](A64Emitter& e, Label&) {
+        // hakuX-Boosted: the clearing of the flag, the test for a handler
+        // and the call are the same at every check and live in one thunk
+        // (A64HelperEmitter::EmitPreemptYieldThunk); only the pinned
+        // registers' write-back and reload are this site's own.
+        if (void* yield_thunk = e.backend()->preempt_yield_thunk()) {
+          if (sync_pins) {
+            e.EmitPinnedFlush(flush_mask);
+          }
+          e.mov(e.x16, reinterpret_cast<uint64_t>(yield_thunk));
+          e.blr(e.x16);
+          if (sync_pins) {
+            e.EmitPinnedReload(reload_mask);
+          }
+          e.b(after);
+          return;
+        }
         e.strb(e.wzr, ptr(e.x20, flag_offset));
         // Null until the scheduler starts, and a stale flag can reach here
         // after it shuts down, so check before calling.

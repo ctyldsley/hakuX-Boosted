@@ -326,6 +326,7 @@ class A64HelperEmitter : public A64Emitter {
   HostToGuestThunk EmitHostToGuestThunk();
   GuestToHostThunk EmitGuestToHostThunk();
   GuestToHostThunk EmitGuestToHostLeanThunk();  // hakuX-Boosted
+  void* EmitPreemptYieldThunk(void* guest_to_host_thunk);  // hakuX-Boosted
   ResolveFunctionThunk EmitResolveFunctionThunk();
   void* EmitGuestAndHostSynchronizeStackHelper();
   void* EmitFrameChainResumeHelper();  // hakuX-Boosted
@@ -706,6 +707,68 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostLeanThunk() {
 
   void* fn = Emplace(func_info);
   return reinterpret_cast<GuestToHostThunk>(fn);
+}
+
+// --------------------------------------------------------------------------
+// hakuX-Boosted: PreemptYieldThunk
+// --------------------------------------------------------------------------
+// What a preemption check does once its flag is found set (A64Emitter::
+// EmitPreemptCheck): clear the flag and, if the scheduler has installed its
+// handler, call it through the guest-to-host thunk. Every check used to
+// carry these instructions itself in the tail of its function, about a
+// dozen for each loop head and function entry; they are here once, and a
+// check's own tail is the call of this (with the write-back and reload of
+// the pinned registers round it, which differ from site to site).
+//
+// On entry: x20 = context, x30 = the return address in the check's tail.
+// x0, x16 and x17 are free there (a check sits at a block's head, where no
+// value is live). Everything else is left as the guest-to-host thunk leaves
+// it.
+void* A64HelperEmitter::EmitPreemptYieldThunk(void* guest_to_host_thunk) {
+  struct {
+    size_t prolog;
+    size_t prolog_stack_alloc;
+    size_t body;
+    size_t epilog;
+    size_t tail;
+  } code_offsets = {};
+  code_offsets.prolog = getSize();
+  const size_t stack = 16;
+  sub(sp, sp, static_cast<uint32_t>(stack));
+  code_offsets.prolog_stack_alloc = getSize();
+  stp(x29, x30, ptr(sp, 0x0));
+  code_offsets.body = getSize();
+
+  static_assert(offsetof(ppc::PPCContext, preempt_requested) < 4096);
+  strb(wzr, ptr(x20, static_cast<uint32_t>(
+                         offsetof(ppc::PPCContext, preempt_requested))));
+  // Null until the scheduler starts, and a stale flag can reach here after
+  // it shuts down, so check before calling.
+  Xbyak_aarch64::Label done;
+  mov(x0, reinterpret_cast<uint64_t>(&xe::cpu::backend::preempt_yield_handler));
+  ldr(x0, ptr(x0));
+  cbz(x0, done);
+  mov(x16, reinterpret_cast<uint64_t>(guest_to_host_thunk));
+  blr(x16);
+  L(done);
+
+  code_offsets.epilog = getSize();
+  ldp(x29, x30, ptr(sp, 0x0));
+  add(sp, sp, static_cast<uint32_t>(stack));
+  ret();
+  code_offsets.tail = getSize();
+
+  EmitFunctionInfo func_info = {};
+  func_info.code_size.total = getSize();
+  func_info.code_size.prolog = code_offsets.body - code_offsets.prolog;
+  func_info.code_size.body = code_offsets.epilog - code_offsets.body;
+  func_info.code_size.epilog = code_offsets.tail - code_offsets.epilog;
+  func_info.code_size.tail = getSize() - code_offsets.tail;
+  func_info.prolog_stack_alloc_offset =
+      code_offsets.prolog_stack_alloc - code_offsets.prolog;
+  func_info.stack_size = stack;
+  func_info.lr_save_offset = 0x8;  // stp x29, x30, [sp, #0x0]
+  return Emplace(func_info);
 }
 
 // --------------------------------------------------------------------------
@@ -1361,6 +1424,10 @@ bool A64Backend::Initialize(Processor* processor) {
   // translated while a64_lean_extern_thunk is on. If it could not be placed,
   // CallExtern falls back to the full thunk.
   guest_to_host_lean_thunk_ = thunk_emitter.EmitGuestToHostLeanThunk();
+  // hakuX-Boosted: if it could not be placed, each preemption check keeps
+  // its own copy as before.
+  preempt_yield_thunk_ = thunk_emitter.EmitPreemptYieldThunk(
+      reinterpret_cast<void*>(guest_to_host_thunk_));
 
   if (!host_to_guest_thunk_ || !guest_to_host_thunk_ ||
       !resolve_function_thunk_) {

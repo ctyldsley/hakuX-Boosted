@@ -131,6 +131,7 @@ class A64Backend : public Backend {
   // hakuX-Boosted: the same transition without the 28 vector registers saved
   // and restored around it, for call sites that have none live
   // (a64_lean_extern_thunk; see EmitGuestToHostLeanThunk).
+  void* preempt_yield_thunk() const { return preempt_yield_thunk_; }
   GuestToHostThunk guest_to_host_lean_thunk() const {
     return guest_to_host_lean_thunk_;
   }
@@ -206,6 +207,9 @@ class A64Backend : public Backend {
   HostToGuestThunk host_to_guest_thunk_ = nullptr;
   GuestToHostThunk guest_to_host_thunk_ = nullptr;
   GuestToHostThunk guest_to_host_lean_thunk_ = nullptr;  // hakuX-Boosted
+  // hakuX-Boosted: the out-of-line half of every preemption check, once
+  // (see A64HelperEmitter::EmitPreemptYieldThunk).
+  void* preempt_yield_thunk_ = nullptr;
   ResolveFunctionThunk resolve_function_thunk_ = nullptr;
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
   void* frame_chain_resume_helper_ = nullptr;  // hakuX-Boosted
