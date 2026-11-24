@@ -39,7 +39,15 @@ run_batch() {  # seed tier
 import struct,sys
 open(sys.argv[1],'wb').write(struct.pack('>5Q',0x4454504152414D53,$1,0,$batch,$2))" "$out/params.bin"
   rm -f "$out/ref.out" "$out/batch.jsonl"
-  timeout 150 "$qemu" -M pseries -cpu 970_v2.2 -m 512M -nographic -nodefaults \
+  # One guest instruction a translation block: QEMU 8.2 on an ARM64 host
+  # aborts in its optimiser (tcg/optimize.c, do_constant_folding_2, "code
+  # should not be reached") on some sequence in which a vector operation's
+  # operands are both known constants. With one instruction a block nothing
+  # is known across instructions. Slower (ten times here), still seconds a batch.
+  # Sequences only: a single instruction has nothing before it.
+  accel=tcg
+  [ "$2" = 2 ] && accel=tcg,one-insn-per-tb=on
+  timeout 150 "$qemu" -M pseries -cpu 970_v2.2 -accel "$accel" -m 512M -nographic -nodefaults \
       -monitor none -serial "file:$out/ref.out" -bios "$build/dt_ref.bin" \
       -device "loader,file=$out/params.bin,addr=0x800000,force-raw=on" 2> "$out/ref.err"
   status=$?

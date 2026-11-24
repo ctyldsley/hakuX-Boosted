@@ -322,6 +322,15 @@ cases, nothing differs that `known-issues.txt` does not list, and of the
 540,000 sequences none differs at all. The CI run's own numbers are in the
 run's report (the Actions page of the branch's head).
 
+On GitHub's ARM64 runner (run 5 of the workflow, `e537fb5`): 4,960,000
+single-instruction cases in the 30 minutes, nothing differing that is not
+listed. That run had no sequences: QEMU 8.2 itself aborts on an ARM64 host
+(`tcg/optimize.c`, `do_constant_folding_2`, "code should not be reached")
+somewhere in every batch of them, which it does not on x86. `run.sh` now
+runs the reference for sequences with one guest instruction a translation
+block, which keeps QEMU's optimiser from seeing constants across
+instructions; the results are byte for byte the same on x86.
+
 Three mistakes of the rig itself were found on the way and are worth
 knowing if it is changed: the reference harness's C code ran in 32-bit mode
 until a case had returned (the machine starts that way), which made the
