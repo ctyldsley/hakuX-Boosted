@@ -537,7 +537,10 @@ static inline void dt_emit_reservation(DtGen* g, int index) {
     dt_emit_raw(g, dt_insns[li].opx | (d << 21) | ab, li);
     g->gpr_taint &= ~(1u << d);
     for (uint32_t n = dt_below(&g->r, 3); n; --n)
-      dt_emit(g, dt_pick_insn(g, DT_INT_CLASSES, IF_DIV | IF_FIRST | IF_T1 | IF_KNOWN));
+      // (no CR logic between them: a single-instruction case may read the
+      // SO bits, and here that would mix into the pattern's own CR0)
+      dt_emit(g, dt_pick_insn(g, DT_CLASSMASK(CL_INT) | DT_CLASSMASK(CL_ROT),
+                              IF_DIV | IF_FIRST | IF_T1 | IF_KNOWN));
     // The stored register must be whole (stdcx. stores all 64 bits).
     while (g->gpr_taint >> s & 1) s = dt_below(&g->r, 32);
   }

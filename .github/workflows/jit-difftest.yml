@@ -94,6 +94,11 @@ jobs:
             # into the log as well: the verdict, the table, and every new
             # difference with its examples
             sed -n '1,/^## Known differences/p' "$RUNNER_TEMP/dt-out/report.md" | head -400
+            echo "---- digest"
+            cat "$RUNNER_TEMP/dt-out/summary.json"; echo
+            python3 -c "import json,sys; s=json.load(open(sys.argv[1])); print('batches', len(s['batches']), 'seeds', min(b[0] for b in s['batches']), 'to', max(b[0] for b in s['batches']))" "$RUNNER_TEMP/dt-out/state.json" || true
+            sed -n '/^## New differences/,/^## Known differences/p' "$RUNNER_TEMP/dt-out/report.md" | grep '^### ' | head -40
+            cat "$RUNNER_TEMP/dt-out/failures.txt" 2> /dev/null | head -10 || true
           fi
 
       - uses: actions/upload-artifact@v4

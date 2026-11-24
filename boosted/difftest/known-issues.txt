@@ -27,6 +27,11 @@ stfsu  mem    # as stfs
 stfsx  mem    # as stfs
 stfsux  mem   # as stfs
 
+fmaddsx  fpr       # computed as a double fused multiply-add and then rounded to single: rounded twice, one unit off in rare cases (exact only for add, subtract, multiply, divide); a single-precision host instruction would need operands known to be singles
+fmsubsx  fpr       # as fmadds
+fnmaddsx  fpr      # as fmadds (and as fnmadd below)
+fnmsubsx  fpr      # as fmadds (and as fnmadd below)
+
 # ---- the reference is not an authority here
 fresx  fpr         # QEMU returns -0.5 for the reciprocal estimate of -0; ours (-infinity) is what the architecture says
 vexptefp  vr       # 2^x: QEMU's own approximation differs from ours at overflow and at exactly representable results; neither is the console's
@@ -36,6 +41,4 @@ vlogefp128  vr     # as vexptefp
 vmsum3fp128  vr    # the reference is plain arithmetic; the back end returns a NaN when a term is infinite or the sum overflows, upstream's reading of the console
 vmsum4fp128  vr    # as vmsum3fp128
 fnmaddx  fpr       # in the directed rounding modes QEMU rounds after negating; the architecture says the result is that of fmadd, negated, which is what we do
-fnmaddsx  fpr      # as fnmadd
 fnmsubx  fpr       # as fnmadd
-fnmsubsx  fpr      # as fnmadd
