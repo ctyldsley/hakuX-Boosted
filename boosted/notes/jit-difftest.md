@@ -16,7 +16,7 @@ start with another directory.
 
 Done:
 - The rig (`boosted/difftest/`), the workflow
-  (`.github/workflows/jit-difftest.yml`, 30 minutes on every push to
+  (`.github/workflows/jit-difftest.yml`, 25 minutes on every push to
   `claude/**`, on GitHub's ARM64 runner, no phone).
 - Thirteen commits to the translator, one per bug, 54 fixed cases in
   `boosted/difftest/regressions.txt` (section 3). Nine are in the front
@@ -26,6 +26,8 @@ Done:
   `boosted/difftest/known-issues.txt` and in section 4.
 
 Next, in order:
+0. The dropped AND of section 4's first entry (seed 65, sequence 5873): a
+   wrong result in plain integer code, found by the last run and not fixed.
 1. Put the fixes on the phone. They are small and independent. The first
    is the one that can end a hang (section 3); the thirteen instructions
    are the one that can let a title run that stopped.
@@ -272,6 +274,19 @@ is known to read them):
   same and is fixed (`ae5d763`), on the evidence of upstream's console
   tests; there are no such tests for the vector one, so it is left.
 
+Wrong, found last, **not fixed: the first thing to do next.** Seed 65,
+sequence 5873 (`known-sequences.txt`): `li r29,0xEC0`, `rlwinm r15,r6,31,23,22`
+(a wrap-around mask, which keeps every bit), three unrelated instructions,
+`and. r30,r29,r15`. The reference gives r30 = r15 & 0xEC0 = 0x6C0; we give
+r15 itself (0x3DB116CD), and CR0 and what follows from it are wrong with it.
+An AND with a constant is being dropped, so the suspect is a rule in the
+simplification or constant passes that decides the AND cannot change its
+other operand (the bits it takes the rotate's result to have). Found by run 6
+on the ARM64 runner, reproduced in the container (`run.sh <build> <out> 0 65`);
+the case's line is in that run's `regression-candidates.txt`. Unlike the
+constant-operand bugs of section 3 this one is in integer code every title
+runs, so it matters more than its one case suggests.
+
 Wrong, small, not fixed here:
 - **`mcrf`** is only right from cr0 holding "less than" as upstream
   translates it. The fork already has the exact form behind
@@ -330,6 +345,12 @@ somewhere in every batch of them, which it does not on x86. `run.sh` now
 runs the reference for sequences with one guest instruction a translation
 block, which keeps QEMU's optimiser from seeing constants across
 instructions; the results are byte for byte the same on x86.
+
+Run 6 (`d8df374`), with that in: 2,800,000 cases in the 30 minutes (seeds 1
+to 70, both tiers), no batch failed, and one sequence differed: the one of
+section 4's first entry. The workflow's time box is 25 minutes from here on,
+so that a push repeats seeds already seen rather than a few new ones at the
+end; other seeds are for the workflow's "first seed" input.
 
 Three mistakes of the rig itself were found on the way and are worth
 knowing if it is changed: the reference harness's C code ran in 32-bit mode

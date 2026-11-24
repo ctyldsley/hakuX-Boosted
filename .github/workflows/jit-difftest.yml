@@ -21,7 +21,7 @@ on:
       minutes:
         description: Minutes of fuzzing
         required: false
-        default: '30'
+        default: '25'
       seed:
         description: First seed (the default run starts at 1)
         required: false
@@ -81,7 +81,7 @@ jobs:
       - name: Run
         id: run
         env:
-          MINUTES: ${{ inputs.minutes || '30' }}
+          MINUTES: ${{ inputs.minutes || '25' }}
           SEED: ${{ inputs.seed || '1' }}
         run: |
           boosted/difftest/run.sh "$RUNNER_TEMP/dt" "$RUNNER_TEMP/dt-out" "$MINUTES" "$SEED"

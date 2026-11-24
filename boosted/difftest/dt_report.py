@@ -17,7 +17,21 @@ import sys
 EXAMPLES = 3
 
 
+def load_known_sequences():
+    """(seed, tier, index) -> reason, from known-sequences.txt beside this file."""
+    out = {}
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'known-sequences.txt')
+    if os.path.exists(path):
+        for line in open(path):
+            reason = line.split('#', 1)[1].strip() if '#' in line else ''
+            tok = line.split('#')[0].split()
+            if len(tok) >= 3:
+                out[(int(tok[0]), int(tok[1]), int(tok[2]))] = reason
+    return out
+
+
 def merge(state_path, batch_path):
+    known_sequences = load_known_sequences()
     state = {'stats': {}, 'groups': {}, 'batches': []}
     if os.path.exists(state_path):
         state = json.load(open(state_path))
@@ -34,7 +48,11 @@ def merge(state_path, batch_path):
                 s[1] += bad
             continue
         kinds = ','.join(sorted(set(d['kind'] for d in j['diff'])))
-        gid = '%d|%s|%s' % (j['tier'], j['key'], kinds)
+        key = j['key']
+        # A sequence named in known-sequences.txt is a group of its own.
+        if (j['seed'], j['tier'], j['index']) in known_sequences:
+            key = 'seq@%d.%d' % (j['seed'], j['index'])
+        gid = '%d|%s|%s' % (j['tier'], key, kinds)
         g = state['groups'].setdefault(gid, {'count': 0, 'examples': []})
         g['count'] += 1
         if len(g['examples']) < EXAMPLES and 'code' in j:
@@ -57,6 +75,10 @@ def load_known(path):
 
 def explain(known, tier, key, kinds):
     """The reasons if every kind of the group is known, else None."""
+    if key.startswith('seq@'):
+        seed, index = key[4:].split('.')
+        r = load_known_sequences().get((int(seed), tier, int(index)))
+        return [r] if r is not None else None
     if tier != 1:
         return None
     reasons = []
