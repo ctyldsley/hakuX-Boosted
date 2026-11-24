@@ -27,8 +27,10 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/memory.h"
 
+// hakuX-Boosted (jit-speed): 2 by default, was 0
+// (boosted/notes/jit-speed.md).
 DEFINE_int32(
-    eliminate_dead_context_stores, 0,
+    eliminate_dead_context_stores, 2,
     "Remove stores to guest state that every path overwrites before anything "
     "reads it, looking across the whole function instead of one block. "
     "0: off. 1: condition register bits and XER bits (a compare stores three "
@@ -43,8 +45,10 @@ DEFINE_int32(
     "CPU");
 
 // hakuX-Boosted
+// hakuX-Boosted (jit-speed): true by default, was false
+// (boosted/notes/jit-speed.md).
 DEFINE_bool(
-    dead_context_stores_over_preempt_checks, false,
+    dead_context_stores_over_preempt_checks, true,
     "With eliminate_dead_context_stores: the cooperative scheduler's check "
     "at a loop head (emitted when guest_scheduler is on) does not count as "
     "reading the guest context. Without this no store inside a loop is ever "
