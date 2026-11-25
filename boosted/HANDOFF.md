@@ -42,6 +42,7 @@ First-run shader hitches and glitches (every title):
 - Slimmer SPIR-V from the translator (registers in memory, two samples
   and run-time switches per texture fetch, debug names).
 - Keep a title's stored shader list across reinstalls.
+- Driver A/B, only after the stand-in device losses (Banjo cold, `vulkan_standin_precompile`) are settled and the jit-speed lookup cache is measured, so a driver change does not muddy either: Turnip v27.0.0-R3 (StevenMXZ release v40, 2026-11-23: one driver for a6xx to a8xx with "all patches" built in, where we pin v39's plain upstream Gen8 build) and Qualcomm's own v891.17 for A8xx (2026-11-24), each as a user-installed driver against the bundled v39, through the Gears benchmark and the cold-cache stutter test (fps, per-pipeline compile ms, device losses). Change `turnip.lock.json` only if one wins with no new fault (owner, 2026-11-25).
 
 Performance (after stability; nothing here is started):
 - Step 0, `HostThreadState` in bionic's `TLS_SLOT_APP` (the TLS resolver
