@@ -152,6 +152,7 @@ DECLARE_bool(vulkan_placeholder_interpreter_geometry);
 // hakuX-Boosted: boosted/notes/shader-first-run.md.
 DECLARE_int32(vulkan_placeholder_interpreter);
 DECLARE_int32(vulkan_placeholder_interpreter_vertex_budget);
+DECLARE_int32(vulkan_placeholder_program_ps_budget);
 
 // hakuX-Boosted: boosted/notes/standin-device-lost.md.
 DEFINE_int32(
@@ -5177,6 +5178,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                      draw_resolution_scale_y, apply_host_depth_polygon_offset,
                      pipeline->dynamic_state, standin_static_mask);
 
+  // hakuX-Boosted: boosted/notes/gpu-correct.md. The submission's allowance
+  // of pixel interpreter work (vulkan_placeholder_program_ps_budget), counted
+  // as in SubmissionSummary::program_ps_cost now the scissor is known. Banjo-
+  // Kazooie Nuts & Bolts lost the device in a submission of 1040 such draws
+  // (cost 132196620) that ran past the kernel's GPU time limit.
+  if (stand_in_program && cvars::vulkan_placeholder_program_ps_budget > 0) {
+    const uint64_t draw_cost =
+        (uint64_t(pixel_shader->GetUcodeProgram().element_count()) *
+         dynamic_scissor_.extent.width * dynamic_scissor_.extent.height) >>
+        10;
+    if (submission_in_progress_.program_ps_cost + draw_cost >
+        uint64_t(cvars::vulkan_placeholder_program_ps_budget)) {
+      first_run_draw.kind = kFirstRunDrawSkipped;
+      ++submission_in_progress_.program_ps_budget_skips;
+      pipeline_cache_->NoteDrawSkipped(
+          skip_vertex_shader_hash, skip_pixel_shader_hash,
+          VulkanPipelineCache::kSkipProgramPixelBudget, pipeline);
+      return true;
+    }
+  }
+
   auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
 
   // Whether to load the guest 32-bit (usually big-endian) vertex index
@@ -6801,13 +6823,13 @@ void VulkanCommandProcessor::LogRecentSubmissions(const char* context) {
         "  sub {:>5} frame {:>5}: draws={} dispatches={} resolves={} "
         "VS={:016X} PS={:016X} RP=0x{:08X} | placeholders {}: interpreter "
         "VS {} ({} vertices), pixel interpreter {} ({} with loops, largest {} "
-        "elements, cost {})",
+        "elements, cost {}, {} over budget)",
         s.submission_index, s.frame_index, s.draw_count, s.dispatch_count,
         s.resolve_count, s.last_vs_hash, s.last_ps_hash,
         uint32_t(s.last_render_pass_key), s.placeholder_draws,
         s.interpreter_vs_draws, s.interpreter_vs_vertices, s.program_ps_draws,
         s.program_ps_loop_draws, s.program_ps_max_elements,
-        s.program_ps_cost);
+        s.program_ps_cost, s.program_ps_budget_skips);
   }
   if (submission_open_) {
     const SubmissionSummary& s = submission_in_progress_;
@@ -6815,13 +6837,13 @@ void VulkanCommandProcessor::LogRecentSubmissions(const char* context) {
         "  sub {:>5} frame {:>5} (in-progress): draws={} dispatches={} "
         "resolves={} VS={:016X} PS={:016X} RP=0x{:08X} | placeholders {}: "
         "interpreter VS {} ({} vertices), pixel interpreter {} ({} with "
-        "loops, largest {} elements, cost {})",
+        "loops, largest {} elements, cost {}, {} over budget)",
         s.submission_index, s.frame_index, s.draw_count, s.dispatch_count,
         s.resolve_count, s.last_vs_hash, s.last_ps_hash,
         uint32_t(s.last_render_pass_key), s.placeholder_draws,
         s.interpreter_vs_draws, s.interpreter_vs_vertices, s.program_ps_draws,
         s.program_ps_loop_draws, s.program_ps_max_elements,
-        s.program_ps_cost);
+        s.program_ps_cost, s.program_ps_budget_skips);
   }
 }
 

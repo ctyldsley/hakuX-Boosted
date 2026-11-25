@@ -657,6 +657,8 @@ class VulkanCommandProcessor final : public CommandProcessor {
     uint32_t program_ps_loop_draws = 0;
     uint32_t program_ps_max_elements = 0;
     uint64_t program_ps_cost = 0;
+    // Pixel interpreter draws dropped by vulkan_placeholder_program_ps_budget.
+    uint32_t program_ps_budget_skips = 0;
   };
   static constexpr size_t kSubmissionHistorySize = 16;
   std::array<SubmissionSummary, kSubmissionHistorySize> submission_history_{};

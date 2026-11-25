@@ -269,9 +269,50 @@ is confirmed.
 3. If 2 still loses the device: `vulkan_placeholder_interpreter = 0` (no
    interpreter vertex shader either), label `banjo-interp0`.
 
-**The fix, once confirmed** (not written yet: a new setting in this area
-before the others are measured breaks the plan's rule 1): bound the pixel
-interpreter's work per submission. Either refuse it for programs over a size
-or with loops (a new refusal reason next to "too large") so those get the
-stand-in, or end the submission (as `vulkan_mid_frame_submission_draws`
-does) once the summed cost passes a budget. Run 1's numbers pick the budget.
+**Results (run #164, `b90d173`; logs in `device-logs/run148/banjo-diag`
+and `banjo-ps2`).**
+- `banjo-diag` (defaults, `vulkan_placeholder_ps_mode = 3`) lost the device
+  again at frame 880, in submission 1059: 2085 draws, 17 resolves, render
+  pass `0x08`, 1199 placeholders, 1040 of them through the pixel interpreter
+  (largest program 373 elements, none with loops), **cost 132,196,620**.
+  Every other submission in the history is at or under 854,100 (the next
+  largest, 1052, with 9 such draws), so the submission that hangs did about
+  150 times the pixel interpreter work of any other.
+- `banjo-ps2` (the same with `vulkan_placeholder_ps_mode = 2`) did not lose
+  the device in 90 s and ran at 20.7 fps over 62 s (8.7 fps before the loss
+  in `banjo-diag`).
+
+So the cause is confirmed: the pixel interpreter's GPU time in one
+submission, past the driver's limit. Loops play no part (none of the 1040
+had any).
+
+**The fix (commit after `b90d173`).** `vulkan_placeholder_program_ps_budget`
+(default 8,000,000, 0 = no limit): the most pixel interpreter work in one
+submission, counted the same way as the history's cost (program elements
+times scissor area / 1024). In `IssueDraw`, once the scissor is known, a
+pixel interpreter placeholder draw that would take the submission over it is
+dropped, like `vulkan_placeholder_interpreter_vertex_budget` drops vertex
+interpreter draws over the frame's allowance. A dropped draw is drawn once
+its real pipeline is ready. It is logged as a skip reason ("the submission's
+allowance of pixel interpreter work was spent") and counted in the history
+line as "N over budget".
+
+Why 8,000,000: about 9 times the largest submission that ran fine and 16
+times under the one that hung. The cost is a bound (the scissor, not the
+pixels covered), and the hang only says 132M took at least about 2 s, so the
+GPU's rate per cost unit is not known. If Banjo still loses the device, halve
+it; if a title shows many drops while frames are fast, raise it. Other
+titles' costs are not measured yet (the history is only printed on device
+loss), so whether any of them reach it is open.
+
+Dropping is the simple bound. The other choice, ending the submission
+mid-frame once the budget is passed (as `vulkan_mid_frame_submission_draws`
+does by draw count), keeps every draw but makes that frame take seconds, and
+one draw over the limit on its own would still hang. Left as a follow-up if
+dropped draws are visible.
+
+**Phone check:** `banjo-fix`, the defaults (`pl-off.toml`, pixel interpreter
+on), cold, `COOL=35`:
+`tools/run-one.sh banjo-fix device-logs/run148/cfg/pl-off.toml 4D5307ED "/storage/emulated/0/Roms/Banjo-Kazooie Nuts & Bolts.iso" 90 1`
+Pass: alive at 90 s with no `DEVICE_LOST`; `xe.log` shows "allowance of pixel
+interpreter work was spent" lines; fps near `banjo-ps2`'s.
