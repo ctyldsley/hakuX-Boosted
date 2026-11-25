@@ -81,6 +81,7 @@ Entry::Status EntryTable::GetOrCreate(uint32_t address, Entry** out_entry) {
     entry->function = 0;
     map_.InsertAt(address, entry, idx);
     // map_[address] = entry;
+    containing_cache_.clear();  // hakuX-Boosted: see containing_cache_.
     status = Entry::STATUS_NEW;
   }
   global_lock.unlock();
@@ -95,10 +96,16 @@ void EntryTable::Delete(uint32_t address) {
   if (idx != map_.size() && *map_.KeyAt(idx) == address) {
     map_.EraseAt(idx);
   }
+  containing_cache_.clear();  // hakuX-Boosted: see containing_cache_.
 }
 
 std::vector<Function*> EntryTable::FindWithAddress(uint32_t address) {
   auto global_lock = global_critical_region_.Acquire();
+  // hakuX-Boosted: see containing_cache_.
+  auto cached = containing_cache_.find(address);
+  if (cached != containing_cache_.end()) {
+    return cached->second;
+  }
   std::vector<Function*> fns;
   for (auto& it : map_.Values()) {
     Entry* entry = it;
@@ -107,6 +114,9 @@ std::vector<Function*> EntryTable::FindWithAddress(uint32_t address) {
         fns.push_back(entry->function);
       }
     }
+  }
+  if (!fns.empty()) {
+    containing_cache_.emplace(address, fns);
   }
   return fns;
 }
@@ -130,6 +140,9 @@ std::vector<Function*> EntryTable::TakeOverlapping(uint32_t low,
     if (idx != map_.size() && *map_.KeyAt(idx) == address) {
       map_.EraseAt(idx);
     }
+  }
+  if (!addresses.empty()) {
+    containing_cache_.clear();  // hakuX-Boosted: see containing_cache_.
   }
   return fns;
 }

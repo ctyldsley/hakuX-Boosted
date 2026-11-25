@@ -54,6 +54,11 @@ class EntryTable {
   // TODO(benvanik): replace with a better data structure.
   xe::split_map<uint32_t, Entry*> map_;
   // std::unordered_map<uint32_t, Entry*> map_;
+  // hakuX-Boosted: FindWithAddress results by address. The search walks every
+  // entry, and a game that resumes at return sites (longjmp) runs it on each
+  // resume: Gears spent a quarter of one guest thread there. Only non-empty
+  // results are kept, and any new, deleted or taken entry clears the cache.
+  std::unordered_map<uint32_t, std::vector<Function*>> containing_cache_;
 };
 
 }  // namespace cpu
