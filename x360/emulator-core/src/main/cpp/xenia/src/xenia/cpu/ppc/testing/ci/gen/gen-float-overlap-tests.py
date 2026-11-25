@@ -67,6 +67,9 @@ out = ['''# hakuX-Boosted: float and VMX float operations whose destination is o
 # Written by a script (the values are bit patterns); the expected values
 # were taken from a run of the translator with every setting off, which
 # passes the generated tests of the same instructions.
+# The NaN an invalid operation makes was x86's (0xFFF8...) in that run;
+# PowerPC's is 0x7FF8000000000000 (the difftest fix), and the ten such
+# expected values were changed to it by hand.
 ''']
 for name, ins, code, outs in D + V:
     out.append('test_%s:' % name)

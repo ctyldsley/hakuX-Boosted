@@ -9,6 +9,9 @@
 # Written by a script (the values are bit patterns); the expected values
 # were taken from a run of the translator with every setting off, which
 # passes the generated tests of the same instructions.
+# The NaN an invalid operation makes was x86's (0xFFF8...) in that run;
+# PowerPC's is 0x7FF8000000000000 (the difftest fix), and the ten such
+# expected values were changed to it by hand.
 
 test_fadd_snan_first_dest_a:
   #_ REGISTER_IN f1 0x7FF0000000000001
@@ -42,21 +45,21 @@ test_fsub_inf_inf_same_reg:
   #_ REGISTER_IN f1 0x7FF0000000000000
   fsub f1, f1, f1
   blr
-  #_ REGISTER_OUT f1 0xFFF8000000000000
+  #_ REGISTER_OUT f1 0x7FF8000000000000
 
 test_fmul_zero_inf_dest_b:
   #_ REGISTER_IN f1 0x0000000000000000
   #_ REGISTER_IN f2 0x7FF0000000000000
   fmul f2, f1, f2
   blr
-  #_ REGISTER_OUT f2 0xFFF8000000000000
+  #_ REGISTER_OUT f2 0x7FF8000000000000
 
 test_fdiv_zero_zero_dest_a:
   #_ REGISTER_IN f1 0x0000000000000000
   #_ REGISTER_IN f2 0x0000000000000000
   fdiv f1, f1, f2
   blr
-  #_ REGISTER_OUT f1 0xFFF8000000000000
+  #_ REGISTER_OUT f1 0x7FF8000000000000
 
 test_fdiv_normal_dest_b:
   #_ REGISTER_IN f1 0x4008000000000000
@@ -95,7 +98,7 @@ test_fmadd_inf_times_zero_dest_c:
   #_ REGISTER_IN f3 0x3FF0000000000000
   fmadd f2, f1, f2, f3
   blr
-  #_ REGISTER_OUT f2 0xFFF8000000000000
+  #_ REGISTER_OUT f2 0x7FF8000000000000
 
 test_fmadd_all_one_register:
   #_ REGISTER_IN f1 0x4008000000000000
@@ -109,7 +112,7 @@ test_fmsub_inf_minus_inf_dest_a:
   #_ REGISTER_IN f3 0x7FF0000000000000
   fmsub f1, f1, f2, f3
   blr
-  #_ REGISTER_OUT f1 0xFFF8000000000000
+  #_ REGISTER_OUT f1 0x7FF8000000000000
 
 test_fmsub_nan_in_b_dest_b:
   #_ REGISTER_IN f1 0x4008000000000000
@@ -153,7 +156,7 @@ test_fdivs_zero_zero_dest_b:
   #_ REGISTER_IN f2 0x0000000000000000
   fdivs f2, f1, f2
   blr
-  #_ REGISTER_OUT f2 0xFFF8000000000000
+  #_ REGISTER_OUT f2 0x7FF8000000000000
 
 test_float_chain_nan_half_way:
   #_ REGISTER_IN f1 0x3FF0000000000000
@@ -166,10 +169,10 @@ test_float_chain_nan_half_way:
   fmadd f2, f2, f1, f3
   fadd f3, f2, f2
   blr
-  #_ REGISTER_OUT f1 0xFFF8000000000000
-  #_ REGISTER_OUT f2 0xFFF8000000000000
-  #_ REGISTER_OUT f3 0xFFF8000000000000
-  #_ REGISTER_OUT f4 0xFFF8000000000000
+  #_ REGISTER_OUT f1 0x7FF8000000000000
+  #_ REGISTER_OUT f2 0x7FF8000000000000
+  #_ REGISTER_OUT f3 0x7FF8000000000000
+  #_ REGISTER_OUT f4 0x7FF8000000000000
 
 test_vaddfp_nan_lanes_dest_a:
   #_ REGISTER_IN v1 [7F800001, 3F800000, 7F800000, 40000000]
