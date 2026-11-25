@@ -28,6 +28,8 @@
 #include "xenia/cpu/stack_walker.h"
 #include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/spin_probe.h"
+#include "xenia/kernel/stall_watchdog.h"
 #include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
@@ -43,6 +45,7 @@ DECLARE_path(log_file);
 // hakuX-Boosted (park-hot-loops): defined in
 // cpu/compiler/passes/memory_poll_park_pass.cc, read once at start-up here.
 DECLARE_bool(park_poll_site_backoff);
+DECLARE_uint32(spin_probe_seconds);  // hakuX-Boosted: kernel/spin_probe.cc
 
 // hakuX-Boosted: defined in cpu/backend/a64/a64_seq_memory.cc, beside the
 // site that calls it (park_pause_poll_loops). The a64 backend is the only
@@ -446,6 +449,10 @@ static void PreemptCurrentFiber(void* raw_context) {
   }
   auto* context = self->thread_state()->context();
   auto& links = self->scheduler_links();
+  // hakuX-Boosted: the spin probe's sample, before anything can yield or
+  // return (spin_probe.h). Does nothing unless a probe raised this flag.
+  const bool spin_probed =
+      self->kernel_state()->guest_scheduler()->SpinProbeAtSafepoint(self);
   // hakuX-Boosted: guest_scheduler_skew_bound_us. First, because it must see
   // every safepoint the watchdog's probe reaches, whatever the thread is
   // doing: it answers the probe and, where a hold is allowed, waits for a
@@ -459,6 +466,11 @@ static void PreemptCurrentFiber(void* raw_context) {
   // counters below, which would otherwise count every probe at raised IRQL
   // or under the global lock as a declined preemption.
   if (self->kernel_state()->guest_scheduler()->SkewOnlyProbed(self)) {
+    return;
+  }
+  // hakuX-Boosted: likewise when the spin probe alone raised it.
+  if (spin_probed &&
+      self->kernel_state()->guest_scheduler()->FlagOnlyForProbe(self)) {
     return;
   }
   // A co-resident fiber would re-enter the recursive lock on this host thread,
@@ -2684,6 +2696,25 @@ bool GuestScheduler::SkewOnlyProbed(XThread* self) {
   if (!skew_bound_ticks_) {
     return false;
   }
+  return FlagOnlyForProbe(self);
+}
+
+// hakuX-Boosted: the spin probe's sample (spin_probe.h).
+bool GuestScheduler::SpinProbeAtSafepoint(XThread* self) {
+  if (!g_spin_probe_active.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  const int cpu_index = CurrentCpu();
+  if (cpu_index < 0 ||
+      !cpus_[cpu_index].spin_probe_owed.exchange(0,
+                                                 std::memory_order_acq_rel)) {
+    return false;
+  }
+  SpinProbeNoteSafepoint(kernel_state(), self);
+  return true;
+}
+
+bool GuestScheduler::FlagOnlyForProbe(XThread* self) {
   // Every reason the flag is raised for, other than the probe, leaves a
   // mark that is tested here: a priority preemption or a wake that outranks
   // (preempted), a terminate, shutdown, the slice's end (the deadline). A
@@ -4599,7 +4630,38 @@ void GuestScheduler::WatchdogLoop() {
           std::filesystem::remove(trigger, ec);
           ReportNoProgress(true);
         }
+        // hakuX-Boosted: the spin probe (spin_probe.h), the same way:
+        //   adb shell touch <storage root>/spin_probe
+        // records for spin_probe_seconds, then writes its report and a
+        // thread dump.
+        auto spin_trigger = cvars::log_file.parent_path() / "spin_probe";
+        if (!spin_probe_end_ms_ && std::filesystem::exists(spin_trigger, ec)) {
+          std::filesystem::remove(spin_trigger, ec);
+          const uint32_t seconds =
+              std::max<uint32_t>(1, std::min<uint32_t>(
+                                        60, cvars::spin_probe_seconds));
+          XELOGW("SpinProbe: recording for {} s (frame {})", seconds,
+                 xe::logging::GetFrameNumber());
+          spin_probe_saved_trace_ = g_kernel_call_trace_enabled;
+          SpinProbeBegin();
+          g_kernel_call_trace_enabled = true;
+          spin_probe_start_ms_ = Clock::QueryHostUptimeMillis();
+          spin_probe_end_ms_ = spin_probe_start_ms_ + uint64_t(seconds) * 1000;
+        }
       }
+    }
+    // hakuX-Boosted: the spin probe's end, outside lock_.
+    if (spin_probe_end_ms_ &&
+        Clock::QueryHostUptimeMillis() >= spin_probe_end_ms_) {
+      const uint64_t now_ms = Clock::QueryHostUptimeMillis();
+      g_kernel_call_trace_enabled = spin_probe_saved_trace_;
+      for (int i = 0; i < kMaxCpus; ++i) {
+        cpus_[i].spin_probe_owed.store(0, std::memory_order_relaxed);
+      }
+      SpinProbeEnd(kernel_state(), double(now_ms - spin_probe_start_ms_) / 1000.0,
+                   uint32_t(period_us));
+      spin_probe_end_ms_ = 0;
+      ReportNoProgress(true);
     }
     // No-progress detection, outside lock_ (ReportNoProgress takes it).
     // Only meaningful once something has been dispatched, so a title still
@@ -4638,6 +4700,13 @@ void GuestScheduler::WatchdogLoop() {
         running->thread_state()->context()->preempt_requested = 1;
       }
       if (running && now >= cpus_[i].quantum_deadline_tick) {
+        running->thread_state()->context()->preempt_requested = 1;
+      }
+      // hakuX-Boosted: the spin probe asks the running fiber for a sample
+      // at its next safepoint (SpinProbeAtSafepoint). The mark is stored
+      // before the flag is raised.
+      if (spin_probe_end_ms_ && running) {
+        cpus_[i].spin_probe_owed.store(1, std::memory_order_release);
         running->thread_state()->context()->preempt_requested = 1;
       }
       // Stall detector: a dispatch count that has not moved for a whole

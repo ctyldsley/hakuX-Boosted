@@ -39,6 +39,7 @@
 #include "xenia/base/threading.h"
 #include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/spin_probe.h"
 #include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
@@ -114,6 +115,11 @@ void KernelCallTraceLeave(cpu::ppc::PPCContext* ppc_context, uint32_t seq,
   if (rec.seq == seq) {
     rec.result = result;
     rec.returned = 1;
+    // hakuX-Boosted: spin probe, this call per call site (spin_probe.h).
+    if (g_spin_probe_active.load(std::memory_order_relaxed)) {
+      SpinProbeNoteCall(thread->thread_id(), rec.name, rec.lr, rec.args,
+                        result);
+    }
   }
   trace.last_activity_tick.store(Clock::QueryHostTickCount(),
                                  std::memory_order_relaxed);

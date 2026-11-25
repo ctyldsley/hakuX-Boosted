@@ -2536,8 +2536,21 @@ void A64Emitter::EmitPreemptCheck(uint32_t guest_address) {
   const uint32_t flush_mask = pin_cur_dirty_;
   const uint32_t reload_mask = pin_cur_live_after_;
   Label& do_yield =
-      AddToTail([&after, flag_offset, sync_pins, flush_mask,
-                 reload_mask](A64Emitter& e, Label&) {
+      AddToTail([&after, flag_offset, sync_pins, flush_mask, reload_mask,
+                 guest_address](A64Emitter& e, Label&) {
+        // hakuX-Boosted: the spin probe (kernel/spin_probe.h). Where the
+        // fiber stops, stamped on this cold path only, so a yield always
+        // leaves last_safepoint_pc current (the probe's sample, the thread
+        // dumps) and the check on the usual path costs nothing more. w17
+        // with the extended pool, where w9 may hold a pinned register, as
+        // for log_safepoint_pc below.
+        if (guest_address) {
+          const WReg pc_reg = e.extended_gpr_pool() ? e.w17 : e.w9;
+          e.mov(pc_reg, guest_address);
+          e.str(pc_reg,
+                ptr(e.x20, static_cast<uint32_t>(
+                               offsetof(ppc::PPCContext, last_safepoint_pc))));
+        }
         // hakuX-Boosted: the clearing of the flag, the test for a handler
         // and the call are the same at every check and live in one thunk
         // (A64HelperEmitter::EmitPreemptYieldThunk); only the pinned

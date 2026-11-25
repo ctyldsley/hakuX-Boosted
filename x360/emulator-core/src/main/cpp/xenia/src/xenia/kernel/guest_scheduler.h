@@ -206,6 +206,12 @@ class GuestScheduler {
   // True when the safepoint was called for the probe alone: nothing asks the
   // thread to give way, so the caller returns without a yield.
   bool SkewOnlyProbed(XThread* self);
+  // hakuX-Boosted: the spin probe (spin_probe.h). True when this CPU's flag
+  // was raised for the probe; the sample has then been taken.
+  bool SpinProbeAtSafepoint(XThread* self);
+  // True when nothing but a probe raised the flag (no preemption, terminate,
+  // suspend or shutdown pending, slice not over): the caller returns.
+  bool FlagOnlyForProbe(XThread* self);
   // A spin-wait's backoff site: answers the probe (the thread is running).
   void SkewAtBackoff(XThread* self);
 
@@ -410,6 +416,9 @@ class GuestScheduler {
     // being run, 0 once answered (at a safepoint, a yield, or by leaving
     // the CPU). Set under lock_ by the watchdog only while a fiber runs.
     std::atomic<uint64_t> skew_probe_tick{0};
+    // hakuX-Boosted: spin probe. Set by the watchdog before it raises the
+    // running fiber's flag for a sample, taken by the safepoint.
+    std::atomic<uint32_t> spin_probe_owed{0};
     // The probe on which a hold for this CPU ran into the hard cap: nobody
     // waits for that same unanswered probe again.
     std::atomic<uint64_t> skew_capped_probe_tick{0};
@@ -679,6 +688,11 @@ class GuestScheduler {
   // (WatchdogLoop), the same report without the no-frame wording.
   void ReportNoProgress(bool on_request = false);
   uint32_t dump_request_ticks_ = 0;
+  // hakuX-Boosted: the spin probe's window (watchdog thread only). End is
+  // 0 when no probe runs.
+  uint64_t spin_probe_start_ms_ = 0;
+  uint64_t spin_probe_end_ms_ = 0;
+  bool spin_probe_saved_trace_ = false;
 
   // Watchdog-only stall detection state, touched under lock_.
   static constexpr uint32_t kStallReportTicks = 2000;  // ~2 s at a 1 ms period

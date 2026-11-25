@@ -33,6 +33,8 @@ bench_xe_sources(_a64 "${XE_SRC}/cpu/backend/a64")
 # deliberately absent: see sched/kernel_shim.cc.
 set(_kernel
   "${XE_SRC}/kernel/guest_scheduler.cc"
+  # The spin probe the scheduler's watchdog and safepoint call into.
+  "${XE_SRC}/kernel/spin_probe.cc"
   "${XE_SRC}/kernel/xthread.cc"
   "${XE_SRC}/kernel/xobject.cc"
   "${XE_SRC}/kernel/xevent.cc"
