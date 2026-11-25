@@ -129,4 +129,4 @@ trace branch) and nothing in translated code (see below).
 ## Builds
 
 - Branch `claude/spin-probe` from `claude/merge-1124` (`f85f707`).
-- Result of the Actions run: see the shared notes / the hand-over message.
+- Code commit `1a2306c`: app run 182 (https://github.com/ctyldsley/hakuX-Boosted/actions/runs/45585988389), "Xbox core" and "APK (both cores)" green; artifact `hakuX-Boosted-debug-apk`, 36,235,833 bytes, digest sha256:e1ce97e2c2ddc7cb3c0dee9432e88dce60555701da9036b837ddec628d7b35fc. Bench run on the same commit green. "Translator tests" and the JIT difftest were still running when this was written.
