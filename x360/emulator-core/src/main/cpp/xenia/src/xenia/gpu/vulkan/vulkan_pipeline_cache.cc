@@ -294,6 +294,18 @@ DEFINE_int32(
     "vertex, so this bounds what placeholders can add to a frame. 0: no "
     "limit.",
     "Vulkan");
+// hakuX-Boosted: boosted/notes/gpu-correct.md, Banjo-Kazooie Nuts & Bolts.
+DEFINE_int32(
+    vulkan_placeholder_program_ps_budget, 8000000,
+    "With vulkan_placeholder_ps_mode = 3: the most pixel interpreter work in "
+    "one submission, counted as the guest pixel shader's element count times "
+    "the draw's scissor area in pixels, divided by 1024. A placeholder draw "
+    "that would go over is dropped for that submission (it is drawn once its "
+    "real pipeline is ready). The pixel interpreter runs every element of the "
+    "guest program for every pixel, so a submission with a thousand large "
+    "programs runs past the kernel's GPU time limit and the device is lost. "
+    "0: no limit.",
+    "Vulkan");
 
 // hakuX-Boosted: the bounds of shader_ahead_speculate (gpu_flags.cc).
 DEFINE_int32(
@@ -3015,7 +3027,7 @@ void VulkanPipelineCache::NoteDrawSkipped(uint64_t vertex_shader_hash,
     }
   }
   ++skipped_draws_;
-  if (reasons & kSkipInterpreterBudget) {
+  if (reasons & (kSkipInterpreterBudget | kSkipProgramPixelBudget)) {
     ++skipped_interpreter_budget_;
   } else if (reasons & kSkipVertexShaderNotTranslated) {
     ++skipped_untranslated_vs_;
@@ -3069,6 +3081,9 @@ void VulkanPipelineCache::NoteDrawSkipped(uint64_t vertex_shader_hash,
       {kSkipInterpreterBudget,
        "the frame's allowance of vertices drawn through the interpreter was "
        "spent (vulkan_placeholder_interpreter_vertex_budget)"},
+      {kSkipProgramPixelBudget,
+       "the submission's allowance of pixel interpreter work was spent "
+       "(vulkan_placeholder_program_ps_budget)"},
       {kSkipInterpreterOff,
        "interpreter refused: async_shader_vs_interpreter is off"},
       {kSkipVertexShaderTranslated,

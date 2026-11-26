@@ -449,6 +449,9 @@ class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
     // hakuX-Boosted: the frame's allowance of vertices drawn through the
     // interpreter is spent (vulkan_placeholder_interpreter_vertex_budget).
     kSkipInterpreterBudget = 1u << 27,
+    // hakuX-Boosted: the submission's allowance of pixel interpreter work is
+    // spent (vulkan_placeholder_program_ps_budget).
+    kSkipProgramPixelBudget = 1u << 28,
   };
   // Counts the skipped draw and says why in the log, once for each pair of
   // shaders and set of reasons. Adds what the slot itself says to `reasons`.

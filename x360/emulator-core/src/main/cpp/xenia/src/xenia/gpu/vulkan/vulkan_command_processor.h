@@ -643,6 +643,22 @@ class VulkanCommandProcessor final : public CommandProcessor {
     uint64_t last_vs_hash = 0;
     uint64_t last_ps_hash = 0;
     uint64_t last_render_pass_key = 0;
+    // hakuX-Boosted: the placeholder load of the submission, for a GPU hang
+    // (boosted/notes/gpu-correct.md, "Banjo"): draws with any placeholder;
+    // with the interpreter's vertex shader and their vertices; with the pixel
+    // interpreter (the guest pixel shader's microcode run per pixel), how
+    // many of those have loops, the largest program, and the sum over them of
+    // program elements times scissor area in units of 1024 pixels, an upper
+    // bound of the per-pixel work.
+    uint32_t placeholder_draws = 0;
+    uint32_t interpreter_vs_draws = 0;
+    uint64_t interpreter_vs_vertices = 0;
+    uint32_t program_ps_draws = 0;
+    uint32_t program_ps_loop_draws = 0;
+    uint32_t program_ps_max_elements = 0;
+    uint64_t program_ps_cost = 0;
+    // Pixel interpreter draws dropped by vulkan_placeholder_program_ps_budget.
+    uint32_t program_ps_budget_skips = 0;
   };
   static constexpr size_t kSubmissionHistorySize = 16;
   std::array<SubmissionSummary, kSubmissionHistorySize> submission_history_{};
