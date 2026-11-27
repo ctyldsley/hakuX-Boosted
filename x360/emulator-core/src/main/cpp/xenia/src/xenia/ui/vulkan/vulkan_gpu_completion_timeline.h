@@ -23,6 +23,21 @@ namespace xe {
 namespace ui {
 namespace vulkan {
 
+// hakuX-Boosted: names the code that may wait on a submission's fence. With
+// log_gpu_waits, each thread that waited logs once a second which named site
+// waited, how often and for how long (fence waits and fence status checks,
+// which can block on Turnip/kgsl). Restores the outer name when it ends.
+class ScopedGpuWaitSite {
+ public:
+  explicit ScopedGpuWaitSite(const char* site);
+  ~ScopedGpuWaitSite();
+  ScopedGpuWaitSite(const ScopedGpuWaitSite&) = delete;
+  ScopedGpuWaitSite& operator=(const ScopedGpuWaitSite&) = delete;
+
+ private:
+  const char* previous_;
+};
+
 class VulkanGPUCompletionTimeline : public GPUCompletionTimeline {
  public:
   explicit VulkanGPUCompletionTimeline(VulkanDevice* const vulkan_device,

@@ -325,6 +325,7 @@ void VulkanCommandProcessor::PollCompletedSubmission() {
   if (device_lost_) {
     return;
   }
+  ui::vulkan::ScopedGpuWaitSite gpu_wait_site("poll");
   completion_timeline_.AwaitSubmissionAndUpdateCompleted(
       GetCompletedSubmission());
   PumpQueryResolves();
@@ -2960,6 +2961,7 @@ void VulkanCommandProcessor::FlushDeferredResolveReadbacks() {
   // each into guest RAM and arm its read watch, the copy itself not counting
   // as a guest read (as IssueCopy does for a copy it makes at once).
   const uint64_t wait_start_ns = FirstRunNowNs();
+  ui::vulkan::ScopedGpuWaitSite gpu_wait_site("deferred readback");
   const bool drained = AwaitAllQueueOperationsCompletion();
   if (!drained) {
     XELOGE("VulkanCommandProcessor: deferred resolve readback drain failed");
@@ -4515,6 +4517,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         texture_cache_->GetSubmissionToAwaitOnSamplerOverflow(
             samplers_overflowed_count);
     assert_true(sampler_overflow_await_submission <= GetCurrentSubmission());
+    ui::vulkan::ScopedGpuWaitSite gpu_wait_site("sampler overflow");
     CheckSubmissionCompletionAndDeviceLoss(sampler_overflow_await_submission);
   }
 
@@ -5954,6 +5957,7 @@ bool VulkanCommandProcessor::IssueCopy() {
           return true;
         }
         const uint64_t wait_start_ns = FirstRunNowNs();
+        ui::vulkan::ScopedGpuWaitSite gpu_wait_site("resolve readback");
         if (!AwaitAllQueueOperationsCompletion()) {
           XELOGE("VulkanCommandProcessor: uma resolve readback drain failed");
           PopDebugMarker();
@@ -6032,6 +6036,7 @@ bool VulkanCommandProcessor::IssueCopy() {
       if (stall_after_copy) {
         // host_buffer_ is HOST_COHERENT, so waiting makes the copy visible to
         // the guest CPU before a later read races it.
+        ui::vulkan::ScopedGpuWaitSite gpu_wait_site("copy stall");
         if (!AwaitAllQueueOperationsCompletion()) {
           XELOGE(
               "VulkanCommandProcessor: Failed to complete queue operations for "
@@ -6154,6 +6159,7 @@ bool VulkanCommandProcessor::IssueCopy() {
     if (downscale_buffer_size > resolve_downscale_buffer_size_) {
       // Clean up old buffer
       if (resolve_downscale_buffer_ != VK_NULL_HANDLE) {
+        ui::vulkan::ScopedGpuWaitSite gpu_wait_site("downscale buffer");
         if (!AwaitAllQueueOperationsCompletion()) {
           XELOGE(
               "VulkanCommandProcessor: Failed to wait for GPU before "
@@ -6411,6 +6417,7 @@ bool VulkanCommandProcessor::IssueCopy() {
     if (stall_after_copy) {
       // host_buffer_ is HOST_COHERENT, so waiting makes the copy visible to the
       // guest CPU before a later read races it.
+      ui::vulkan::ScopedGpuWaitSite gpu_wait_site("copy stall");
       if (!AwaitAllQueueOperationsCompletion()) {
         XELOGE(
             "VulkanCommandProcessor: Failed to complete queue operations for "
@@ -6609,6 +6616,7 @@ CommandProcessor::QueryOpenResult VulkanCommandProcessor::OpenZPDQuery(
         XELOGI("ZPD: Stall awaiting submission={} completed_before={}",
                wait_for, completed_submission);
       }
+      ui::vulkan::ScopedGpuWaitSite gpu_wait_site("zpd open");
       completion_timeline_.AwaitSubmissionAndUpdateCompleted(wait_for);
       PumpQueryResolves();
     }
@@ -6840,6 +6848,7 @@ bool VulkanCommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
   }
 
   if (wait_for_submission > GetCompletedSubmission()) {
+    ui::vulkan::ScopedGpuWaitSite gpu_wait_site("zpd retire");
     completion_timeline_.AwaitSubmissionAndUpdateCompleted(wait_for_submission);
   }
 
@@ -6862,6 +6871,7 @@ void VulkanCommandProcessor::InitializeTrace() {
   if (!shared_memory_submitted) {
     return;
   }
+  ui::vulkan::ScopedGpuWaitSite gpu_wait_site("trace download");
   AwaitAllQueueOperationsCompletion();
   if (shared_memory_submitted) {
     shared_memory_->InitializeTraceCompleteDownloads();
@@ -7161,6 +7171,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
       is_opening_frame
           ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight]
           : 0;
+  ui::vulkan::ScopedGpuWaitSite gpu_wait_site("begin submission");
   CheckSubmissionCompletionAndDeviceLoss(await_submission);
   const uint64_t completed_submission = GetCompletedSubmission();
   if (device_lost_ || completed_submission < await_submission) {
@@ -7712,6 +7723,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     closed_frame_submissions_[(frame_current_++) % kMaxFramesInFlight] =
         GetCurrentSubmission() - 1;
 
+    ui::vulkan::ScopedGpuWaitSite gpu_wait_site("cache clear");
     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
       cache_clear_requested_ = false;
 

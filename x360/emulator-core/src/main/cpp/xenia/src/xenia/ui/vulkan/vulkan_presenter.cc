@@ -934,6 +934,7 @@ bool VulkanPresenter::RefreshGuestOutputImpl(
   if (image_instance.image &&
       (image_instance.image->extent().width != frontbuffer_width ||
        image_instance.image->extent().height != frontbuffer_height)) {
+    ScopedGpuWaitSite gpu_wait_site("refresher resize");
     guest_output_image_refresher_completion_timeline_
         .AwaitSubmissionAndUpdateCompleted(
             image_instance.last_refresher_submission);
@@ -1479,6 +1480,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
   const uint64_t current_paint_submission_index =
       paint_context_.completion_timeline.GetUpcomingSubmission();
   uint64_t paint_submission_count = uint64_t(paint_context_.submissions.size());
+  ScopedGpuWaitSite gpu_wait_site("paint throttle");
   paint_context_.completion_timeline
       .AwaitMaxSubmissionsPendingAndUpdateCompleted(paint_submission_count);
   const PaintContext::Submission& paint_submission =
@@ -1655,6 +1657,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
           }
           // Await the completion of the usage of the old guest output image and
           // its descriptors.
+          ScopedGpuWaitSite gpu_wait_site("paint image swap");
           paint_context_.completion_timeline.AwaitSubmissionAndUpdateCompleted(
               paint_context_
                   .guest_output_image_paint_refs
@@ -1717,6 +1720,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
             // Need to replace immediately as a new image with the requested
             // size is needed.
             if (intermediate_image_ptr_ref) {
+              ScopedGpuWaitSite gpu_wait_site("paint intermediate");
               paint_context_.completion_timeline
                   .AwaitSubmissionAndUpdateCompleted(
                       paint_context_
@@ -1832,6 +1836,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(
         if (swapchain_effect_pipeline.swapchain_pipeline != VK_NULL_HANDLE &&
             swapchain_effect_pipeline.swapchain_format !=
                 paint_context_.swapchain_render_pass_format) {
+          ScopedGpuWaitSite gpu_wait_site("paint pipeline");
           paint_context_.completion_timeline.AwaitSubmissionAndUpdateCompleted(
               paint_context_.guest_output_image_paint_last_submission);
           util::DestroyAndNullHandle(

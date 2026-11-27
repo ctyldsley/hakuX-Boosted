@@ -10,14 +10,105 @@
 #include "xenia/ui/vulkan/vulkan_gpu_completion_timeline.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstring>
 #include <iterator>
+#include <string>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+
+// hakuX-Boosted: see ScopedGpuWaitSite.
+DEFINE_bool(log_gpu_waits, false,
+            "Log once a second, per thread, which code waited on the host GPU "
+            "(fence waits and fence status checks), how often and for how "
+            "long.",
+            "GPU");
 
 namespace xe {
 namespace ui {
 namespace vulkan {
+
+namespace {
+
+thread_local const char* gpu_wait_site = nullptr;
+
+struct GpuWaitStats {
+  static constexpr size_t kMaxSites = 24;
+  struct Site {
+    const char* name;
+    uint64_t waits;
+    uint64_t ns;
+  };
+  Site sites[kMaxSites] = {};
+  size_t site_count = 0;
+  uint64_t last_report_ns = 0;
+};
+
+thread_local GpuWaitStats gpu_wait_stats;
+
+uint64_t GpuWaitNowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+
+void NoteGpuWait(const char* kind, uint64_t begin_ns) {
+  const uint64_t now = GpuWaitNowNs();
+  GpuWaitStats& s = gpu_wait_stats;
+  // The site name is a string literal, so the pointer identifies it; the kind
+  // (wait or status check) is folded in by keeping two entries per site.
+  const char* site = gpu_wait_site ? gpu_wait_site : "untagged";
+  size_t i = 0;
+  for (; i < s.site_count; ++i) {
+    if (s.sites[i].name == site &&
+        (std::strcmp(kind, "wait") == 0) == (s.sites[i].waits >> 63 == 0)) {
+      break;
+    }
+  }
+  if (i == s.site_count) {
+    if (s.site_count == GpuWaitStats::kMaxSites) {
+      i = GpuWaitStats::kMaxSites - 1;
+    } else {
+      s.sites[i] = {site, std::strcmp(kind, "wait") == 0 ? 0 : (1ull << 63),
+                    0};
+      ++s.site_count;
+    }
+  }
+  ++s.sites[i].waits;
+  s.sites[i].ns += now - begin_ns;
+  if (!s.last_report_ns) {
+    s.last_report_ns = now;
+    return;
+  }
+  if (now - s.last_report_ns < 1000000000ull) {
+    return;
+  }
+  std::string line;
+  for (size_t j = 0; j < s.site_count; ++j) {
+    const GpuWaitStats::Site& site_stats = s.sites[j];
+    const uint64_t count = site_stats.waits & ~(1ull << 63);
+    if (!count) {
+      continue;
+    }
+    line += fmt::format(" | {}{} {} in {:.1f} ms", site_stats.name,
+                        (site_stats.waits >> 63) ? " (status)" : "", count,
+                        site_stats.ns / 1e6);
+  }
+  XELOGI("GpuWaits over {:.0f} ms:{}", (now - s.last_report_ns) / 1e6, line);
+  s = GpuWaitStats();
+  s.last_report_ns = now;
+}
+
+}  // namespace
+
+ScopedGpuWaitSite::ScopedGpuWaitSite(const char* site)
+    : previous_(gpu_wait_site) {
+  gpu_wait_site = site;
+}
+
+ScopedGpuWaitSite::~ScopedGpuWaitSite() { gpu_wait_site = previous_; }
 
 VulkanGPUCompletionTimeline::~VulkanGPUCompletionTimeline() {
 #ifndef NDEBUG
@@ -138,8 +229,12 @@ VkResult VulkanGPUCompletionTimeline::AcquireFenceAndSubmit(
 
 void VulkanGPUCompletionTimeline::UpdateCompletedSubmission() {
   while (!pending_submission_fences_.empty()) {
+    const uint64_t status_begin_ns = cvars::log_gpu_waits ? GpuWaitNowNs() : 0;
     const VkResult fence_status = vulkan_device_->functions().vkGetFenceStatus(
         vulkan_device_->device(), pending_submission_fences_.front().second);
+    if (status_begin_ns) {
+      NoteGpuWait("status", status_begin_ns);
+    }
     if (fence_status != VK_SUCCESS) {
       // Not ready, or an error.
       if (fence_status == VK_ERROR_DEVICE_LOST) {
@@ -177,10 +272,14 @@ void VulkanGPUCompletionTimeline::AwaitSubmissionImpl(
     submission_end_iterator = std::next(submission_end_iterator);
   }
   if (submission_end_iterator != pending_submission_fences_.cbegin()) {
+    const uint64_t wait_begin_ns = cvars::log_gpu_waits ? GpuWaitNowNs() : 0;
     const VkResult fence_wait_result =
         vulkan_device_->functions().vkWaitForFences(
             vulkan_device_->device(), 1,
             &std::prev(submission_end_iterator)->second, VK_TRUE, UINT64_MAX);
+    if (wait_begin_ns) {
+      NoteGpuWait("wait", wait_begin_ns);
+    }
     if (fence_wait_result != VK_SUCCESS) {
       XELOGE(
           "VulkanGPUCompletionTimeline[{}]: vkWaitForFences -> {} (awaited "
