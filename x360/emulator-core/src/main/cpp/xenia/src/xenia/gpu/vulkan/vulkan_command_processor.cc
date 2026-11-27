@@ -1655,6 +1655,7 @@ void VulkanCommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
 
   ResetResolveReadWatch();
+  deferred_resolve_readbacks_.clear();
 
   ShutdownZPDQueryResources();
   zpd_host_query_pool_.reset();
@@ -2942,7 +2943,43 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   EndSubmission(true);
 }
 
+void VulkanCommandProcessor::NoteResolveReadbackWait(uint64_t start_ns,
+                                                     uint32_t copies) {
+  FirstRunSplit& split = first_run_split_;
+  ++split.readback_waits;
+  split.readback_wait_ns += FirstRunNowNs() - start_ns;
+  split.readback_copies += copies;
+}
+
+void VulkanCommandProcessor::FlushDeferredResolveReadbacks() {
+  if (deferred_resolve_readbacks_.empty()) {
+    return;
+  }
+  // hakuX-Boosted: IssueCopy recorded each resolve and its barrier to host
+  // reads; wait once for all of them (this ends the submission), then copy
+  // each into guest RAM and arm its read watch, the copy itself not counting
+  // as a guest read (as IssueCopy does for a copy it makes at once).
+  const uint64_t wait_start_ns = FirstRunNowNs();
+  const bool drained = AwaitAllQueueOperationsCompletion();
+  if (!drained) {
+    XELOGE("VulkanCommandProcessor: deferred resolve readback drain failed");
+  }
+  for (const DeferredResolveReadback& deferred : deferred_resolve_readbacks_) {
+    if (drained) {
+      shared_memory_->ReadHostMapped(
+          deferred.address, deferred.length,
+          memory_->TranslatePhysical(deferred.address));
+    }
+    TryArmResolveReadWatch(deferred.key, deferred.address, deferred.length);
+  }
+  NoteResolveReadbackWait(wait_start_ns,
+                          uint32_t(deferred_resolve_readbacks_.size()));
+  deferred_resolve_readbacks_.clear();
+}
+
 void VulkanCommandProcessor::OnPrimaryBufferEnd() {
+  // hakuX-Boosted: before the read pointer goes back to the guest.
+  FlushDeferredResolveReadbacks();
   // Pump any completed resolves now since the guest is likely about to poll.
   PumpQueryResolves();
   PumpPendingRetire();
@@ -3906,7 +3943,7 @@ void VulkanCommandProcessor::FirstRunSplitLogIfDue(uint64_t now_ns) {
       "vertex shader {} in {:.1f} ms ({} vertices); skipped {} in {:.1f} ms; "
       "other {} in {:.1f} ms; of the draws' time, choosing or making the "
       "pipeline {:.1f} ms, constants and descriptors {:.1f} ms; swaps {} in "
-      "{:.1f} ms",
+      "{:.1f} ms; resolve readback waits {} in {:.1f} ms for {} resolve(s)",
       ms(window_ns), split.swaps, ms(split.longest_frame_ns),
       ms(thread_cpu_ns - split.thread_cpu_start_ns),
       split.draws[kFirstRunDrawReal], ms(split.draw_ns[kFirstRunDrawReal]),
@@ -3923,7 +3960,8 @@ void VulkanCommandProcessor::FirstRunSplitLogIfDue(uint64_t now_ns) {
       split.draws[kFirstRunDrawSkipped],
       ms(split.draw_ns[kFirstRunDrawSkipped]), split.draws[kFirstRunDrawOther],
       ms(split.draw_ns[kFirstRunDrawOther]), ms(split.configure_pipeline_ns),
-      ms(split.bindings_ns), split.swaps, ms(split.swap_ns));
+      ms(split.bindings_ns), split.swaps, ms(split.swap_ns),
+      split.readback_waits, ms(split.readback_wait_ns), split.readback_copies);
   uint64_t last_swap_ns = split.last_swap_ns;
   split = FirstRunSplit();
   split.window_start_ns = now_ns;
@@ -5893,11 +5931,35 @@ bool VulkanCommandProcessor::IssueCopy() {
             VK_ACCESS_HOST_READ_BIT, VK_QUEUE_FAMILY_IGNORED,
             VK_QUEUE_FAMILY_IGNORED, false);
         SubmitBarriers(true);
+        if (uma_sync && cvars::readback_resolve_defer) {
+          // hakuX-Boosted: the wait and the copy happen at the next point the
+          // guest can see GPU progress (FlushDeferredResolveReadbacks), with
+          // every other resolve owed by then: one wait, not one per resolve.
+          // A later resolve of the same destination before then replaces
+          // nothing: the copy reads the mapping after all of them have run.
+          bool already_deferred = false;
+          for (const DeferredResolveReadback& deferred :
+               deferred_resolve_readbacks_) {
+            if (deferred.key == resolve_key) {
+              already_deferred = true;
+              break;
+            }
+          }
+          if (!already_deferred) {
+            deferred_resolve_readbacks_.push_back(
+                {resolve_key, written_address, written_length});
+          }
+          last_write = resolve_submission;
+          PopDebugMarker();
+          return true;
+        }
+        const uint64_t wait_start_ns = FirstRunNowNs();
         if (!AwaitAllQueueOperationsCompletion()) {
           XELOGE("VulkanCommandProcessor: uma resolve readback drain failed");
           PopDebugMarker();
           return true;
         }
+        NoteResolveReadbackWait(wait_start_ns, 1);
         do_read = true;
       } else if (uma_sync) {
         // hakuX-Boosted: not read by the CPU since its first resolve.

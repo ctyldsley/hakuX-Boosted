@@ -384,6 +384,10 @@ class CommandProcessor {
   virtual uint64_t GetCompletedSubmission() const { return 0; }
 
   virtual void OnPrimaryBufferEnd() {}
+  // hakuX-Boosted: completes resolve readbacks a backend deferred, before
+  // anything the guest can see (fences, interrupts, memory writes, the swap,
+  // the read pointer). A no-op unless the backend defers them.
+  virtual void FlushDeferredResolveReadbacks() {}
 
   // TODO(boma): Add tracking for VIZ & EXT queries.
   enum class QueryOpenResult {

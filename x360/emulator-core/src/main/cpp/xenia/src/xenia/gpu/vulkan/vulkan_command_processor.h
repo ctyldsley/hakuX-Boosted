@@ -355,6 +355,7 @@ class VulkanCommandProcessor final : public CommandProcessor {
                  uint32_t frontbuffer_height) override;
 
   void OnPrimaryBufferEnd() override;
+  void FlushDeferredResolveReadbacks() override;
 
   Shader* LoadShader(xenos::ShaderType shader_type,
                      const uint32_t* host_address,
@@ -1394,6 +1395,11 @@ class VulkanCommandProcessor final : public CommandProcessor {
     uint64_t swap_ns = 0;
     uint64_t last_swap_ns = 0;
     uint64_t longest_frame_ns = 0;
+    // Resolve readbacks: waits for the GPU (each one ends the submission),
+    // the time in them, and the resolves they copied into guest RAM.
+    uint64_t readback_waits = 0;
+    uint64_t readback_wait_ns = 0;
+    uint64_t readback_copies = 0;
   };
   FirstRunSplit first_run_split_;
   static uint64_t FirstRunNowNs();
@@ -1421,6 +1427,17 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // readback_resolve=uma: last submission that resolved each destination key,
   // so the direct host read only happens once that submission has retired.
   std::unordered_map<uint64_t, uint64_t> uma_readback_last_write_;
+  // hakuX-Boosted: resolves recorded with readback_resolve_defer whose copy
+  // into guest RAM waits for FlushDeferredResolveReadbacks.
+  struct DeferredResolveReadback {
+    uint64_t key;
+    uint32_t address;
+    uint32_t length;
+  };
+  std::vector<DeferredResolveReadback> deferred_resolve_readbacks_;
+  // Times the GPU was waited for a resolve readback and the time spent, from
+  // IssueCopy or FlushDeferredResolveReadbacks (for the first run split).
+  void NoteResolveReadbackWait(uint64_t start_ns, uint32_t copies);
   // Per-backend trampoline from the memory read callback into the shared
   // MarkResolvePagesRead.
   static void ResolveReadCallbackThunk(void* context, uint32_t physical_address,

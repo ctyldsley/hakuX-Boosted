@@ -316,3 +316,29 @@ on), cold, `COOL=35`:
 `tools/run-one.sh banjo-fix device-logs/run148/cfg/pl-off.toml 4D5307ED "/storage/emulated/0/Roms/Banjo-Kazooie Nuts & Bolts.iso" 90 1`
 Pass: alive at 90 s with no `DEVICE_LOST`; `xe.log` shows "allowance of pixel
 interpreter work was spent" lines; fps near `banjo-ps2`'s.
+
+## Resolve readback waits (Gears fight start, 2026-11-27)
+
+On the Y700, Gears' warm fight benchmark froze for 1.1 s as the revive prompt
+closed and the fight began (with 226 and 297 ms frames either side). The GPU
+command thread was on a core for 128 ms of that second; 723 ms went to the
+draws counted as "other", which include `IssueCopy`. With
+`readback_resolve_sync = false` the same moment's longest frame was 87 to
+143 ms, so the stall was the readback drains above: one full GPU wait per
+resolve of a CPU-read destination, at a moment the GPU had a large backlog
+(23 million vertices that second, many placeholders).
+
+`readback_resolve_defer` (default on) keeps the right answer and drops the
+per-resolve wait: `IssueCopy` records the resolve and its barrier to host
+reads and returns; `FlushDeferredResolveReadbacks` waits once and copies every
+owed resolve, then arms their read watches, before the next packet the guest
+can see GPU progress through (INTERRUPT, XE_SWAP, WAIT_REG_MEM, REG_TO_MEM,
+MEM_WRITE, COND_WRITE, EVENT_WRITE_SHD, EVENT_WRITE_EXT, EVENT_WRITE_ZPD), a
+scratch register write-back, or the end of a primary buffer (before the read
+pointer is written back). The guest cannot tell a resolve has run before one
+of those, so it never sees the old bytes. Waiting at the guest's read itself
+was rejected: the read callback runs in the fault handler under the global
+memory lock, and waiting there on the GPU thread can deadlock.
+
+The first run split line now ends with "resolve readback waits N in X ms for
+M resolve(s)". To measure: the fight benchmark with and without the setting.

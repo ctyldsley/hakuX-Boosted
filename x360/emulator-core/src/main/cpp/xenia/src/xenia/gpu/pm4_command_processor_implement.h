@@ -510,6 +510,24 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
       }
     }
 
+    // hakuX-Boosted: resolves whose guest RAM copy was put off land before
+    // any packet that lets the guest see GPU progress.
+    switch (opcode) {
+      case PM4_INTERRUPT:
+      case PM4_XE_SWAP:
+      case PM4_WAIT_REG_MEM:
+      case PM4_REG_TO_MEM:
+      case PM4_MEM_WRITE:
+      case PM4_COND_WRITE:
+      case PM4_EVENT_WRITE_SHD:
+      case PM4_EVENT_WRITE_EXT:
+      case PM4_EVENT_WRITE_ZPD:
+        COMMAND_PROCESSOR::FlushDeferredResolveReadbacks();
+        break;
+      default:
+        break;
+    }
+
     bool result = false;
     switch (opcode) {
       case PM4_ME_INIT:

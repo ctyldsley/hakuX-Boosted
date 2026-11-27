@@ -272,6 +272,15 @@ DEFINE_bool(readback_resolve_sync, true,
             "the same frame, instead of copying asynchronously.",
             "GPU");
 
+// hakuX-Boosted: see VulkanCommandProcessor::FlushDeferredResolveReadbacks.
+DEFINE_bool(readback_resolve_defer, true,
+            "With readback_resolve = uma and readback_resolve_sync, wait for "
+            "the GPU and copy a resolve into guest RAM at the next point the "
+            "guest can see GPU progress (a fence, interrupt, memory write, "
+            "swap, or the end of a command batch) instead of at the resolve, "
+            "so a burst of resolves costs one wait.",
+            "GPU");
+
 DEFINE_bool(gpu_3d_to_2d_texture, true,
             "Handle shaders that sample 3D textures as 2D by creating a 2D "
             "texture from slice 0 of the guest memory.",
